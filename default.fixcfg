@@ -1,0 +1,22 @@
+# STL Batch Fix configuration
+# Source folder containing STL/OBJ files
+INPUT_FOLDER = /mnt/sda2/STL/Fixing/
+
+# Appended to output filename stem (blank = none)
+OUTPUT_SUFFIX = 
+
+# Vertex merge radius for T-junction fix
+MERGE_DIST = 0.01
+
+# Parallel worker processes
+WORKERS = 1
+
+# Per-file timeout before killing Blender
+TIMEOUT = 1200
+
+# Decimate threshold (0 = disabled)
+MAX_FACES = 900000
+
+# Walk subdirectories
+RECURSIVE = True
+

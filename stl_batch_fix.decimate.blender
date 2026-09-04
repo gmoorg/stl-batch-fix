@@ -1,0 +1,98 @@
+# This script is executed by Blender in --background mode, launched by stl_batch_fix.py.
+# It is NOT meant to be run directly — it requires variables injected via str.format()
+# before it is written to a temp file and passed to Blender's --python argument.
+#
+#   src       — input file path (str)
+#   dst       — output file path (str)
+#   max_faces — target face count after decimation (int)
+#
+# Prints BLENDER_DECIMATE_OK on success, BLENDER_DECIMATE_EMPTY if the mesh has no faces.
+# Exit code 0 on success, 1 on failure.
+
+import bpy, struct, sys, os
+
+src       = {src!r}
+dst       = {dst!r}
+max_faces = {max_faces}
+
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+
+# ---------------------------------------------------------------------------
+# Load the STL (binary only — large ASCII STLs are rare; caller converts first)
+# ---------------------------------------------------------------------------
+bpy.ops.import_mesh.stl(filepath=src)
+imported = bpy.context.selected_objects
+if not imported:
+    print("BLENDER_DECIMATE_EMPTY: no objects imported")
+    sys.exit(1)
+
+# Join everything into one object.
+bpy.context.view_layer.objects.active = imported[0]
+if len(imported) > 1:
+    bpy.ops.object.join()
+
+obj = bpy.context.active_object
+n_faces = len(obj.data.polygons)
+print("Decimate input faces: " + str(n_faces))
+
+if n_faces == 0:
+    print("BLENDER_DECIMATE_EMPTY: mesh has no faces")
+    sys.exit(1)
+
+if n_faces > max_faces:
+    ratio = max_faces / n_faces
+
+    # For aggressive reductions (ratio < 0.5), stack multiple COLLAPSE passes
+    # each at ~0.5 so no single pass removes >50% of faces at once.
+    # This prevents the degenerate flat-fan triangles COLLAPSE produces at low ratios.
+    import math as _math
+    if ratio < 0.5:
+        passes = max(2, _math.ceil(_math.log(ratio) / _math.log(0.5)))
+        pass_ratio = ratio ** (1.0 / passes)
+    else:
+        passes = 1
+        pass_ratio = ratio
+
+    for _p in range(passes):
+        mod = obj.modifiers.new(name="Dec" + str(_p), type='DECIMATE')
+        mod.decimate_type = 'COLLAPSE'
+        mod.ratio = pass_ratio
+        mod.use_collapse_triangulate = False
+        mod.use_symmetry = False
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    obj_eval  = obj.evaluated_get(depsgraph)
+    mesh_out  = bpy.data.meshes.new_from_object(obj_eval)
+    n_out     = len(mesh_out.polygons)
+    print("Decimate passes: " + str(passes) + "  pass_ratio: " + str(round(pass_ratio, 4)))
+    print("Decimate output faces: " + str(n_out))
+
+    # Write result as binary STL.
+    import struct as _st
+    buf = bytearray(80 + 4 + n_out * 50)
+    hdr = b'Binary STL written by stl_batch_fix decimate'
+    buf[:len(hdr)] = hdr
+    _st.pack_into('<I', buf, 80, n_out)
+    off = 84
+    for poly in mesh_out.polygons:
+        n = poly.normal
+        _st.pack_into('<3f', buf, off, n.x, n.y, n.z); off += 12
+        for vi in poly.vertices:
+            v = mesh_out.vertices[vi].co
+            _st.pack_into('<3f', buf, off, v.x, v.y, v.z); off += 12
+        off += 2
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    with open(dst, 'wb') as f:
+        f.write(buf)
+    bpy.data.meshes.remove(mesh_out)
+else:
+    # Already within limit — just copy via Blender's STL exporter.
+    _dst_partial = dst + ".partial"
+    bpy.ops.export_mesh.stl(filepath=_dst_partial, use_selection=False, use_mesh_modifiers=True)
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    os.replace(_dst_partial, dst)
+    print("Decimate skipped — already within limit (" + str(n_faces) + " faces)")
+
+print("BLENDER_DECIMATE_OK")
+sys.exit(0)

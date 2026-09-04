@@ -1,0 +1,593 @@
+# This script is executed by Blender in --background mode, launched by stl_batch_fix.py.
+# It is NOT meant to be run directly — it requires variables injected via str.format()
+# before it is written to a temp file and passed to Blender's --python argument:
+#
+#   src        — input file path (str)
+#   dst        — output file path (str)
+#   merge_dist — vertex merge distance in mm (float)
+#   is_ascii   — True if source is ASCII STL (bool literal)
+#   is_obj     — True if source is OBJ (bool literal)
+#
+# Exit codes:
+#   0  — success (BLENDER_OK or BLENDER_OPEN printed to stdout)
+#   1  — empty / unreadable mesh (BLENDER_EMPTY)
+#   2  — non-manifold edges remain after repair (BLENDER_UNREPAIRED)
+
+import bpy, bmesh, struct, sys, os
+
+# These placeholders are substituted by stl_batch_fix.py at runtime via
+# BLENDER_SCRIPT.format(...) before the script is written to a temp file
+# and passed to Blender's --python argument.  Do not replace them with
+# hard-coded values — this file is a template, not a runnable script.
+src        = {src!r}
+dst        = {dst!r}
+merge_dist = {merge_dist}
+is_ascii   = {is_ascii}
+is_obj     = {is_obj}
+
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+
+import mathutils
+
+
+def load_binary_stl(path, bm):
+    import math as _math
+    normal_layer = bm.faces.layers.float_vector.get("orig_normal") or \
+                   bm.faces.layers.float_vector.new("orig_normal")
+    with open(path, 'rb') as f:
+        f.read(80)
+        n_tris = struct.unpack('<I', f.read(4))[0]
+        raw    = f.read(n_tris * 50)
+    rejected = 0
+    for i in range(n_tris):
+        base = i * 50
+        if base + 12 > len(raw):
+            break
+        floats = struct.unpack_from('<12f', raw, base)
+        if not all(_math.isfinite(x) for x in floats):
+            rejected += 1
+            continue
+        nx, ny, nz = floats[0], floats[1], floats[2]
+        coords = []
+        for j in range(3):
+            coords.append(bm.verts.new((floats[3 + j*3], floats[4 + j*3], floats[5 + j*3])))
+        try:
+            face = bm.faces.new(coords)
+            n = mathutils.Vector((nx, ny, nz))
+            if n.length_squared > 0.01:
+                face[normal_layer] = n.normalized()
+        except Exception:
+            rejected += 1
+    if rejected:
+        print("STL load: rejected " + str(rejected) + " invalid triangles")
+    return n_tris, normal_layer
+
+
+def write_stl_from_bm(path, bm):
+    import struct as _st
+    n = len(bm.faces)
+    buf = bytearray(80 + 4 + n * 50)
+    hdr = b'Binary STL written by stl_batch_fix'
+    buf[:len(hdr)] = hdr
+    _st.pack_into('<I', buf, 80, n)
+    off = 84
+    for _face in bm.faces:
+        _n = _face.normal
+        _st.pack_into('<3f', buf, off, _n.x, _n.y, _n.z); off += 12
+        for _v in _face.verts:
+            _st.pack_into('<3f', buf, off, _v.co.x, _v.co.y, _v.co.z); off += 12
+        off += 2  # attribute bytes stay zero
+    with open(path, 'wb') as _f:
+        _f.write(buf)
+
+
+def split_t_junctions(bm):
+    # Split T-junction NM edges by inserting the opposite vertex onto the edge.
+    # Returns the number of edges split.
+    #
+    # Each split (subdivide_edges + pointmerge) invalidates BMesh element
+    # references held in any snapshot taken before that operation.  To avoid
+    # ReferenceError we process ONE split per outer iteration then re-scan.
+    # The outer loop runs until no T-junction NM edges remain or MAX_ITER.
+    MAX_ITER = 200   # one per split; most meshes have far fewer than this
+    total_splits = 0
+
+    for _outer in range(MAX_ITER):
+        bm.edges.ensure_lookup_table()
+        bm.verts.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+
+        found = False
+        for nm_e in [e for e in bm.edges if len(e.link_faces) > 2]:
+            if not nm_e.is_valid or len(nm_e.link_faces) <= 2:
+                continue
+
+            va, vb = nm_e.verts[0], nm_e.verts[1]
+            a  = va.co.copy()
+            b  = vb.co.copy()
+            ab = b - a
+            ab_len2 = ab.dot(ab)
+            if ab_len2 < 1e-20:
+                continue
+
+            # Find a face whose opposite vertex projects onto this edge
+            split_v   = None
+            split_co  = None   # plain tuple — safe after pointmerge
+            for face in nm_e.link_faces:
+                if not face.is_valid:
+                    continue
+                opp = None
+                for v in face.verts:
+                    if v.index != va.index and v.index != vb.index:
+                        opp = v
+                        break
+                if opp is None:
+                    continue
+                t = (opp.co - a).dot(ab) / ab_len2
+                if t <= 1e-6 or t >= 1.0 - 1e-6:
+                    continue
+                proj = a + t * ab
+                if (opp.co - proj).length_squared > 1e-6:
+                    continue
+                # Capture position as plain floats before any mutation
+                split_co = (opp.co.x, opp.co.y, opp.co.z)
+                split_v  = opp
+                break
+
+            if split_v is None:
+                continue
+
+            result = bmesh.ops.subdivide_edges(bm, edges=[nm_e], cuts=1,
+                                               use_grid_fill=False)
+            new_verts = [v for v in result.get('geom_inner', [])
+                         if isinstance(v, bmesh.types.BMVert)]
+            if not new_verts:
+                continue
+            new_v = new_verts[0]
+            new_v.co.x, new_v.co.y, new_v.co.z = split_co
+
+            # split_v may have been renumbered by subdivide; check validity
+            if split_v.is_valid:
+                bmesh.ops.pointmerge(bm, verts=[split_v, new_v], merge_co=new_v.co)
+
+            total_splits += 1
+            found = True
+            break   # re-scan from scratch — all snapshots are now stale
+
+        if not found:
+            break
+
+    return total_splits
+
+
+def run_repair_loop(mesh, obj, label):
+    prev_nm = prev_open = None
+    stall_count = 0
+    wide_used = False
+
+    # Load mesh once; mutate in place across all passes (no to_mesh/from_mesh per pass).
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+
+    for repair_pass in range(12):
+        # --- 4a: wire edge deletion (directly in BMesh — no Edit Mode needed) ---
+        wire_edges = [e for e in bm.edges if len(e.link_faces) == 0]
+        if wire_edges:
+            bmesh.ops.delete(bm, geom=wire_edges, context='EDGES')
+
+        # --- 4b: NM face deletion ---
+        use_wide = (stall_count == 1 and not wide_used)
+        nm_faces = set()
+        for e in bm.edges:
+            if len(e.link_faces) > 2:
+                for f in e.link_faces:
+                    nm_faces.add(f)
+        if nm_faces and use_wide:
+            extra = set()
+            for f in list(nm_faces):
+                for e in f.edges:
+                    for linked_f in e.link_faces:
+                        if linked_f not in nm_faces:
+                            extra.add(linked_f)
+            nm_faces.update(extra)
+            print(label + " pass " + str(repair_pass+1) + ": wider NM deletion (" +
+                  str(len(nm_faces)) + " faces)")
+            wide_used = True
+        if nm_faces:
+            bmesh.ops.delete(bm, geom=list(nm_faces), context='FACES')
+
+        # --- 4c: fin vertex removal ---
+        fin_verts = [v for v in bm.verts
+                     if any(e.is_boundary for e in v.link_edges) and len(v.link_faces) == 1]
+        if fin_verts:
+            bmesh.ops.delete(bm, geom=fin_verts, context='VERTS')
+            print(label + " pass " + str(repair_pass+1) + ": removed " + str(len(fin_verts)) + " fin verts")
+
+        # --- 4d: hole fill ---
+        boundary_edges = [e for e in bm.edges if e.is_boundary]
+        if boundary_edges:
+            result = bmesh.ops.holes_fill(bm, edges=boundary_edges, sides=0)
+            new_faces = result.get('faces', [])
+            if new_faces:
+                # Fix winding on new patch faces before triangulating —
+                # holes_fill doesn't guarantee consistent orientation with neighbors.
+                bmesh.ops.recalc_face_normals(bm, faces=new_faces)
+                tri_result = bmesh.ops.triangulate(bm, faces=new_faces,
+                                                   quad_method='BEAUTY', ngon_method='BEAUTY')
+                new_faces = tri_result.get('faces', [])
+            if repair_pass == 0 and new_faces:
+                slivers = [f for f in new_faces if f.is_valid and f.calc_area() < 1e-6]
+                if slivers:
+                    bmesh.ops.delete(bm, geom=slivers, context='FACES')
+
+            seen_junctions = set()
+            for _ in range(100):
+                bm.verts.ensure_lookup_table()
+                junction = None
+                for vert in bm.verts:
+                    if vert.index in seen_junctions:
+                        continue
+                    if sum(1 for e in vert.link_edges if e.is_boundary) > 2:
+                        junction = vert
+                        break
+                if junction is None:
+                    break
+                seen_junctions.add(junction.index)
+                bad = [f for f in junction.link_faces
+                       if sum(1 for e in f.edges if e.is_boundary) >= 2]
+                if not bad:
+                    bad = list(junction.link_faces)
+                if bad:
+                    bmesh.ops.delete(bm, geom=bad, context='FACES')
+
+        # --- 4e: convergence check ---
+        nm_now   = sum(1 for e in bm.edges if not e.is_manifold and not e.is_boundary)
+        open_now = sum(1 for e in bm.edges if e.is_boundary)
+
+        print(label + " pass " + str(repair_pass+1) + ": nm=" + str(nm_now) +
+              " boundary=" + str(open_now))
+
+        converged = (nm_now == 0 and open_now == 0)
+        stalled = False
+        if prev_nm is not None and (nm_now + open_now) >= (prev_nm + prev_open):
+            stall_count += 1
+            limit = 4 if wide_used else 2
+            if stall_count >= limit:
+                print(label + " pass " + str(repair_pass+1) + ": no improvement, stopping early")
+                stalled = True
+        else:
+            stall_count = 0
+        prev_nm, prev_open = nm_now, open_now
+
+        if converged or stalled:
+            # Final cleanup: remove any NM faces left by the last holes_fill pass.
+            if not converged:
+                _final_nm_faces = set()
+                for _e in bm.edges:
+                    if len(_e.link_faces) > 2:
+                        for _f in _e.link_faces:
+                            _final_nm_faces.add(_f)
+                if _final_nm_faces:
+                    bmesh.ops.delete(bm, geom=list(_final_nm_faces), context='FACES')
+            break
+
+    # Sync back to mesh so the decimation step (which re-imports via mesh) sees the result.
+    bm.to_mesh(mesh)
+
+    # Return the final BMesh (caller must free it).
+    return nm_now, open_now, bm
+
+
+def normal_vote(bm, normal_layer):
+    bm.faces.ensure_lookup_table()
+    bm.normal_update()
+    original_faces = []
+    for face in bm.faces:
+        orig_n = mathutils.Vector(face[normal_layer])
+        if orig_n.length_squared > 0.01:
+            original_faces.append((face, orig_n.normalized()))
+    if not original_faces:
+        print("Normal vote — skipped (no stored normals)")
+        return
+    orig_normal_by_index = {{face.index: orig_n for face, orig_n in original_faces}}
+    visited = set()
+    to_flip = []
+    flipped_components = 0
+    total_agree = total_disagree = 0
+    for seed_face in bm.faces:
+        if seed_face.index in visited:
+            continue
+        component = []
+        stack = [seed_face]
+        while stack:
+            f = stack.pop()
+            if f.index in visited:
+                continue
+            visited.add(f.index)
+            component.append(f)
+            for edge in f.edges:
+                for linked_face in edge.link_faces:
+                    if linked_face.index not in visited:
+                        stack.append(linked_face)
+        agree = disagree = 0
+        for f in component:
+            orig_n = orig_normal_by_index.get(f.index)
+            if orig_n is not None:
+                if f.normal.dot(orig_n) >= 0:
+                    agree += 1
+                else:
+                    disagree += 1
+        total_agree += agree
+        total_disagree += disagree
+        if disagree > agree:
+            to_flip.extend(component)
+            flipped_components += 1
+    print("Normal vote — agree: " + str(total_agree) + ", disagree: " + str(total_disagree))
+    if to_flip:
+        print("Flipping " + str(len(to_flip)) + " faces across " + str(flipped_components) + " component(s)")
+        bmesh.ops.reverse_faces(bm, faces=to_flip)
+        bm.normal_update()
+
+
+def make_mesh_obj(bm, name):
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    return mesh, obj
+
+
+# ---------------------------------------------------------------------------
+# Step 1 — load STL or OBJ
+# ---------------------------------------------------------------------------
+bm = bmesh.new()
+normal_layer = bm.faces.layers.float_vector.new("orig_normal")
+
+if is_obj:
+    bpy.ops.wm.obj_import(filepath=src)
+    imported = bpy.context.selected_objects
+    if not imported:
+        print("BLENDER_EMPTY: Blender imported 0 objects from OBJ")
+        sys.exit(1)
+    # Join all objects into one mesh
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.context.view_layer.objects.active = imported[0]
+    if len(imported) > 1:
+        bpy.ops.object.join()
+    obj0 = bpy.context.active_object
+    bm.from_mesh(obj0.data)
+    normal_layer = bm.faces.layers.float_vector.get("orig_normal") or \
+                   bm.faces.layers.float_vector.new("orig_normal")
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete()
+    for face in bm.faces:
+        n = face.normal
+        if n.length_squared > 0.01:
+            face[normal_layer] = n.normalized()
+    print("OBJ faces loaded: " + str(len(bm.faces)))
+elif is_ascii:
+    bpy.ops.import_mesh.stl(filepath=src)
+    imported = bpy.context.selected_objects
+    if not imported:
+        print("BLENDER_EMPTY: Blender imported 0 objects from ASCII STL")
+        sys.exit(1)
+    obj0 = imported[0]
+    bm.from_mesh(obj0.data)
+    normal_layer = bm.faces.layers.float_vector.get("orig_normal") or \
+                   bm.faces.layers.float_vector.new("orig_normal")
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete()
+    for face in bm.faces:
+        n = face.normal
+        if n.length_squared > 0.01:
+            face[normal_layer] = n.normalized()
+    print("STL triangles (ASCII): " + str(len(bm.faces)))
+else:
+    n_tris, normal_layer = load_binary_stl(src, bm)
+    print("STL triangles: " + str(n_tris))
+
+print("Verts loaded: " + str(len(bm.verts)))
+if len(bm.verts) == 0:
+    print("BLENDER_EMPTY: no vertices parsed from STL")
+    sys.exit(1)
+
+# ---------------------------------------------------------------------------
+# Step 2 — merge doubles + dissolve degenerate.
+# ---------------------------------------------------------------------------
+vb = len(bm.verts)
+bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=merge_dist)
+removed = vb - len(bm.verts)
+normal_layer = bm.faces.layers.float_vector.get("orig_normal") or \
+               bm.faces.layers.float_vector.new("orig_normal")
+print("Merge doubles removed: " + str(removed) + " (dist=" + str(merge_dist) + ")")
+
+if removed > 0:
+    bmesh.ops.dissolve_degenerate(bm, dist=merge_dist, edges=bm.edges[:])
+
+# ---------------------------------------------------------------------------
+# Step 3 — T-junction split (before normal vote, while BMesh is still fresh)
+# ---------------------------------------------------------------------------
+tj_splits = split_t_junctions(bm)
+if tj_splits:
+    print("T-junction splits: " + str(tj_splits))
+    bm.normal_update()
+    normal_layer = bm.faces.layers.float_vector.get("orig_normal") or \
+                   bm.faces.layers.float_vector.new("orig_normal")
+
+# ---------------------------------------------------------------------------
+# Step 4 — normal vote (uses original STL normals as ground truth for winding)
+# Must run before early exit so normals are always corrected.
+# ---------------------------------------------------------------------------
+normal_vote(bm, normal_layer)
+
+# ---------------------------------------------------------------------------
+# Early exit: mesh is already clean after merge_doubles — skip repair loop.
+# Decimation is now handled by PyMeshLab before Blender is called, so Blender
+# only sees meshes that need NM repair.
+# ---------------------------------------------------------------------------
+_pre_repair_nm   = sum(1 for e in bm.edges if len(e.link_faces) > 2)
+_pre_repair_open = sum(1 for e in bm.edges if e.is_boundary)
+if _pre_repair_nm == 0 and _pre_repair_open == 0:
+    print("Mesh already clean — writing without repair")
+    non_tris = [f for f in bm.faces if len(f.verts) != 3]
+    if non_tris:
+        bmesh.ops.triangulate(bm, faces=non_tris, quad_method='BEAUTY', ngon_method='BEAUTY')
+    bm.normal_update()
+    _dst_partial = dst + ".partial"
+    write_stl_from_bm(_dst_partial, bm)
+    bm.free()
+    os.replace(_dst_partial, dst)
+    print("BLENDER_OK")
+    sys.exit(0)
+
+# ---------------------------------------------------------------------------
+# Step 5 — repair loop
+# ---------------------------------------------------------------------------
+mesh1, obj1 = make_mesh_obj(bm, "Model")
+bm.free()
+_loop1_nm, _loop1_open, bm_final = run_repair_loop(mesh1, obj1, "Repair")
+
+# ---------------------------------------------------------------------------
+# Step 6 — final cleanup and write.
+# bm_final comes directly from run_repair_loop — it holds the last committed
+# topology, measured before any bm.to_mesh/from_mesh round-trip, so its edge
+# counts are authoritative and free of Edit Mode flag corruption.
+# ---------------------------------------------------------------------------
+
+# 6a — triangulate any non-triangle faces that leaked past the repair loop's
+# 4d guard (degenerate n-gons triangulate() couldn't split). Step 4d now
+# prevents NM-producing patches from reaching bm_final, so this should be rare.
+import math as _math
+non_tris = [f for f in bm_final.faces if len(f.verts) != 3]
+if non_tris:
+    bmesh.ops.triangulate(bm_final, faces=non_tris, quad_method='BEAUTY', ngon_method='BEAUTY')
+    # Clean up any NM edges the triangulation diagonals created.
+    _nm_after_tri = set()
+    for _e in bm_final.edges:
+        if len(_e.link_faces) > 2:
+            for _f in _e.link_faces:
+                _nm_after_tri.add(_f)
+    if _nm_after_tri:
+        bmesh.ops.delete(bm_final, geom=list(_nm_after_tri), context='FACES')
+        # Re-fill the holes just opened; use holes_fill which is more conservative
+        # than the manual loop-walk.
+        _be_refill = [e for e in bm_final.edges if e.is_boundary]
+        if _be_refill:
+            _r_refill = bmesh.ops.holes_fill(bm_final, edges=_be_refill, sides=0)
+            _nf_refill = [f for f in _r_refill.get('faces', []) if f.is_valid]
+            if _nf_refill:
+                _tri2 = bmesh.ops.triangulate(bm_final, faces=_nf_refill,
+                                              quad_method='SHORT_EDGE', ngon_method='EAR_CLIP')
+                # One final NM check — don't re-fill again.
+                _nm2 = set()
+                for _e in bm_final.edges:
+                    if len(_e.link_faces) > 2:
+                        for _f in _e.link_faces:
+                            _nm2.add(_f)
+                if _nm2:
+                    bmesh.ops.delete(bm_final, geom=list(_nm2), context='FACES')
+
+# 6b — fill any remaining boundary loops. The mesh is now fully triangulated.
+# Walk each loop explicitly and try a direct face fill; roll back if it
+# introduces NM edges.
+boundary_edges = [e for e in bm_final.edges if e.is_boundary]
+if boundary_edges:
+    adj = {{}}
+    for e in boundary_edges:
+        v0, v1 = e.verts[0], e.verts[1]
+        adj.setdefault(v0.index, []).append((v1, e))
+        adj.setdefault(v1.index, []).append((v0, e))
+    visited_edges = set()
+    loops_filled = 0
+    for start_e in boundary_edges:
+        if id(start_e) in visited_edges:
+            continue
+        loop_verts = [start_e.verts[0]]
+        visited_edges.add(id(start_e))
+        cur = start_e.verts[1]
+        prev_idx = start_e.verts[0].index
+        closed = False
+        for _ in range(1000):
+            if cur.index == loop_verts[0].index:
+                closed = True
+                break
+            loop_verts.append(cur)
+            nexts = [(v, e) for v, e in adj.get(cur.index, [])
+                     if v.index != prev_idx and id(e) not in visited_edges]
+            if not nexts:
+                break
+            next_v, next_e = nexts[0]
+            visited_edges.add(id(next_e))
+            prev_idx = cur.index
+            cur = next_v
+        if closed and len(loop_verts) >= 3:
+            try:
+                nm_before = sum(1 for e in bm_final.edges if len(e.link_faces) > 2)
+                bm_final.faces.ensure_lookup_table()
+                new_f = bm_final.faces.new(loop_verts)
+                bmesh.ops.recalc_face_normals(bm_final, faces=[new_f])
+                patch_faces = [new_f]
+                if len(loop_verts) > 3:
+                    tri_result = bmesh.ops.triangulate(bm_final, faces=[new_f],
+                                                       quad_method='BEAUTY', ngon_method='BEAUTY')
+                    patch_faces = [f for f in tri_result.get('faces', []) if f.is_valid]
+                nm_after = sum(1 for e in bm_final.edges if len(e.link_faces) > 2)
+                if nm_after > nm_before:
+                    valid_patch = [f for f in patch_faces if f.is_valid]
+                    if valid_patch:
+                        bmesh.ops.delete(bm_final, geom=valid_patch, context='FACES')
+                else:
+                    loops_filled += 1
+            except Exception:
+                pass
+    if loops_filled:
+        print("Final cleanup: directly filled " + str(loops_filled) + " boundary loop(s)")
+
+# 6c — final authoritative validation directly from bm_final.
+# No from_mesh round-trip: bm_final's counts are clean.
+nm_final   = sum(1 for e in bm_final.edges if not e.is_manifold and not e.is_boundary)
+open_final = sum(1 for e in bm_final.edges if e.is_boundary)
+n_faces    = len(bm_final.faces)
+max_open_len = 0.0
+if open_final > 0:
+    max_open_len = max(
+        _math.sqrt((e.verts[1].co - e.verts[0].co).length_squared)
+        for e in bm_final.edges if e.is_boundary
+    )
+
+if open_final > 0:
+    print("Final nm edges: " + str(nm_final) + "  open edges: " + str(open_final) +
+          "  max_open_len: " + str(round(max_open_len, 4)) + "mm")
+else:
+    print("Final nm edges: " + str(nm_final) + "  open edges: " + str(open_final))
+
+if n_faces == 0:
+    print("BLENDER_EMPTY: repair produced 0 faces")
+    bm_final.free()
+    sys.exit(1)
+print("Faces after repair: " + str(n_faces))
+
+# nm=0 but open edges remain — write the repaired file anyway (slicer handles open edges),
+# then signal the wrapper to also save a .open.stl marker copy.
+# Tiny gaps (< 0.5mm) are floating-point seams — signal them as OK instead.
+_open_tol = 0.5  # mm
+if nm_final > 0:
+    print("BLENDER_UNREPAIRED: nm=" + str(nm_final) + " open=" + str(open_final))
+    bm_final.free()
+    sys.exit(2)
+
+# 6d — write output.
+# Refresh cached normals — face.normal goes stale after topology edits.
+bm_final.normal_update()
+_dst_partial = dst + ".partial"
+write_stl_from_bm(_dst_partial, bm_final)
+bm_final.free()
+os.replace(_dst_partial, dst)
+
+if open_final > 0 and max_open_len >= _open_tol:
+    print("BLENDER_OPEN: open=" + str(open_final) + " max=" + str(round(max_open_len, 4)) + "mm")
+else:
+    print("BLENDER_OK")
