@@ -31,6 +31,13 @@ try:
 except ImportError:
     _PYMESHLAB_AVAILABLE = False
 
+try:
+    import numpy as _np
+    import fast_simplification as _fastsimp
+    _FASTSIMP_AVAILABLE = True
+except ImportError:
+    _FASTSIMP_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -40,10 +47,23 @@ OUTPUT_SUFFIX  = ""
 MERGE_DIST     = 0.01 # mm — merge vertices closer than this (T-junction fix)
 BLENDER        = "blender"
 RECURSIVE      = True
-WORKERS        = 3      # parallel Blender processes (default = physical core count)
+WORKERS        = 0      # parallel workers; 0 = auto from cores and memory budget
 TIMEOUT        = 1_200   # seconds — kill Blender if it runs longer than this
 MAX_FACES      = 900_000    # decimate if face count exceeds this (0 = disabled)
 LOG_FILE       = "/mnt/sda2/STL/Fixed/repair_log.tsv"
+# Files decimated by at least this factor are listed in REVIEW_FILE.  Heavy
+# decimation is where thin features and small connector holes (magnet sockets,
+# pin holes) are most likely to have been distorted or lost, so those outputs
+# are worth checking before printing.
+REVIEW_RATIO   = 2.0
+REVIEW_FILE    = "/mnt/sda2/STL/Fixed/review_decimated.tsv"
+
+# How many previous runs to keep alongside each log, as <name>.1 … <name>.N.
+# The logs are a diagnostic instrument for the run that just finished, so the
+# live file is always truncated; the point of keeping a few generations is that
+# a bad run can be restarted before its evidence has been read.  Bounded so the
+# folder cannot grow without limit.
+LOG_KEEP       = 5
 
 # ---------------------------------------------------------------------------
 # CLI overrides
@@ -119,6 +139,44 @@ PARTS_DIRNAME = '~parts'
 # PyMeshFix pre-scan) is skipped — the file goes straight to Blender, which streams from disk.
 # Keeps per-worker RAM within bounds when running multiple workers in parallel.
 _LARGE_MESH_TRI_LIMIT = 2_000_000
+
+# Peak resident memory the full pipeline needs, per triangle of *input*.
+# Measured end to end on a 7,000,034-triangle mesh that peaked at 5.8 GB
+# (decimation 2.5 GB, then NM repair on the decimated result on top of it).
+# Scaling is close to linear across the collection, so this predicts cost well
+# enough to decide whether a file can be attempted at all.
+_BYTES_PER_TRIANGLE = 5.8 * 1024**3 / 7_000_034      # ~890 bytes/triangle
+
+# Total memory the whole run may use, in bytes.  run.sh derives this from
+# installed RAM and exports it; 0 means unknown, in which case no admission
+# control is applied and behaviour matches the old unconditional attempt.
+def _run_memory_budget():
+    raw = os.environ.get('WORKER_MEM_MAX', '').strip()
+    try:
+        return int(raw) if raw else 0
+    except ValueError:
+        return 0
+
+
+def estimate_peak_bytes(n_tris):
+    """Predicted peak RSS for putting a mesh of n_tris through the pipeline."""
+    return int(n_tris * _BYTES_PER_TRIANGLE)
+
+
+def mesh_is_too_large(n_tris, budget=None, share=0.8):
+    """True if this mesh cannot be processed within the run's memory budget.
+
+    A file whose own projected peak exceeds `share` of the entire budget cannot
+    be made to fit by reducing worker count — it would OOM even running alone.
+    Around 30M triangles that is true of a 23 GB budget, and AI-generated meshes
+    reach that routinely, so the size has to be checked before the attempt
+    rather than discovered by having a worker killed.
+    Returns False when the budget is unknown, preserving the old behaviour."""
+    if budget is None:
+        budget = _run_memory_budget()
+    if budget <= 0:
+        return False
+    return estimate_peak_bytes(n_tris) > budget * share
 
 
 def _read_stl_header(path):
@@ -278,30 +336,478 @@ def split_shells(src, dst_dir, L=None):
         return []
 
 
-def log_step(rel, msg):
-    """Write one log line immediately. Safe for concurrent workers via file locking."""
+def _ensure_parent(path):
+    """Create the directory holding `path`.  Absolute-ises first so a bare
+    filename yields '.' rather than an empty dirname."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+
+
+def _append_locked(path, line, attempts=1, label=None):
+    """Append one line to `path` under an exclusive lock.
+
+    Every run log is written concurrently by all workers, so each append takes
+    flock(LOCK_EX) for the duration of the write.  Failure policy is the
+    caller's: `attempts` > 1 retries with a short sleep and, once exhausted,
+    reports to stderr under `label` — that is for the step log, where a missing
+    line is what makes a crash impossible to attribute.  The default single
+    attempt fails silently, which is right for the summary and review lists: an
+    aid, never a reason to fail a repair that otherwise worked.
+
+    Returns True if the line was written.
+    """
     import fcntl, time
-    line = f"{rel}\t{msg}\n"
     last_err = None
-    for _ in range(10):
+    for _ in range(max(1, attempts)):
         try:
-            with open(LOG_FILE, 'a') as f:
+            _ensure_parent(path)
+            with open(path, 'a') as f:
                 fcntl.flock(f, fcntl.LOCK_EX)
                 try:
                     f.write(line)
                 finally:
                     fcntl.flock(f, fcntl.LOCK_UN)
-            return
+            return True
         except OSError as _e:
             last_err = _e
-            time.sleep(0.05)
-    # A log line vanishing without a trace is exactly what makes a crash
-    # impossible to attribute — surface it on stderr instead (todo L7).
+            if attempts > 1:
+                time.sleep(0.05)
+    if label:
+        # A log line vanishing without a trace is exactly what makes a crash
+        # impossible to attribute — surface it on stderr instead (todo L7).
+        try:
+            sys.stderr.write(
+                f"{label}: giving up after {attempts} attempts ({last_err}): {line}")
+            sys.stderr.flush()
+        except Exception:
+            pass
+    return False
+
+
+def log_step(rel, msg):
+    """Write one log line immediately. Safe for concurrent workers via file locking."""
+    _append_locked(LOG_FILE, f"{rel}\t{msg}\n", attempts=10, label='log_step')
+
+
+def _weld_binary_stl(path):
+    """Read a binary STL and return (verts, faces) as numpy arrays.
+
+    A binary STL stores no vertex sharing — each triangle carries its own three
+    coordinate triples, so a vertex touched by six faces appears six times
+    (measured: exactly 6.0x on real models).  Quadric edge collapse works on
+    edges, so it needs to know which faces meet at each vertex; recovering that
+    sharing is a precondition of the algorithm, not an implementation detail.
+
+    The sort is done on the raw coordinate *bits* viewed as three uint32
+    columns rather than on float rows.  Identical float32 values have identical
+    bit patterns, so np.lexsort over the integer columns is exact and about 4x
+    faster than np.unique(axis=0) while allocating less (measured 6.9s/461 MB
+    -> 1.75s/383 MB on a 2.55M-triangle mesh).
+
+    Negative zero is normalised first: -0.0 and 0.0 compare equal as floats but
+    have different bits, so without this a shared vertex would split in two and
+    leave a crack that QEC cannot collapse.  Same hazard as in _build_edge_counts."""
+    # Each intermediate is released the moment it is no longer needed.  On a
+    # 7M-triangle mesh holding them all to the end peaks at 1000 MB, versus
+    # 667 MB when freed eagerly — and that mesh was OOM-killed at 2.5 GB once
+    # fast_simplification's own structures were added on top.
+    with open(path, 'rb') as f:
+        f.read(80)
+        n_tris = struct.unpack('<I', f.read(4))[0]
+        raw = _np.frombuffer(f.read(n_tris * 50), dtype=_np.uint8)
+    if len(raw) < n_tris * 50:
+        raise RuntimeError(f"short read: expected {n_tris * 50:,} bytes, got {len(raw):,}")
+    raw = raw.reshape(n_tris, 50)
+
+    # Bytes 12..48 of each 50-byte record are the three vertices (9 float32).
+    coords = _np.ascontiguousarray(raw[:, 12:48]).reshape(-1, 12)
+    del raw                      # the 50-byte records are no longer needed
+    fview  = coords.view(_np.float32).reshape(-1, 3)
+    # Fold -0.0 to 0.0 in place (adding 0.0 leaves every other value untouched).
+    _np.add(fview, _np.float32(0.0), out=fview)
+    del fview
+
+    bits  = coords.view(_np.uint32).reshape(-1, 3)
+    order = _np.lexsort((bits[:, 2], bits[:, 1], bits[:, 0]))
+    srt   = bits[order]
+    new   = _np.empty(len(srt), dtype=bool)
+    new[0] = True
+    _np.any(srt[1:] != srt[:-1], axis=1, out=new[1:])
+    ids   = _np.cumsum(new) - 1
+    inv   = _np.empty(len(srt), dtype=_np.int64)
+    inv[order] = ids
+    del order, ids
+    verts = srt[new].view(_np.float32).reshape(-1, 3).copy()
+    del srt, new, bits, coords
+    faces = inv.reshape(n_tris, 3)
+    return verts, faces
+
+
+def _write_binary_stl(path, verts, faces):
+    """Write an indexed mesh out as a binary STL (flat normals left zeroed —
+    slicers recompute them, and Blender ignores the stored value)."""
+    n = len(faces)
+    tv  = verts[faces].astype(_np.float32)          # (n, 3, 3)
+    buf = _np.zeros((n, 50), dtype=_np.uint8)
+    buf[:, 12:48] = tv.reshape(n, 9).view(_np.uint8)
+    _ensure_parent(path)
+    with open(path, 'wb') as f:
+        f.write(b'\0' * 80)
+        f.write(struct.pack('<I', n))
+        f.write(buf.tobytes())
+
+
+SUMMARY_FILE = "/mnt/sda2/STL/Fixed/repair_summary.tsv"
+
+_SUMMARY_COLUMNS = ('file', 'status', 'secs', 'tris_in', 'tris_out',
+                    'nm_in', 'open_in', 'blender_secs', 'path')
+
+
+def _reset_summary_file():
+    """Truncate the per-file summary at the start of a run and write its header."""
     try:
-        sys.stderr.write(f"log_step: giving up after 10 attempts ({last_err}): {line}")
-        sys.stderr.flush()
-    except Exception:
+        _ensure_parent(SUMMARY_FILE)
+        with open(SUMMARY_FILE, 'w') as f:
+            f.write('\t'.join(_SUMMARY_COLUMNS) + '\n')
+    except OSError:
         pass
+
+
+def log_summary_start(rel, pid):
+    """Record that a file has been picked up, before any work begins.
+
+    A worker killed mid-file — SIGKILL from the OOM killer, or a segfault inside
+    pymeshlab/pymeshfix — never reaches the finally block that writes the real
+    summary row, so without this the one file that killed the run is the single
+    file missing from the summary.  Reconciliation is by row order: a file whose
+    last row is status='started' never finished, and the PID says which worker
+    died.  Best-effort, like the other log writers."""
+    line = '\t'.join([rel, 'started', '', '', '', '', '', '', f'pid={pid}']) + '\n'
+    _append_locked(SUMMARY_FILE, line)
+
+
+def log_summary(row):
+    """Append one machine-readable row per file.
+
+    The step log interleaves lines from every worker and needs 6-10 lines
+    stitched back together per file to answer anything; this gives one row that
+    sorts and aggregates directly — which files were slowest, how many reached
+    Blender, how much total decimation the collection saw.  'path' records which
+    route the file took (decimator used, whether Blender ran) so the two open
+    questions — Blender's real cost, and which files had open edges filled — can
+    be answered without parsing prose."""
+    line = '\t'.join(str(row.get(c, '')) for c in _SUMMARY_COLUMNS) + '\n'
+    _append_locked(SUMMARY_FILE, line)
+
+
+def read_summary(path=None):
+    """Parse the summary file, collapsing each file's rows to its final state.
+
+    Each file contributes a 'started' row and, if it finished, a completion row.
+    Keeping the last row per file therefore yields the real outcome, and any
+    entry still reading 'started' is a file whose worker died before it could
+    report — the OOM killer or a library segfault.  Returns a list of dicts."""
+    rows = {}
+    order = []
+    try:
+        with open(path or SUMMARY_FILE) as f:
+            for line in f:
+                line = line.rstrip('\n')
+                if not line or line.startswith('file\t'):
+                    continue
+                parts = line.split('\t')
+                if len(parts) < len(_SUMMARY_COLUMNS):
+                    parts += [''] * (len(_SUMMARY_COLUMNS) - len(parts))
+                rec = dict(zip(_SUMMARY_COLUMNS, parts))
+                if rec['file'] not in rows:
+                    order.append(rec['file'])
+                rows[rec['file']] = rec
+    except OSError:
+        return []
+    return [rows[k] for k in order]
+
+
+def file_started_in_log(rel):
+    """True if this file was actually picked up by a worker.
+
+    log_summary_start writes a 'started' row the moment process_file_safe takes
+    a file, before any work begins.  So when the pool breaks, a file with such a
+    row was in flight and genuinely interrupted, while one without a row never
+    left the queue and can be retried safely on a replacement pool."""
+    try:
+        with open(SUMMARY_FILE) as f:
+            prefix = rel + '\t'
+            return any(line.startswith(prefix) for line in f)
+    except OSError:
+        return False
+
+
+def sweep_orphan_temps(out_root):
+    """Delete pipeline intermediates left behind by a killed worker.
+
+    process_file cleans its temps in a finally block, but SIGKILL — the OOM
+    killer, which is exactly what happens on the largest meshes — skips finally
+    entirely.  A 44 MB .repairnm.stl was found orphaned after one such kill.
+    The M4 suffix filter keeps these from ever being mistaken for inputs, so
+    they are only wasted space, but they accumulate one per crash.
+
+    Run at startup, before any work: at that point nothing is in flight, so
+    every matching file is certainly stale.  Returns (count, bytes_freed)."""
+    patterns = ('.decimate.stl', '.repairnm.stl', '.pymeshfix.stl',
+                '.merge.stl', '.partial')
+    n = freed = 0
+    for root, dirs, names in os.walk(out_root):
+        for name in names:
+            if any(name.endswith(p) for p in patterns):
+                p = os.path.join(root, name)
+                try:
+                    sz = os.path.getsize(p)
+                    os.unlink(p)
+                    n += 1
+                    freed += sz
+                except OSError:
+                    pass
+    return n, freed
+
+
+def partition_already_done(files, input_folder, suffix=None):
+    """Split files into (todo, done) before any worker is started.
+
+    process_file makes the same checks, but only after a file has been handed to
+    a worker and pickled back — on a collection that is mostly already repaired
+    that is hundreds of pointless dispatches.  Doing it here also lets the run
+    report up front how much work is actually left.
+
+    `done` entries are (path, reason) where reason is one of 'fixed', 'broken',
+    'failed', 'unrepaired' or 'open', matching the indicator that was found."""
+    if suffix is None:
+        suffix = OUTPUT_SUFFIX
+    todo, done = [], []
+    for src in files:
+        dst = output_path(src, suffix, input_folder)
+        base = os.path.splitext(dst)[0]
+        if os.path.exists(base + '.broken.stl'):
+            done.append((src, 'broken'))
+        elif os.path.exists(base + '.failed.stl'):
+            done.append((src, 'failed'))
+        elif os.path.exists(base + '.timeout.stl'):
+            done.append((src, 'timeout'))
+        elif os.path.exists(base + '.unrepaired.stl'):
+            done.append((src, 'unrepaired'))
+        elif os.path.exists(base + '.open.stl'):
+            done.append((src, 'open'))
+        elif os.path.exists(dst):
+            done.append((src, 'fixed'))
+        else:
+            todo.append(src)
+    return todo, done
+
+
+def mark_timeout(src, input_folder=None, suffix=None):
+    """Write <dst_base>.timeout.stl for a file whose worker was killed on time.
+
+    Called from the parent, not the worker: a SIGKILLed worker never reaches the
+    code that writes the other indicators, so without this a file that reliably
+    times out is silently re-dispatched on every future run and burns the full
+    limit again each time.
+
+    A copy of the source, matching .failed.stl — the indicators are named
+    <name>.<signal>.stl precisely so they open in any STL viewer, and an empty
+    file would not.  Delete it to retry, as with the others.  Returns the marker
+    path, or None if it could not be written."""
+    if input_folder is None:
+        input_folder = INPUT_FOLDER
+    if suffix is None:
+        suffix = OUTPUT_SUFFIX
+    try:
+        dst = output_path(src, suffix, input_folder)
+        marker = os.path.splitext(dst)[0] + '.timeout.stl'
+        if os.path.exists(marker):
+            return marker
+        _ensure_parent(marker)
+        shutil.copy2(src, marker)
+        return marker
+    except (OSError, ValueError):
+        return None
+
+
+def measure_files(files):
+    """Return [(n_tris, path)] with size read from each header, smallest first.
+
+    Files whose size cannot be determined are reported as 0 and sort first —
+    they are cheap to attempt and their real cost is discovered on the way."""
+    out = []
+    for p in files:
+        try:
+            if p.lower().endswith('.obj'):
+                # No triangle count in an OBJ header; approximate from bytes.
+                out.append((os.path.getsize(p) // 60, p))
+                continue
+            n, err = _read_stl_header(p)
+            out.append((0 if (err or n <= 0) else n, p))
+        except OSError:
+            out.append((0, p))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+# Upper bound on the automatically-chosen worker count.  Past a handful of
+# workers the run stops being CPU-bound and starts contending on memory
+# bandwidth and disk, and each extra worker widens the blast radius when one is
+# killed.  A machine with many cores and a large budget gains little from more.
+AUTO_WORKERS_CAP = 6
+
+
+def auto_worker_count(sized=None, budget=None, cores=None):
+    """Choose a worker ceiling automatically (the WORKERS=0 setting).
+
+    Three limits apply and the smallest wins:
+
+      CPU     — one worker per core.  Each worker is mostly single-threaded
+                (BLAS/MKL are pinned to one thread in _worker_init), so beyond
+                one per core they only contend.
+      cap     — AUTO_WORKERS_CAP, a flat ceiling regardless of hardware.
+      memory  — the budget divided by what a *typical large* file costs.  The
+                median file is a poor basis: it allows 36 workers here, which
+                would be catastrophic the moment a big mesh arrived.  The 90th
+                percentile is used instead, so the ceiling suits the heavy end
+                of the collection while plan_worker_count() still throttles
+                further for individual outliers.
+
+    Falls back to a conservative 2 when nothing can be measured.  The result is
+    only a ceiling — per-file admission may run fewer."""
+    if cores is None:
+        cores = os.cpu_count() or 2
+    if budget is None:
+        budget = _run_memory_budget()
+
+    by_cpu = max(1, min(cores, AUTO_WORKERS_CAP))
+    if budget <= 0:
+        return max(1, min(by_cpu, 2))     # unknown budget: stay cautious
+
+    sizes = sorted(n for n, _ in (sized or []) if n > 0)
+    if sizes:
+        # Size against the median file.  A high percentile lets one outlier set
+        # the ceiling for the entire run — with three files left whose largest
+        # is 7M triangles, a p90 reference gave a single worker even though the
+        # other two need under 1 GB each.  plan_worker_count() already lowers
+        # concurrency when a big file actually comes up, and files run
+        # smallest-first, so the ceiling only has to suit the typical file.
+        ref = sizes[len(sizes) // 2]
+    else:
+        ref = 2_000_000                   # no measurements: assume a large-ish mesh
+    per = estimate_peak_bytes(ref)
+    # Target 70% of the budget rather than all of it.  The per-triangle estimate
+    # is a linear fit from measured runs, not a guarantee, and filling the budget
+    # exactly leaves nothing for a mesh that costs more than predicted — the
+    # failure it exists to prevent.  Simulated on a real collection, filling the
+    # budget reached 100% of it, while this lands near 60%.
+    by_mem = max(1, int(budget * 0.7 // per)) if per > 0 else by_cpu
+    return max(1, min(by_cpu, by_mem, AUTO_WORKERS_CAP))
+
+
+def plan_worker_count(n_tris, n_workers, budget=None):
+    """How many workers may run concurrently while a mesh of n_tris is in flight.
+
+    Memory per worker scales with the mesh being processed, so a fixed worker
+    count is wrong at both ends: it wastes capacity on small files and
+    overcommits on large ones.  Processing smallest-first and reducing the
+    worker count as files grow keeps the run inside its budget without refusing
+    work — the concurrency adapts to the mesh instead of the mesh having to fit
+    a fixed concurrency.
+
+    Returns at least 1: a single worker is the floor, and whether that one file
+    fits at all is a separate question answered by mesh_is_too_large()."""
+    if budget is None:
+        budget = _run_memory_budget()
+    if budget <= 0 or n_tris <= 0:
+        return max(1, n_workers)
+    per = estimate_peak_bytes(n_tris)
+    if per <= 0:
+        return max(1, n_workers)
+    return max(1, min(n_workers, int(budget // per)))
+
+
+def rotate_log(path, keep=None):
+    """Shift <path> to <path>.1, ageing existing generations, before truncation.
+
+    Renames from the oldest backwards so no generation overwrites one that has
+    not been shifted yet: .4 -> .5, .3 -> .4, … , path -> .1.  Anything past
+    `keep` is dropped.  Best-effort like the other log helpers — a run must not
+    fail because its history could not be rotated."""
+    if keep is None:
+        keep = LOG_KEEP
+    try:
+        if keep < 1 or not os.path.exists(path):
+            return
+        oldest = f"{path}.{keep}"
+        if os.path.exists(oldest):
+            os.unlink(oldest)
+        for n in range(keep - 1, 0, -1):
+            src = f"{path}.{n}"
+            if os.path.exists(src):
+                os.replace(src, f"{path}.{n + 1}")
+        os.replace(path, f"{path}.1")
+    except OSError:
+        pass
+
+
+def rotate_all_logs(keep=None):
+    """Rotate every run log.  Call once per run, before the reset helpers."""
+    for _p in (LOG_FILE, REVIEW_FILE, SUMMARY_FILE):
+        rotate_log(_p, keep)
+
+
+def _reset_review_file():
+    """Truncate the review list at the start of a run and write its header."""
+    try:
+        _ensure_parent(REVIEW_FILE)
+        with open(REVIEW_FILE, 'w') as f:
+            f.write(f"# Files decimated {REVIEW_RATIO:g}x or more — worth checking that thin\n"
+                    f"# walls and connector holes (magnets, pins) survived.\n"
+                    f"# file\tfaces_before\tfaces_after\tratio\n")
+    except OSError:
+        pass
+
+
+def log_review(rel, n_before, n_after):
+    """Record a heavily-decimated file for later inspection.
+
+    Only files reduced by REVIEW_RATIO or more are listed.  That is where thin
+    walls and small connector holes (magnet sockets, pin holes) are most likely
+    to have been distorted — decimation itself never closes a boundary loop, but
+    it can thin the geometry around one, and the later open-edge fill cannot tell
+    an intentional opening from a defect.  Writing the file is best-effort: a
+    review list is an aid, never a reason to fail a repair that otherwise worked."""
+    ratio = (float(n_before) / float(n_after)) if n_after else 0.0
+    _append_locked(REVIEW_FILE, f"{rel}\t{n_before}\t{n_after}\t{ratio:.1f}x\n")
+
+
+def run_fast_decimate(src, dst, target_faces):
+    """Decimate src to target_faces with fast_simplification's quadric edge collapse.
+
+    Same Garland-Heckbert algorithm PyMeshLab and Blender use, but operating on
+    plain numpy arrays instead of a full mesh database, which is where the cost
+    difference comes from.  Measured on a 2.55M-triangle mesh -> 900k:
+        Blender      43s     (OOM'd under a worker RLIMIT_AS)
+        PyMeshLab    42.0s   1557 MB peak
+        this path    ~5.6s   ~915 MB peak
+
+    Decimation may leave non-manifold edges; that is expected and is what the
+    later NM-repair and open-edge steps of the pipeline exist to clean up.
+    Returns (nm, open_e, n_faces_out)."""
+    verts, faces = _weld_binary_stl(src)
+    n_in = len(faces)
+    if n_in <= target_faces:
+        return None  # caller falls through; nothing to do
+    # fast_simplification takes the fraction of faces to REMOVE.
+    reduction = 1.0 - (float(target_faces) / float(n_in))
+    v2, f2 = _fastsimp.simplify(verts, faces.astype(_np.uint32), reduction)
+    del verts, faces
+    _write_binary_stl(dst, v2, f2)
+    n_out = len(f2)
+    del v2, f2
+    nm, open_e, _ = scan_mesh_errors(dst)
+    return nm, open_e, n_out
 
 
 def run_pymeshlab_decimate(src, dst, target_faces):
@@ -349,7 +855,7 @@ def collect_companion_files(folder, recursive):
 # nested under the input root) they must not be picked up as source meshes.
 _SIGNAL_SUFFIXES = (
     # Result indicators.
-    '.unrepaired.stl', '.failed.stl', '.broken.stl', '.open.stl',
+    '.unrepaired.stl', '.failed.stl', '.broken.stl', '.open.stl', '.timeout.stl',
     # Pipeline intermediates — left behind if a run is killed mid-file (todo M4).
     '.decimate.stl', '.repairnm.stl', '.pymeshfix.stl', '.merge.stl', '.partial',
 )
@@ -575,7 +1081,7 @@ def run_pymeshfix(src, dst, edge_counts=None):
     _merge_tmp = None
     try:
         if pairs:
-            os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+            _ensure_parent(dst)
             _merge_tmp = dst + '.merge.stl'
             _merge_paired_vertices(src, _merge_tmp, pairs)
             tin = _pymeshfix.MeshFix(_merge_tmp)
@@ -611,11 +1117,19 @@ def run_pymeshlab_repair_nm(src, dst):
     return nm, open_e
 
 
-def fix_stl(src, dst, merge_dist, is_ascii=False, is_obj=False):
+def _run_blender_script(script):
+    """Run `script` in headless Blender.  Returns (rc, stdout, stderr, timed_out).
+
+    Centralises what both Blender entry points need to get right: the temp
+    script is always unlinked, `_blender_proc` is published so the signal
+    handlers can kill a hung child and always cleared afterwards, and
+    preexec_fn lifts any RLIMIT_AS inherited from the worker — that limit caps
+    *virtual* address space, which Blender reserves far more of than it
+    resides, and left in place it killed repairs at ~1.2 GB with 14 GB free.
+
+    On timeout the child is killed and reaped before returning; rc is None and
+    timed_out is True.  Callers map the result onto their own return shape."""
     global _blender_proc
-    script = BLENDER_SCRIPT.format(src=src, dst=dst, merge_dist=merge_dist,
-                                   is_ascii=repr(bool(is_ascii)),
-                                   is_obj=repr(bool(is_obj)))
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
         tmp.write(script)
         script_path = tmp.name
@@ -623,6 +1137,7 @@ def fix_stl(src, dst, merge_dist, is_ascii=False, is_obj=False):
         proc = subprocess.Popen(
             [BLENDER, '--background', '--python', script_path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            preexec_fn=_unlimit_child_address_space,
         )
         _blender_proc = proc
         try:
@@ -630,54 +1145,50 @@ def fix_stl(src, dst, merge_dist, is_ascii=False, is_obj=False):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            return False, False, False, f'TIMEOUT after {TIMEOUT}s', ''
+            return None, '', '', True
         finally:
             _blender_proc = None
-        success    = proc.returncode == 0 and 'BLENDER_OK' in stdout
-        open_only  = proc.returncode == 0 and 'BLENDER_OPEN' in stdout
-        unrepaired = 'BLENDER_UNREPAIRED' in stdout
-        return success, open_only, unrepaired, stdout, stderr
+        return proc.returncode, stdout, stderr, False
     finally:
-        os.unlink(script_path)
+        try:
+            os.unlink(script_path)
+        except OSError:
+            pass
+
+
+def fix_stl(src, dst, merge_dist, is_ascii=False, is_obj=False):
+    script = BLENDER_SCRIPT.format(src=src, dst=dst, merge_dist=merge_dist,
+                                   is_ascii=repr(bool(is_ascii)),
+                                   is_obj=repr(bool(is_obj)))
+    rc, stdout, stderr, timed_out = _run_blender_script(script)
+    if timed_out:
+        return False, False, False, f'TIMEOUT after {TIMEOUT}s', ''
+    success    = rc == 0 and 'BLENDER_OK' in stdout
+    open_only  = rc == 0 and 'BLENDER_OPEN' in stdout
+    unrepaired = 'BLENDER_UNREPAIRED' in stdout
+    return success, open_only, unrepaired, stdout, stderr
 
 def blender_decimate(src, dst, max_faces):
     """Run stl_batch_fix.decimate.blender on src, writing a decimated binary STL to dst.
     Returns (ok, n_faces_out, stdout, stderr).  n_faces_out is -1 on failure."""
-    global _blender_proc
     script = BLENDER_DECIMATE_SCRIPT.format(src=src, dst=dst, max_faces=max_faces)
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
-        tmp.write(script)
-        script_path = tmp.name
-    try:
-        proc = subprocess.Popen(
-            [BLENDER, '--background', '--python', script_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        )
-        _blender_proc = proc
-        try:
-            stdout, stderr = proc.communicate(timeout=TIMEOUT)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            return False, -1, f'TIMEOUT after {TIMEOUT}s', ''
-        finally:
-            _blender_proc = None
-        ok = proc.returncode == 0 and 'BLENDER_DECIMATE_OK' in stdout
-        n_out = -1
-        for line in stdout.splitlines():
-            if line.startswith('Decimate output faces: '):
-                try:
-                    n_out = int(line.split(': ', 1)[1])
-                except ValueError:
-                    pass
-            elif line.startswith('Decimate skipped'):
-                try:
-                    n_out = int(line.split('(')[1].split(' ')[0])
-                except (ValueError, IndexError):
-                    pass
-        return ok, n_out, stdout, stderr
-    finally:
-        os.unlink(script_path)
+    rc, stdout, stderr, timed_out = _run_blender_script(script)
+    if timed_out:
+        return False, -1, f'TIMEOUT after {TIMEOUT}s', ''
+    ok = rc == 0 and 'BLENDER_DECIMATE_OK' in stdout
+    n_out = -1
+    for line in stdout.splitlines():
+        if line.startswith('Decimate output faces: '):
+            try:
+                n_out = int(line.split(': ', 1)[1])
+            except ValueError:
+                pass
+        elif line.startswith('Decimate skipped'):
+            try:
+                n_out = int(line.split('(')[1].split(' ')[0])
+            except (ValueError, IndexError):
+                pass
+    return ok, n_out, stdout, stderr
 
 
 # ---------------------------------------------------------------------------
@@ -695,26 +1206,34 @@ def _post_verify(path, L, label="post-verify"):
     """Independently re-scan a mesh that a repair step just claimed was clean.
 
     PyMeshFix (and Blender) self-report unreliably, so nothing is written out as
-    'ok' on a library's word alone.  Returns (nm, open_e): (0, 0) when the file
-    genuinely verifies clean, the scanned counts when it does not.
+    'ok' on a library's word alone.
 
-    An ASCII STL cannot be edge-scanned by this code path.  Rather than silently
-    treating unverifiable as clean (todo L8), that is logged and reported as
-    clean only because the caller has no better signal — Blender always writes
-    binary here, so in practice this branch is unreachable."""
+    Returns (nm, open_e, verified):
+      (0, 0, True)   — the file was scanned and is genuinely clean
+      (n, m, True)   — scanned, and defects remain
+      (0, 0, False)  — the scan could not be performed at all
+
+    The third value exists because the first two cannot express "unknown".
+    Every unscannable case — ASCII input, a scan error, a mesh too large to
+    scan — used to return a bare (0, 0), which callers test as `nm > 0 or
+    open_e > 0` and therefore read as verified-clean.  The file was then written
+    out as status 'ok' having been checked by nothing, with the only trace a log
+    line no summary column reflects.  That matters most on the largest meshes,
+    which are both the ones that fail this scan and the ones most likely to be
+    genuinely broken.  Callers must treat verified=False as unproven."""
     if is_ascii_stl(path):
-        L(f"{label}: ASCII STL — cannot edge-scan, accepting repair unverified")
-        return 0, 0
+        L(f"{label}: ASCII STL — cannot edge-scan, repair UNVERIFIED")
+        return 0, 0, False
     nm, open_e, err = scan_mesh_errors(path)
     if err:
-        L(f"{label} scan error — {err}")
-        return 0, 0
+        L(f"{label} scan error — {err}; repair UNVERIFIED")
+        return 0, 0, False
     if nm == -1:
-        L(f"{label}: mesh too large to scan, accepting repair unverified")
-        return 0, 0
+        L(f"{label}: mesh too large to scan, repair UNVERIFIED")
+        return 0, 0, False
     if nm > 0 or open_e > 0:
         L(f"{label} — reported ok but scan found nm={nm} open={open_e}")
-    return nm, open_e
+    return nm, open_e, True
 
 
 def _cleanup_parts(parts_dir, parts):
@@ -745,7 +1264,7 @@ def _cleanup_parts(parts_dir, parts):
 
 def _save_indicator(indicator_path, src_path, stales):
     """Copy src_path to indicator_path, delete stale indicators, return file size."""
-    os.makedirs(os.path.dirname(os.path.abspath(indicator_path)), exist_ok=True)
+    _ensure_parent(indicator_path)
     shutil.copy2(src_path, indicator_path)
     _clear_stale(*stales)
     return os.path.getsize(indicator_path)
@@ -767,18 +1286,21 @@ def _try_pymeshfix_after_blender(src_for_fix, dst, open_copy, failed_copy,
         L(f"pymeshfix {label}: nm={_pmf_nm}  open={_pmf_open}")
         if _pmf_nm == 0 and _pmf_open == 0:
             # Verify with an independent edge scan — pymeshfix self-report is not reliable.
-            _pv_nm, _pv_open = _post_verify(_pmf_tmp, L, label=f"pymeshfix {label} post-verify")
+            _pv_nm, _pv_open, _pv_ok = _post_verify(
+                _pmf_tmp, L, label=f"pymeshfix {label} post-verify")
             if _pv_nm > 0 or _pv_open > 0:
                 _pmf_open = _pv_open  # fall through to open-edges path below
             if _pmf_open == 0:
                 os.replace(_pmf_tmp, dst)
                 size = os.path.getsize(dst)
                 _clear_stale(failed_copy, unrepaired_copy, open_copy)
-                L(f"result: ok ({label})")
+                L(f"result: ok ({label})"
+                  + ("" if _pv_ok else " — UNVERIFIED, scan could not run"))
                 return _result(status='ok', dst=os.path.basename(dst),
-                               size=size, is_ascii=is_ascii, is_obj=is_obj, pymeshfix=True)
+                               size=size, is_ascii=is_ascii, is_obj=is_obj,
+                               pymeshfix=True, verified=_pv_ok)
         if _pmf_nm == 0 and _pmf_open > 0:
-            os.makedirs(os.path.dirname(os.path.abspath(open_copy)), exist_ok=True)
+            _ensure_parent(open_copy)
             os.replace(_pmf_tmp, open_copy)
             if os.path.exists(dst):
                 os.unlink(dst)
@@ -815,9 +1337,21 @@ def process_file(src, is_part=False):
     intermediate is removed, however the pipeline exits (todo M3).  The impl
     appends each temp it creates to `temps`; anything still on disk afterwards
     that isn't the final output gets unlinked."""
+    import time as _t0mod
     temps = []
+    # Facts the impl records as it goes, so one summary row can be written on
+    # every exit path — including exceptions — without threading return values
+    # through a dozen `return` statements.
+    stats = {'path': []}
+    _started = _t0mod.monotonic()
+    result = None
+    _rel_for_log = (os.path.basename(src) if is_part
+                    else os.path.relpath(src, INPUT_FOLDER))
+    if not is_part:
+        log_summary_start(_rel_for_log, os.getpid())
     try:
-        return _process_file_impl(src, is_part=is_part, temps=temps)
+        result = _process_file_impl(src, is_part=is_part, temps=temps, stats=stats)
+        return result
     finally:
         for _t in temps:
             try:
@@ -825,11 +1359,38 @@ def process_file(src, is_part=False):
                     os.unlink(_t)
             except OSError:
                 pass
+        # Parts are an internal detail of splitting a parent mesh; summarising
+        # them would double-count the parent's triangles.
+        if not is_part:
+            # Read the delivered triangle count from the output itself rather
+            # than tracking it through the pipeline — whatever path ran, this is
+            # what actually landed on disk.
+            if 'tris_out' not in stats and result and result.get('dst'):
+                _out = os.path.join(
+                    os.path.dirname(output_path(src, OUTPUT_SUFFIX, INPUT_FOLDER)),
+                    result['dst'])
+                _n, _e = _read_stl_header(_out)
+                if not _e:
+                    stats['tris_out'] = _n
+            log_summary({
+                'file':         os.path.relpath(src, INPUT_FOLDER)
+                                if not is_part else os.path.basename(src),
+                'status':       (result or {}).get('status', 'exception'),
+                'secs':         f"{_t0mod.monotonic() - _started:.1f}",
+                'tris_in':      stats.get('tris_in', ''),
+                'tris_out':     stats.get('tris_out', ''),
+                'nm_in':        stats.get('nm_in', ''),
+                'open_in':      stats.get('open_in', ''),
+                'blender_secs': stats.get('blender_secs', ''),
+                'path':         '+'.join(stats['path']) or 'none',
+            })
 
 
-def _process_file_impl(src, is_part=False, temps=None):
+def _process_file_impl(src, is_part=False, temps=None, stats=None):
     if temps is None:
         temps = []
+    if stats is None:
+        stats = {'path': []}
     fixed_root  = os.path.dirname(os.path.abspath(INPUT_FOLDER))
     if is_part:
         # Part files are already in the output folder — treat them as their own dst.
@@ -847,6 +1408,9 @@ def _process_file_impl(src, is_part=False, temps=None):
     #   <dst_base>.failed.stl     — copy of source; transient error (crash/timeout); delete to retry
     #   <dst_base>.unrepaired.stl — copy of source; nm>0 remains; delete to retry
     #   <dst_base>.open.stl       — repaired output; nm=0 but open edges remain (slicer handles)
+    #   <dst_base>.timeout.stl    — copy of source; exceeded TIMEOUT, killed by the
+    #                               parent watchdog (written there, not here — a
+    #                               SIGKILLed worker never runs this code)
 
     broken_copy     = dst_base + '.broken.stl'
     failed_copy     = dst_base + '.failed.stl'
@@ -884,10 +1448,27 @@ def _process_file_impl(src, is_part=False, temps=None):
     n_tris, is_ascii, err = check_stl_integrity(src)
     if err:
         if src != broken_copy:  # avoid copying a part onto itself
-            os.makedirs(os.path.dirname(os.path.abspath(broken_copy)), exist_ok=True)
+            _ensure_parent(broken_copy)
             shutil.copy2(src, broken_copy)
         L(f"corrupt: {err}")
         return {'rel': rel, 'status': 'corrupt', 'reason': err}
+
+    # Admission control, before anything touches the mesh.  A file whose
+    # projected peak exceeds most of the run's entire memory budget cannot be
+    # made to fit by using fewer workers — it would be OOM-killed running alone,
+    # taking the pool down with it.  Refusing it up front costs one file and
+    # names the reason, instead of losing a worker and every file queued behind
+    # it.  AI-generated meshes reach this size routinely.
+    if n_tris > 0 and mesh_is_too_large(n_tris):
+        _budget = _run_memory_budget()
+        _need   = estimate_peak_bytes(n_tris)
+        _msg = (f"needs ~{_need/1024**3:.1f} GB but the run's budget is "
+                f"{_budget/1024**3:.1f} GB — raise MEM_MAX or pre-decimate this file")
+        L(f"too large: {n_tris:,} tris — {_msg}")
+        size = _save_indicator(failed_copy, src, [])
+        return {'rel': rel, 'status': 'failed', 'is_mesh_bad': False,
+                'reason': f"too large: {_msg}",
+                'stdout': f"{n_tris:,} triangles; {_msg}", 'stderr': ''}
 
     # -----------------------------------------------------------------------
     # Pipeline (binary STL only; OBJ/ASCII always go to Blender for conversion)
@@ -905,6 +1486,9 @@ def _process_file_impl(src, is_part=False, temps=None):
         if _scan_err:
             scan_note = f"  (scan error: {_scan_err})"
         L(f"src: tris={n_tris:,}  nm={nm_src}  open={open_src}{scan_note}")
+        stats['tris_in'] = n_tris
+        stats['nm_in']   = nm_src
+        stats['open_in'] = open_src
 
         # Perfect mesh within limit — just copy, nothing to do.
         if nm_src == 0 and open_src == 0 and (MAX_FACES == 0 or n_tris <= MAX_FACES):
@@ -912,7 +1496,7 @@ def _process_file_impl(src, is_part=False, temps=None):
                 # Create dst's own parent directly — never recompute it via
                 # output_path(), which for a part file resolves somewhere else
                 # entirely (todo H1).
-                os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+                _ensure_parent(dst)
                 shutil.copy2(src, dst)
             size = os.path.getsize(dst)
             _clear_stale(failed_copy, unrepaired_copy, open_copy)
@@ -966,7 +1550,7 @@ def _process_file_impl(src, is_part=False, temps=None):
                                 ms_merge.generate_by_merging_visible_meshes()
                             else:
                                 ms_merge.flatten_visible_layers(mergevisible=True)
-                            os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+                            _ensure_parent(dst)
                             ms_merge.save_current_mesh(dst, binary=True)
                             size = os.path.getsize(dst)
                             _clear_stale(failed_copy, unrepaired_copy, open_copy)
@@ -983,22 +1567,63 @@ def _process_file_impl(src, is_part=False, temps=None):
                             all_ok = False
                     if not all_ok:
                         n_ok = sum(1 for r in part_results if r['status'] in ('ok', 'skip'))
-                        os.makedirs(os.path.dirname(os.path.abspath(failed_copy)), exist_ok=True)
+                        _ensure_parent(failed_copy)
                         shutil.copy2(src, failed_copy)
                         L(f"split partial: {n_ok}/{len(parts)} parts ok — saved as {os.path.basename(failed_copy)}")
                         return {'rel': rel, 'status': 'failed', 'is_mesh_bad': False,
                                 'stdout': f"{n_ok}/{len(parts)} parts succeeded", 'stderr': ''}
 
         # Step C — decimate if over face limit.
-        # Large meshes (> _LARGE_MESH_TRI_LIMIT) use Blender for decimation to avoid
-        # loading the whole mesh into Python RAM; result feeds back into the normal pipeline.
+        #
+        # Three decimators, tried in order, all running the same Garland-Heckbert
+        # quadric edge collapse.  They differ only in how much machinery sits
+        # around it, which is where the cost is.  Measured, 2.55M tris -> 900k:
+        #     fast_simplification  ~5.6s   ~915 MB   (numpy arrays)
+        #     pymeshlab            42.0s   1557 MB   (full mesh database)
+        #     blender              43s     OOM'd under a worker RLIMIT_AS
+        # Size no longer selects the decimator: fast_simplification handles a
+        # 2.55M-triangle mesh in less memory than PyMeshLab needs for 1.2M, so
+        # there is no longer a band where the mesh is too big for Python and has
+        # to go out to Blender.  Blender remains only as a last-resort fallback.
         if MAX_FACES > 0 and working_tris > MAX_FACES:
-            if working_tris > _LARGE_MESH_TRI_LIMIT:
-                _dec_tmp = dst + '.decimate.stl'
-                temps.append(_dec_tmp)
-                os.makedirs(os.path.dirname(os.path.abspath(_dec_tmp)), exist_ok=True)
-                L(f"decimate: {working_tris:,} tris — too large for PyMeshLab, using Blender")
-                _bd_ok, _bd_faces, _bd_stdout, _bd_stderr = blender_decimate(working, _dec_tmp, MAX_FACES)
+            _dec_tmp = dst + '.decimate.stl'
+            temps.append(_dec_tmp)
+            _ensure_parent(_dec_tmp)
+            _dec_done = False
+
+            if _FASTSIMP_AVAILABLE:
+                L(f"step C: decimate {working_tris:,} tris → target {MAX_FACES:,} (fast_simplification)")
+                try:
+                    _r = run_fast_decimate(working, _dec_tmp, MAX_FACES)
+                    if _r is not None:
+                        _dec_nm, _dec_open, _dec_faces = _r
+                        L(f"decimate: {working_tris:,} → {_dec_faces:,} faces  "
+                          f"nm={_dec_nm}  open={_dec_open}")
+                        working, working_tris = _dec_tmp, _dec_faces
+                        nm_src, open_src = _dec_nm, _dec_open
+                        _dec_done = True
+                        stats['path'].append('fastsimp')
+                except Exception as _dec_err:
+                    L(f"decimate (fast_simplification): FAILED — {_dec_err}")
+
+            if not _dec_done and _PYMESHLAB_AVAILABLE and working_tris <= _LARGE_MESH_TRI_LIMIT:
+                L(f"step C: decimate {working_tris:,} tris → target {MAX_FACES:,} (pymeshlab)")
+                try:
+                    _dec_nm, _dec_open, _dec_faces = run_pymeshlab_decimate(
+                        working, _dec_tmp, MAX_FACES)
+                    L(f"decimate: {working_tris:,} → {_dec_faces:,} faces  "
+                      f"nm={_dec_nm}  open={_dec_open}")
+                    working, working_tris = _dec_tmp, _dec_faces
+                    nm_src, open_src = _dec_nm, _dec_open
+                    _dec_done = True
+                    stats['path'].append('pymeshlab-dec')
+                except Exception as _dec_err:
+                    L(f"decimate (pymeshlab): FAILED — {_dec_err}")
+
+            if not _dec_done:
+                L(f"step C: decimate {working_tris:,} tris → target {MAX_FACES:,} (blender fallback)")
+                _bd_ok, _bd_faces, _bd_stdout, _bd_stderr = blender_decimate(
+                    working, _dec_tmp, MAX_FACES)
                 if _bd_ok and os.path.exists(_dec_tmp):
                     working = _dec_tmp
                     # Blender's reported face count is advisory only — the scan
@@ -1007,7 +1632,10 @@ def _process_file_impl(src, is_part=False, temps=None):
                     working_tris = _bd_faces if _bd_faces > 0 else MAX_FACES
                     nm_src, open_src, _scan_err2 = scan_mesh_errors(working)
                     _scan_note2 = f"  scan error: {_scan_err2}" if _scan_err2 else ""
-                    L(f"decimate (blender): → {working_tris:,} faces  nm={nm_src}  open={open_src}{_scan_note2}")
+                    L(f"decimate (blender): → {working_tris:,} faces  "
+                      f"nm={nm_src}  open={open_src}{_scan_note2}")
+                    _dec_done = True
+                    stats['path'].append('blender-dec')
                 else:
                     if os.path.exists(_dec_tmp):
                         os.unlink(_dec_tmp)
@@ -1018,28 +1646,20 @@ def _process_file_impl(src, is_part=False, temps=None):
                     for _bl in (_bd_stderr or '').splitlines():
                         if _bl.strip():
                             L(f"  stderr: {_bl.strip()}")
-                    # File is too large even for Blender to decimate — sending the
-                    # original to Blender repair would also OOM. Fail immediately.
-                    L(f"decimate (blender): FAILED — file too large, skipping Blender repair")
+                    # Every decimator failed.  Sending the full-resolution mesh
+                    # to Blender repair would fail the same way, so stop here.
+                    L("decimate: FAILED — all decimators exhausted, skipping Blender repair")
                     size = _save_indicator(failed_copy, src, [])
                     return {'rel': rel, 'status': 'failed', 'is_mesh_bad': False,
-                            'stdout': 'blender decimate OOM/timeout on oversized mesh', 'stderr': ''}
-            elif _PYMESHLAB_AVAILABLE:
-                _dec_tmp = dst + '.decimate.stl'
-                temps.append(_dec_tmp)
-                L(f"decimate: {working_tris:,} tris → target {MAX_FACES:,} (pymeshlab)")
-                try:
-                    _dec_nm, _dec_open, _dec_faces = run_pymeshlab_decimate(working, _dec_tmp, MAX_FACES)
-                    L(f"decimate: {working_tris:,} → {_dec_faces:,} faces  nm={_dec_nm}  open={_dec_open}")
-                    working = _dec_tmp
-                    working_tris = _dec_faces
-                    nm_src = _dec_nm
-                    open_src = _dec_open
-                except Exception as _dec_err:
-                    if os.path.exists(_dec_tmp):
-                        os.unlink(_dec_tmp)
-                    _dec_tmp = None
-                    L(f"decimate: FAILED — {_dec_err}")
+                            'stdout': 'all decimators failed on oversized mesh', 'stderr': ''}
+
+            # Flag heavy reductions for review, whichever decimator ran.
+            if _dec_done and working_tris > 0:
+                _ratio = float(n_tris) / float(working_tris)
+                if _ratio >= REVIEW_RATIO:
+                    L(f"review: decimated {_ratio:.1f}x — listed in "
+                      f"{os.path.basename(REVIEW_FILE)}")
+                    log_review(rel, n_tris, working_tris)
 
         # Step D — PyMeshLab NM repair.
         if not _PYMESHLAB_AVAILABLE:
@@ -1051,11 +1671,12 @@ def _process_file_impl(src, is_part=False, temps=None):
         if _PYMESHLAB_AVAILABLE and nm_src > 0:
             _nm_tmp = dst + '.repairnm.stl'
             temps.append(_nm_tmp)
-            os.makedirs(os.path.dirname(os.path.abspath(_nm_tmp)), exist_ok=True)
+            _ensure_parent(_nm_tmp)
             L(f"step D: pymeshlab NM repair (nm={nm_src})")
             try:
                 _nm_nm, _nm_open = run_pymeshlab_repair_nm(working, _nm_tmp)
                 L(f"pymeshlab NM repair: nm={_nm_nm}  open={_nm_open}")
+                stats['path'].append('nmrepair')
                 if working != src and os.path.exists(working):
                     os.unlink(working)
                 working = _nm_tmp
@@ -1081,6 +1702,9 @@ def _process_file_impl(src, is_part=False, temps=None):
             try:
                 _pmf_nm, _pmf_open = run_pymeshfix(working, _pmf_tmp)
                 L(f"pymeshfix: nm={_pmf_nm}  open={_pmf_open}")
+                # open_in -> open_out here is the boundary-loop fill that could
+                # have sealed an intentional connector hole.
+                stats['path'].append(f'pymeshfix({open_src}->{_pmf_open})')
                 if working != src and os.path.exists(working):
                     os.unlink(working)
                 working = _pmf_tmp
@@ -1094,16 +1718,19 @@ def _process_file_impl(src, is_part=False, temps=None):
 
         # If clean after all python passes, post-verify with an independent edge scan
         # before writing the final output — pymeshfix self-report is not always reliable.
+        _pv_ok = True
         if nm_src == 0 and open_src == 0:
-            nm_src, open_src = _post_verify(working, L)
+            nm_src, open_src, _pv_ok = _post_verify(working, L)
         if nm_src == 0 and open_src == 0:
-            os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+            _ensure_parent(dst)
             os.replace(working, dst)
             size = os.path.getsize(dst)
             _clear_stale(failed_copy, unrepaired_copy, open_copy)
-            L(f"result: ok (no blender needed)")
+            L(f"result: ok (no blender needed)"
+              + ("" if _pv_ok else " — UNVERIFIED, scan could not run"))
             return {'rel': rel, 'status': 'ok', 'dst': os.path.basename(dst),
-                    'size': size, 'is_ascii': False, 'bypassed': True}
+                    'size': size, 'is_ascii': False, 'bypassed': True,
+                    'verified': _pv_ok}
 
         # Step F — Blender fallback: NM edges remain that PyMeshFix couldn't clear.
         if nm_src == -1:
@@ -1117,12 +1744,22 @@ def _process_file_impl(src, is_part=False, temps=None):
         blender_src = src
         _dec_tmp = None
 
-    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    _ensure_parent(dst)
 
+    # Mark the Blender call on both entry paths — the OBJ/ASCII branch above has
+    # no "fallback" line, so without this those files reach Blender unlogged and
+    # cannot even be counted afterwards.  The dt= on the following line is then
+    # Blender's own wall time, isolated from the post-verify and file writes.
+    _bl_t0 = _time.monotonic()
+    L("blender: start")
     success, open_only, unrepaired, stdout, stderr = fix_stl(
         blender_src, dst, MERGE_DIST,
         is_ascii=is_ascii, is_obj=is_obj,
     )
+    _bl_secs = _time.monotonic() - _bl_t0
+    L(f"blender: done in {_bl_secs:.1f}s")
+    stats['blender_secs'] = f"{_bl_secs:.1f}"
+    stats['path'].append('blender')
 
     # Clean up pre-pass temps now that Blender is done.
     if blender_src != src and os.path.exists(blender_src):
@@ -1139,8 +1776,9 @@ def _process_file_impl(src, is_part=False, temps=None):
     def _result(**kwargs):
         return {'rel': rel, **kwargs}
 
+    _pv_ok = True
     if success and os.path.exists(dst):
-        _pv_nm, _pv_open = _post_verify(dst, L, label="blender post-verify")
+        _pv_nm, _pv_open, _pv_ok = _post_verify(dst, L, label="blender post-verify")
         if _pv_nm > 0 or _pv_open > 0:
             success = False
             open_only = True
@@ -1148,8 +1786,10 @@ def _process_file_impl(src, is_part=False, temps=None):
     if success and os.path.exists(dst):
         size = os.path.getsize(dst)
         _clear_stale(failed_copy, unrepaired_copy, open_copy)
-        L(f"result: ok (blender)")
-        return _result(status='ok', dst=os.path.basename(dst), size=size, is_ascii=is_ascii, is_obj=is_obj)
+        L(f"result: ok (blender)"
+          + ("" if _pv_ok else " — UNVERIFIED, scan could not run"))
+        return _result(status='ok', dst=os.path.basename(dst), size=size,
+                       is_ascii=is_ascii, is_obj=is_obj, verified=_pv_ok)
     elif open_only and os.path.exists(dst):
         if _PYMESHFIX_AVAILABLE:
             r = _try_pymeshfix_after_blender(
@@ -1158,7 +1798,7 @@ def _process_file_impl(src, is_part=False, temps=None):
                 temps=temps)
             if r is not None:
                 return r
-        os.makedirs(os.path.dirname(os.path.abspath(open_copy)), exist_ok=True)
+        _ensure_parent(open_copy)
         os.replace(dst, open_copy)
         size = os.path.getsize(open_copy)
         _clear_stale(failed_copy, unrepaired_copy)
@@ -1196,6 +1836,29 @@ def _process_file_impl(src, is_part=False, temps=None):
 
 _worker_status = None   # set by _worker_init to the shared Manager dict
 _blender_proc  = None   # current Blender subprocess in this worker (or None)
+
+
+def _unlimit_child_address_space():
+    """preexec_fn for Blender: undo the worker's inherited RLIMIT_AS.
+
+    RLIMIT_AS is inherited across fork/exec and caps *virtual* address space,
+    not resident memory.  Blender reserves far more VA than it ever resides
+    (thread stacks, mmap'd arenas, driver mappings), so a worker cap sized for
+    Python's own allocations aborts Blender at a fraction of that figure —
+    observed as `Malloc returns null: ... total 1.2 GB` under a 3 GiB cap while
+    14 GB of real memory was free.  The cgroup MemoryMax from run.sh is what
+    bounds Blender; this limit is only meant to bound the worker itself.
+
+    Runs in the forked child between fork and exec, so it must stay async-signal
+    safe: no logging, no allocation beyond the resource call itself."""
+    try:
+        import resource as _resource
+        _soft, _hard = _resource.getrlimit(_resource.RLIMIT_AS)
+        if _soft != _resource.RLIM_INFINITY:
+            _resource.setrlimit(_resource.RLIMIT_AS,
+                                (_resource.RLIM_INFINITY, _hard))
+    except Exception:
+        pass  # a child that keeps the cap is still better than no child
 
 
 def _kill_own_children(sig):
@@ -1279,6 +1942,33 @@ def _worker_init(shared_status, nice_level, mem_limit_bytes=0):
     _signal.signal(_signal.SIGTERM, _sigterm)
 
 
+_libc = None
+
+def release_worker_memory():
+    """Return freed heap back to the OS after finishing a file.
+
+    Python's garbage collector reclaims objects, but glibc keeps the underlying
+    arenas mapped for reuse, so an idle worker goes on counting against the
+    cgroup's memory limit.  Measured after a real 2.5M-triangle decimation: RSS
+    stayed at 902 MB through gc.collect() and only dropped to 787 MB once
+    malloc_trim() ran.  With several workers idling between files that is
+    gigabytes of dead weight competing with the workers still doing something.
+
+    malloc_trim() is glibc-specific; on any other libc this is a no-op."""
+    import gc as _gc
+    _gc.collect()
+    global _libc
+    if _libc is False:      # probed once, not available here
+        return
+    try:
+        if _libc is None:
+            import ctypes as _ctypes
+            _libc = _ctypes.CDLL("libc.so.6")
+        _libc.malloc_trim(0)
+    except Exception:
+        _libc = False       # unavailable — stop retrying
+
+
 def process_file_safe(src, is_part=False):
     """Wrapper around process_file that catches any unhandled exception, writes it
     to the log, saves a .failed.stl indicator, and returns a failed result dict
@@ -1289,7 +1979,17 @@ def process_file_safe(src, is_part=False):
     _pid = os.getpid()
     if _worker_status is not None:
         try:
-            _worker_status[_pid] = {'rel': rel, 'started': _t.monotonic()}
+            # Size and triangle count come from a stat plus an 84-byte header
+            # read — negligible next to the work about to be done on this file,
+            # and it lets the panel show what each worker is actually chewing on.
+            try:
+                _bytes = os.path.getsize(src)
+            except OSError:
+                _bytes = 0
+            _tris, _hdr_err = _read_stl_header(src)
+            _worker_status[_pid] = {'rel': rel, 'started': _t.monotonic(),
+                                    'bytes': _bytes,
+                                    'tris': 0 if _hdr_err else _tris}
         except Exception:
             pass
     try:
@@ -1304,7 +2004,7 @@ def process_file_safe(src, is_part=False):
             _dst      = output_path(src, OUTPUT_SUFFIX, INPUT_FOLDER)
             _dst_base = os.path.splitext(_dst)[0]
             _failed   = _dst_base + '.failed.stl'
-            os.makedirs(os.path.dirname(os.path.abspath(_failed)), exist_ok=True)
+            _ensure_parent(_failed)
             if not os.path.exists(_failed):
                 shutil.copy2(src, _failed)
         except Exception:
@@ -1316,6 +2016,7 @@ def process_file_safe(src, is_part=False):
             _worker_status.pop(_pid, None)
         except Exception:
             pass
+    release_worker_memory()
     return result
 
 
@@ -1348,9 +2049,14 @@ if __name__ == '__main__':
             print(f"Copied {copied} companion file(s) to output folder"
                   + (f" ({skipped_copy} already present)" if skipped_copy else ""))
 
-    # Truncate log file at the start of each run.
+    # Truncate log files at the start of each run, keeping LOG_KEEP previous
+    # runs as .1 … .N so a run that has to be restarted does not take its own
+    # evidence with it.
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    rotate_all_logs()
     open(LOG_FILE, 'w').close()
+    _reset_review_file()
+    _reset_summary_file()
 
     workers = min(WORKERS, len(files))
     print(f"Found {len(files)} STL file(s) in '{INPUT_FOLDER}'")
@@ -1363,6 +2069,7 @@ if __name__ == '__main__':
     print(f"Blender       : {BLENDER}")
     print(f"PyMeshFix     : {'available' if _PYMESHFIX_AVAILABLE else 'not available'}")
     print(f"PyMeshLab     : {'available' if _PYMESHLAB_AVAILABLE else 'not available'}")
+    print(f"FastSimplify  : {'available' if _FASTSIMP_AVAILABLE else 'not available (decimation falls back to PyMeshLab/Blender)'}")
     print()
 
     ok = 0

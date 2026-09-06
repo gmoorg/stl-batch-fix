@@ -8,10 +8,10 @@ OUTPUT_SUFFIX =
 # Vertex merge radius for T-junction fix
 MERGE_DIST = 0.01
 
-# Parallel worker processes
-WORKERS = 1
+# Parallel worker processes (0 = auto from RAM and cores)
+WORKERS = 0
 
-# Per-file timeout before killing Blender
+# Per-file limit; the worker is killed if a file exceeds it
 TIMEOUT = 1200
 
 # Decimate threshold (0 = disabled)

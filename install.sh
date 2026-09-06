@@ -61,6 +61,21 @@ else
     }
 fi
 
+# ── fast-simplification ───────────────────────────────────────────────────────
+# Primary decimator. Same quadric edge collapse as PyMeshLab/Blender, but
+# operating on numpy arrays instead of a full mesh database: measured ~7.5s /
+# 1.1 GB where PyMeshLab needs 42s / 1.6 GB and Blender OOMs, on a 2.55M
+# triangle mesh. Without it the pipeline falls back to PyMeshLab, then Blender.
+echo "→ fast-simplification"
+if "$PYTHON" -c "import fast_simplification" 2>/dev/null; then
+    ok "fast-simplification already installed"
+else
+    warn "fast-simplification not found — installing..."
+    "$PYTHON" -m pip install fast-simplification && ok "fast-simplification installed" || {
+        warn "fast-simplification install failed — decimation falls back to PyMeshLab/Blender (slower, more memory)"
+    }
+fi
+
 # ── numpy (required by pymeshfix) ─────────────────────────────────────────────
 echo "→ numpy"
 if "$PYTHON" -c "import numpy" 2>/dev/null; then

@@ -23,6 +23,12 @@ from pathlib import Path
 # very large batches while still giving a useful end-of-run summary.
 _RESULTS_KEPT = 500
 
+# NOTE: ProcessPoolExecutor's max_tasks_per_child is deliberately NOT used to
+# recycle workers.  Setting it forces the 'spawn' start method, which re-imports
+# this module in every worker and loses the fork-inherited state the pipeline
+# relies on.  Idle memory is reclaimed with malloc_trim() after each file
+# instead (see release_worker_memory in stl_batch_fix.py).
+
 # ---------------------------------------------------------------------------
 # Resolve script directory — config files live here regardless of cwd.
 # ---------------------------------------------------------------------------
@@ -43,8 +49,8 @@ CFG_FIELDS = [
     ('INPUT_FOLDER',  'Input folder',      str,   'Source folder containing STL/OBJ files'),
     ('OUTPUT_SUFFIX', 'Output suffix',     str,   'Appended to output filename stem (blank = none)'),
     ('MERGE_DIST',    'Merge distance mm', float, 'Vertex merge radius for T-junction fix'),
-    ('WORKERS',       'Workers',           int,   'Parallel worker processes'),
-    ('TIMEOUT',       'Timeout (s)',       int,   'Per-file timeout before killing Blender'),
+    ('WORKERS',       'Workers',           int,   'Parallel worker processes (0 = auto from RAM and cores)'),
+    ('TIMEOUT',       'Timeout (s)',       int,   'Per-file limit; the worker is killed if a file exceeds it'),
     ('MAX_FACES',     'Max faces',         int,   'Decimate threshold (0 = disabled)'),
     ('RECURSIVE',     'Recursive',         bool,  'Walk subdirectories'),
 ]
@@ -58,6 +64,25 @@ CFG_DEFAULTS = {
     'MAX_FACES':     str(_fix.MAX_FACES),
     'RECURSIVE':     str(_fix.RECURSIVE),
 }
+
+
+def _child_pids(pid):
+    """Direct children of `pid`, read from /proc.
+
+    Used to reach a Blender launched by a worker: the worker's own tracked
+    handle is a global inside that process and is not visible from here."""
+    out = []
+    try:
+        task_dir = f'/proc/{pid}/task'
+        for tid in os.listdir(task_dir):
+            try:
+                with open(f'{task_dir}/{tid}/children') as f:
+                    out.extend(int(k) for k in f.read().split())
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        pass
+    return out
 
 
 def _cfg_path(name):
@@ -191,8 +216,26 @@ _STATUS_STYLE = {
     'skip':       '[dim]SKIP[/dim]',
     'corrupt':    '[red]CORRUPT[/red]',
     'unrepaired': '[magenta]UNREPAIRED[/magenta]',
+    'interrupted':'[yellow]INTERRUPTED[/yellow]',
     'failed':     '[bold red]FAILED[/bold red]',
 }
+
+def _mmss(seconds):
+    """Format a duration as mm:ss (or h:mm:ss past an hour)."""
+    seconds = int(max(0, seconds))
+    h, rem = divmod(seconds, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
+
+
+def _human_bytes(n):
+    """Compact size for display: 4.2 MB, 812 KB, 1.1 GB."""
+    n = float(n or 0)
+    for unit, div in (('GB', 1024**3), ('MB', 1024**2), ('KB', 1024)):
+        if n >= div:
+            return f"{n/div:.1f} {unit}"
+    return f"{int(n)} B"
+
 
 def _extract_detail(result):
     """Pull the one interesting line out of a result's Blender output.
@@ -223,6 +266,11 @@ def _trim_result(result):
 def _status_label(result):
     s = result['status']
     if s == 'ok':
+        # An 'ok' whose post-verify scan could not run has been checked by
+        # nothing.  Say so on the line itself — a plain green OK is what gets
+        # acted on, and 'verified' is absent only on results from older runs.
+        if result.get('verified') is False:
+            return '[green]OK[/green] [yellow]UNVERIFIED[/yellow]'
         if result.get('split'):
             return f'[green]OK[/green] [dim]SPLIT({result["split"]})+MERGE[/dim]'
         if result.get('bypassed'):
@@ -233,31 +281,30 @@ def _status_label(result):
 
 
 def _worker_mem_limit(n_workers):
-    """Per-worker RLIMIT_AS in bytes, or 0 to leave the address space uncapped.
+    """Per-worker RLIMIT_AS in bytes.  Returns 0 — the cap is deliberately off.
 
-    run.sh exports WORKER_MEM_MAX (bytes) derived from the cgroup MemoryMax, so
-    each worker gets a fair share with headroom left for the parent and Blender.
-    A worker that exceeds its share raises MemoryError and fails that one file,
-    instead of the cgroup OOM-killer picking a victim at random — which could be
-    the parent, orphaning every worker (todo L3)."""
-    raw = os.environ.get('WORKER_MEM_MAX', '').strip()
-    if not raw:
-        return 0
-    try:
-        total = int(raw)
-    except ValueError:
-        return 0
-    if total <= 0 or n_workers <= 0:
-        return 0
-    # Reserve ~25% of the budget for the parent process and Blender children,
-    # which are separate processes and not covered by a worker's RLIMIT_AS.
-    return int(total * 0.75 / n_workers)
+    This used to divide WORKER_MEM_MAX between the workers, but RLIMIT_AS caps
+    *virtual address space*, not resident memory, and the mesh libraries are C++
+    code that reserves far more VA than it ever resides.  Three workers under a
+    2 GiB cap each failed every decimation with std::bad_alloc while actually
+    using ~1 GB RSS apiece (3.1 GB total, against an 8 G cgroup that was never
+    close to full).  numpy reported it plainly: "Unable to allocate 42.0 MiB".
+
+    Resident memory is what needs bounding, and the cgroup MemoryMax from run.sh
+    already does that correctly across the whole process tree — workers and
+    Blender alike.  Keeping the function (rather than deleting the call site)
+    leaves one documented place to reintroduce a real limit, should a per-worker
+    RSS cap ever be wanted; RLIMIT_AS is not that mechanism.
+    """
+    return 0
 
 
-def run_progress_screen(values, files, cfg):
+def run_progress_screen(values, files, cfg, sized=None):
     """Drive the worker pool and display live progress."""
     n_workers = values['WORKERS']
     total = len(files)
+    # (n_tris, path) smallest-first; falls back to unknown sizes if not supplied.
+    _sized = sized if sized is not None else [(0, p) for p in files]
 
     # Apply values to the module globals so workers pick them up.
     _fix.INPUT_FOLDER  = values['INPUT_FOLDER']
@@ -268,10 +315,23 @@ def run_progress_screen(values, files, cfg):
     _fix.MAX_FACES     = values['MAX_FACES']
     _fix.RECURSIVE     = values['RECURSIVE']
 
-    # Prepare log file.
+    # Prepare log file.  Previous runs age off as .1 … .N (see _fix.LOG_KEEP)
+    # rather than being overwritten, so restarting after a bad run does not
+    # destroy the log that explains it.
     log_dir = os.path.dirname(_fix.LOG_FILE)
     os.makedirs(log_dir, exist_ok=True)
+    _fix.rotate_all_logs()
     open(_fix.LOG_FILE, 'w').close()
+    _fix._reset_review_file()
+    _fix._reset_summary_file()
+
+    # Clear intermediates a previously killed worker could not clean up (a
+    # SIGKILL skips the finally block that normally removes them).
+    _n_swept, _bytes_swept = _fix.sweep_orphan_temps(
+        os.path.join(os.path.dirname(os.path.abspath(values['INPUT_FOLDER'])), 'Fixed'))
+    if _n_swept:
+        console.print(f"[dim]Removed {_n_swept} orphaned temp file(s) "
+                      f"({_bytes_swept/1e6:.0f} MB) from a previous run[/dim]")
 
     # Shared state: workers write their current file into worker_status keyed by PID.
     _mgr = multiprocessing.Manager()
@@ -284,16 +344,26 @@ def run_progress_screen(values, files, cfg):
     # Stable display slot per worker PID, so files don't jump between rows as
     # workers come and go (todo M7).
     worker_slots = {}
-    counts = {'ok': 0, 'open': 0, 'skip': 0, 'failed': 0, 'corrupt': 0, 'unrepaired': 0}
+    counts = {'ok': 0, 'open': 0, 'skip': 0, 'failed': 0, 'corrupt': 0,
+              'unrepaired': 0, 'interrupted': 0}
     counts_lock = threading.Lock()
     done_count  = [0]
 
     def _make_layout():
         layout = Layout()
+        # Fixed-size Layout regions clip silently from the bottom when actual
+        # content is taller — Rich doesn't shrink the panel to fit, it cuts off
+        # whatever overflows, border and all. The previous sizes (n_workers+4,
+        # 6) were 2 and 1 lines short respectively, so the last worker row and
+        # the summary panel's bottom border were being clipped on every render.
+        # These values are measured against the real Table/Panel output the
+        # panel builders below actually produce (box.SIMPLE, show_header=True,
+        # one data row per worker) — verify against rendered output, not
+        # recomputed from box-drawing theory, if the table styling changes.
         layout.split_column(
-            Layout(name='header', size=4),
-            Layout(name='workers', size=n_workers + 4),
-            Layout(name='summary', size=6),
+            Layout(name='header', size=3),
+            Layout(name='workers', size=n_workers + 6),
+            Layout(name='summary', size=7),
             Layout(name='log'),
         )
         return layout
@@ -303,14 +373,30 @@ def run_progress_screen(values, files, cfg):
 
     def _workers_panel():
         t = Table(box=box.SIMPLE, show_header=True, header_style='dim')
-        t.add_column('Worker', style='dim',    width=9)
+        t.add_column('Worker', style='dim',    width=7)
         t.add_column('PID',    style='dim',    width=8)
         t.add_column('File',   style='white',  ratio=1)
-        t.add_column('Time',   style='yellow', width=8)
+        t.add_column('Size',   style='cyan',   width=9,  justify='right')
+        t.add_column('Tris',   style='cyan',   width=11, justify='right')
+        t.add_column('Time',   style='yellow', width=8,  justify='right')
         try:
             active = dict(worker_status)
         except Exception:
             active = {}
+        # Drop entries left by workers that died. process_file_safe removes its
+        # own entry when a file finishes, but a SIGKILLed worker (the OOM killer)
+        # never runs that line, so its row would otherwise sit here for the rest
+        # of the run with a timer counting up on a file nothing is working on.
+        # os.kill(pid, 0) asks the kernel whether the process still exists.
+        for _pid in list(active):
+            try:
+                os.kill(_pid, 0)
+            except (OSError, TypeError):
+                active.pop(_pid, None)
+                try:
+                    worker_status.pop(_pid, None)
+                except Exception:
+                    pass
         # Assign each PID a stable slot the first time it is seen, and reuse a
         # slot only once its previous occupant is gone — otherwise rows shuffle
         # on every refresh as the dict's iteration order changes (todo M7).
@@ -328,21 +414,26 @@ def run_progress_screen(values, files, cfg):
         for slot in range(max(n_workers, len(rows))):
             entry = rows.get(slot)
             if entry is None:
-                t.add_row(f'{slot}', '', '[dim]idle[/dim]', '')
+                t.add_row(f'{slot}', '', '[dim]idle[/dim]', '', '', '')
             else:
                 pid, info = entry
+                _tris = info.get('tris') or 0
                 t.add_row(f'{slot}', str(pid), info['rel'],
-                          f"+{now - info['started']:.0f}s")
+                          _human_bytes(info.get('bytes')),
+                          f"{_tris:,}" if _tris else '',
+                          _mmss(now - info['started']))
         return Panel(t, title='[bold]Workers[/bold]', border_style='blue')
 
     def _summary_panel():
         t = Table(box=box.SIMPLE, show_header=True, header_style='bold')
         for col, style in [('OK','green'),('OPEN','yellow'),('SKIP','dim'),
-                           ('FAIL','red'),('CORRUPT','red'),('UNREPAIRED','magenta')]:
+                           ('FAIL','red'),('CORRUPT','red'),('UNREPAIRED','magenta'),
+                       ('INTERRUPT','yellow')]:
             t.add_column(col, style=style, justify='right', width=10)
         with counts_lock:
             t.add_row(str(counts['ok']), str(counts['open']), str(counts['skip']),
-                      str(counts['failed']), str(counts['corrupt']), str(counts['unrepaired']))
+                      str(counts['failed']), str(counts['corrupt']),
+                      str(counts['unrepaired']), str(counts['interrupted']))
         return Panel(t, title='[bold]Summary[/bold]', border_style='green')
 
     def _log_panel():
@@ -370,6 +461,7 @@ def run_progress_screen(values, files, cfg):
     task = progress.add_task('Processing', total=total)
 
     layout = _make_layout()
+    _run_started = time.monotonic()
 
     _pool = concurrent.futures.ProcessPoolExecutor(
         max_workers=n_workers,
@@ -439,42 +531,283 @@ def run_progress_screen(values, files, cfg):
     signal.signal(signal.SIGTERM, _handle_signal)
 
     future_to_src = {}
+    # Files whose future died with the pool without ever running.  A worker
+    # killed by the OOM killer breaks the whole ProcessPoolExecutor, not just
+    # its own task: every not-yet-completed future — including files still
+    # sitting in the queue, unassigned to anyone — fails with BrokenProcessPool
+    # and the pool refuses further work.  One 7M-triangle mesh therefore cost 40
+    # untouched files in the last run.  These are collected and retried on a
+    # fresh pool rather than written off.
+    _to_retry = []
+    # How many times each file has been resubmitted after a pool break.  A file
+    # that dies once may simply have been in flight beside the real culprit; a
+    # file that dies on two independent pools is the culprit.
+    _attempts = {}
+    # Files that broke a pool more than once — reported, never resubmitted.
+    _gave_up = []
+    _pool_generation = [0]
+    _MAX_POOL_RESTARTS = 3
     try:
         with Live(layout, console=console, refresh_per_second=4, screen=True):
-            future_to_src = {_pool.submit(_fix.process_file_safe, src): (i, src)
-                             for i, src in enumerate(files)}
-            pending = set(future_to_src)
+            # Submit progressively rather than all at once.  Memory per worker
+            # scales with the mesh in flight, so concurrency has to fall as the
+            # files get bigger — submitting everything up front would hand the
+            # pool a 20M-triangle mesh to run alongside three others.  Files are
+            # ordered smallest-first, and the number allowed in flight is
+            # recomputed from the next file's size, dropping toward a single
+            # worker as the meshes grow.
+            _queue = list(_sized)          # [(n_tris, path)], smallest first
+            _next_index = [0]
+            # Workers report the relative name; the timeout marker needs the
+            # source path to copy from, so keep the mapping back.
+            _rel_to_src = {os.path.relpath(p, values['INPUT_FOLDER']): p
+                           for _, p in _sized}
 
-            while pending and not _interrupted.is_set():
-                layout['header'].update(_header_panel(progress))
-                layout['workers'].update(_workers_panel())
-                layout['summary'].update(_summary_panel())
-                layout['log'].update(_log_panel())
+            def _fill():
+                """Submit while the next file still fits alongside what is running.
 
-                done, pending = concurrent.futures.wait(
-                    pending, timeout=0.25,
-                    return_when=concurrent.futures.FIRST_COMPLETED)
-
-                for future in done:
-                    i, src = future_to_src[future]
-                    rel = os.path.relpath(src, values['INPUT_FOLDER'])
+                Returns False if the pool is broken and could not accept work —
+                the caller then falls through to the restart path.  A dead pool
+                raises from submit() itself, not just from future.result(), so
+                this has to be caught here or it escapes the whole TUI."""
+                while _queue:
+                    n_tris, src = _queue[0]
+                    allowed = _fix.plan_worker_count(n_tris, n_workers)
+                    if len(pending) >= allowed:
+                        break
+                    _queue.pop(0)
                     try:
-                        result = future.result()
-                    except concurrent.futures.CancelledError:
-                        continue
-                    except Exception as exc:
-                        result = {'status': 'failed', 'rel': rel,
-                                  'reason': str(exc), 'stdout': '', 'stderr': ''}
-                    # Drop the bulky Blender output before retaining the result.
-                    results_log.append((rel, _trim_result(result)))
-                    with counts_lock:
-                        s = result['status']
-                        if s in counts:
-                            counts[s] += 1
+                        fut = _pool.submit(_fix.process_file_safe, src)
+                    except (concurrent.futures.process.BrokenProcessPool,
+                            RuntimeError):
+                        # Pool died as this file was being handed over.  It has
+                        # not run, so it goes back — but to the BACK of the
+                        # queue, like any other interrupted file.  Returning it
+                        # to the front would make the replacement pool retry it
+                        # first, and if this file is the one killing workers that
+                        # burns the whole restart budget on it.
+                        _attempts[src] = _attempts.get(src, 0) + 1
+                        if _attempts[src] <= 1:
+                            _queue.append((n_tris, src))
                         else:
-                            counts['failed'] += 1
-                    done_count[0] += 1
-                    progress.update(task, advance=1)
+                            _gave_up.append((n_tris, src))
+                        return False
+                    future_to_src[fut] = (_next_index[0], src)
+                    _next_index[0] += 1
+                    pending.add(fut)
+                    if allowed < n_workers:
+                        _fix.log_step('(sched)',
+                                      f"{os.path.basename(src)}: {n_tris:,} tris "
+                                      f"— limiting to {allowed} concurrent worker(s)")
+                return True
+
+            _timed_out = {}      # pid -> rel, so one kill is not repeated
+
+            def _watchdog():
+                """Kill any worker that has held a single file past TIMEOUT.
+
+                TIMEOUT used to reach only Blender, via communicate(timeout=).
+                Everything else in the pipeline — fast_simplification, pymeshfix,
+                pymeshlab — runs in-process inside C++ that holds the GIL, so no
+                Python-level timer can interrupt it and a hang there was
+                unbounded.  That is the likeliest place to hang, too: pymeshfix
+                is ~80% of total runtime.
+
+                The parent is the only process that can enforce this, and it
+                already wakes every 0.25s to redraw.  SIGKILL rather than
+                SIGTERM because the target is wedged inside a C++ call that will
+                not service a handler.  Killing the worker breaks the pool,
+                which the existing BrokenProcessPool path already handles: the
+                file is retried once, then set aside.  monotonic() is
+                system-wide on Linux, so the worker's 'started' is directly
+                comparable here."""
+                if _fix.TIMEOUT <= 0:
+                    return
+                now = time.monotonic()
+                try:
+                    snapshot = list(worker_status.items())
+                except Exception:
+                    return                      # manager died; nothing to police
+                for pid, info in snapshot:
+                    try:
+                        started = info['started']
+                        rel = info.get('rel', '?')
+                    except Exception:
+                        continue
+                    # Keyed by (pid, started) rather than pid alone: a restarted
+                    # pool can hand a fresh worker a recycled pid, and a
+                    # pid-only guard would exempt that innocent worker from the
+                    # timeout for the rest of the run.
+                    if (pid, started) in _timed_out:
+                        continue
+                    held = now - started
+                    if held < _fix.TIMEOUT:
+                        continue
+                    _timed_out[(pid, started)] = rel
+                    _fix.log_step(rel, f"TIMEOUT after {held:.0f}s "
+                                       f"(limit {_fix.TIMEOUT}s) — killing worker {pid}")
+                    # Write the indicator here, in the parent: the worker is
+                    # about to be SIGKILLed and will never reach the code that
+                    # writes the other .<signal>.stl markers.
+                    _src_path = _rel_to_src.get(rel)
+                    if _src_path:
+                        _marker = _fix.mark_timeout(_src_path,
+                                                    values['INPUT_FOLDER'],
+                                                    values['OUTPUT_SUFFIX'])
+                        if _marker:
+                            _fix.log_step(rel, f"wrote {os.path.basename(_marker)} "
+                                               f"— delete it to retry this file")
+                    # Kill the worker's own children (a Blender it launched)
+                    # first.  SIGKILL on the worker alone would reparent that
+                    # grandchild to init, where nothing is left to stop it and
+                    # it keeps its memory for as long as it runs.  Read from
+                    # /proc rather than tracked state: the worker's
+                    # _blender_proc global lives in the worker, not here.
+                    for _tid in _child_pids(pid):
+                        try:
+                            os.kill(_tid, signal.SIGKILL)
+                        except OSError:
+                            pass
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+
+            pending = set()
+            _fill()
+
+            # Outer loop: each pass drains a pool.  If a worker death broke the
+            # pool and left files unrun, a replacement pool is built below and
+            # this repeats — the inner `while pending` cannot do it itself,
+            # because a broken pool empties `pending` and ends that loop.
+            while True:
+                while (pending or _queue) and not _interrupted.is_set():
+                    layout['header'].update(_header_panel(progress))
+                    layout['workers'].update(_workers_panel())
+                    layout['summary'].update(_summary_panel())
+                    layout['log'].update(_log_panel())
+
+                    done, pending = concurrent.futures.wait(
+                        pending, timeout=0.25,
+                        return_when=concurrent.futures.FIRST_COMPLETED)
+
+                    _watchdog()
+
+                    for future in done:
+                        i, src = future_to_src[future]
+                        rel = os.path.relpath(src, values['INPUT_FOLDER'])
+                        try:
+                            result = future.result()
+                        except concurrent.futures.CancelledError:
+                            continue
+                        except concurrent.futures.process.BrokenProcessPool as exc:
+                            # A worker died (OOM killer, segfault) and CPython
+                            # failed every outstanding future, running and merely
+                            # queued alike.  Being "in flight" does not mean this
+                            # file caused the death: with N workers the others
+                            # were mid-file on healthy meshes and are equally
+                            # innocent.  So retry once — only a file that dies on
+                            # two independent pools is treated as the culprit.
+                            #
+                            # A file the watchdog killed is the exception: it is
+                            # known guilty, and a retry would simply burn TIMEOUT
+                            # seconds again to reach the same kill.  Report it
+                            # straight away, naming the real cause rather than
+                            # the generic out-of-memory guess below.
+                            if rel in _timed_out.values():
+                                result = {'status': 'interrupted', 'rel': rel,
+                                          'reason': f'exceeded the {_fix.TIMEOUT}s '
+                                                    'per-file timeout — raise Timeout '
+                                                    'or decimate this file further',
+                                          'stdout': '', 'stderr': ''}
+                            elif _attempts.get(src, 0) < 1:
+                                _attempts[src] = _attempts.get(src, 0) + 1
+                                _to_retry.append(src)
+                                continue
+                            result = {'status': 'interrupted', 'rel': rel,
+                                      'reason': 'killed a worker twice (likely out '
+                                                'of memory) — needs more RAM or '
+                                                'fewer workers',
+                                      'stdout': '', 'stderr': ''}
+                        except Exception as exc:
+                            result = {'status': 'failed', 'rel': rel,
+                                      'reason': str(exc), 'stdout': '', 'stderr': ''}
+                        # Drop the bulky Blender output before retaining the result.
+                        results_log.append((rel, _trim_result(result)))
+                        with counts_lock:
+                            s = result['status']
+                            if s in counts:
+                                counts[s] += 1
+                            else:
+                                counts['failed'] += 1
+                        done_count[0] += 1
+                        progress.update(task, advance=1)
+
+                    # A worker freed up — submit whatever now fits.  If the
+                    # pool is broken, stop draining and let the restart path
+                    # below rebuild it.
+                    if not _fill():
+                        break
+
+                # The inner loop ended.  If a worker death broke the pool and
+                # left files unrun, build a replacement pool and resubmit them —
+                # one oversized mesh should cost its own file, not every file
+                # queued behind it.
+                if ((_to_retry or _queue) and not _interrupted.is_set()
+                        and _pool_generation[0] < _MAX_POOL_RESTARTS):
+                    _pool_generation[0] += 1
+                    # Send the interrupted files to the BACK of the queue, not
+                    # the front.  They go back through _fill() so the same memory
+                    # throttling applies, but retrying them immediately would put
+                    # the heavy file that just killed a worker straight back
+                    # alongside the next-heaviest ones — the exact collision that
+                    # broke the pool.  Deferring them lets the smaller remaining
+                    # work drain first, so a retry runs with the queue nearly
+                    # empty and the most memory available.
+                    _size_of = {p: n for n, p in _sized}
+                    for _s in _to_retry:
+                        _queue.append((_size_of.get(_s, 0), _s))
+                    _n_back, _to_retry = len(_to_retry), []
+                    try:
+                        _pool.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
+                    _pool = concurrent.futures.ProcessPoolExecutor(
+                        max_workers=n_workers,
+                        initializer=_fix._worker_init,
+                        initargs=(worker_status, 10, _worker_mem_limit(n_workers)),
+                    )
+                    _fix.log_step('(pool)', f"worker died — restarted pool "
+                                            f"(#{_pool_generation[0]}); "
+                                            f"{_n_back} file(s) requeued, "
+                                            f"{len(_queue)} still pending")
+                    pending = set()
+                    _fill()
+                    continue
+
+                # Nothing left to retry (or budget spent) — done.
+                break
+
+            # Files that repeatedly killed a worker, plus anything still
+            # unretried after the restart budget is spent.
+            for _n, _src in _gave_up:
+                _rel = os.path.relpath(_src, values['INPUT_FOLDER'])
+                results_log.append((_rel, {'status': 'interrupted', 'rel': _rel,
+                                           'detail': f'{_n:,} tris — killed a worker '
+                                                     'repeatedly; needs more memory'}))
+                with counts_lock:
+                    counts['interrupted'] += 1
+                done_count[0] += 1
+                progress.update(task, advance=1)
+            for _src in _to_retry:
+                _rel = os.path.relpath(_src, values['INPUT_FOLDER'])
+                results_log.append((_rel, {'status': 'interrupted', 'rel': _rel,
+                                           'detail': 'not processed — pool broke '
+                                                     'repeatedly'}))
+                with counts_lock:
+                    counts['interrupted'] += 1
+                done_count[0] += 1
+                progress.update(task, advance=1)
 
             # Final render pass.
             layout['header'].update(_header_panel(progress))
@@ -502,10 +835,12 @@ def run_progress_screen(values, files, cfg):
     console.print()
     t = Table(box=box.SIMPLE, show_header=True, header_style='bold')
     for col, style in [('OK','green'),('OPEN','yellow'),('SKIP','dim'),
-                       ('FAIL','red'),('CORRUPT','red'),('UNREPAIRED','magenta')]:
+                       ('FAIL','red'),('CORRUPT','red'),('UNREPAIRED','magenta'),
+                       ('INTERRUPT','yellow')]:
         t.add_column(col, style=style, justify='right', width=12)
     t.add_row(str(counts['ok']), str(counts['open']), str(counts['skip']),
-              str(counts['failed']), str(counts['corrupt']), str(counts['unrepaired']))
+              str(counts['failed']), str(counts['corrupt']),
+              str(counts['unrepaired']), str(counts['interrupted']))
     console.print(t)
 
     # List non-ok files (from the retained tail — see _RESULTS_KEPT).
@@ -520,8 +855,56 @@ def run_progress_screen(values, files, cfg):
                       f"see the full log.[/dim]")
 
     console.print()
+    # Heavily-decimated files worth a look before printing (data lines only —
+    # the file starts with '#' comment headers).
+    try:
+        with open(_fix.REVIEW_FILE) as _rf:
+            _review = [ln for ln in _rf if ln.strip() and not ln.startswith('#')]
+    except OSError:
+        _review = []
+    # Files whose worker died before reporting — killed by the OOM killer or a
+    # library segfault.  These never produce a normal result, so they would
+    # otherwise vanish from every count.
+    try:
+        _died = [r for r in _fix.read_summary() if r['status'] == 'started']
+    except Exception:
+        _died = []
+    if _died:
+        console.print(f"[bold red]{len(_died)} file(s) killed a worker "
+                      f"before completing[/bold red] — likely out of memory:")
+        for _r in _died[:10]:
+            console.print(f"  [red]{_r['file']}[/red] [dim]({_r['path']})[/dim]")
+        if len(_died) > 10:
+            console.print(f"  [dim]… and {len(_died) - 10} more[/dim]")
+        console.print(f"  [dim]{_fix.SUMMARY_FILE}[/dim]")
+        console.print()
+    # Files the watchdog killed for exceeding the per-file limit.  These are
+    # counted under INTERRUPT, so name them here — otherwise the one thing that
+    # distinguishes them from a Ctrl-C is buried in the step log.
+    _timeouts = [r for r in results_log
+                 if r[1].get('status') == 'interrupted'
+                 and 'timeout' in str(r[1].get('reason', '')).lower()]
+    if _timeouts:
+        console.print(f"[bold yellow]{len(_timeouts)} file(s) hit the "
+                      f"{_fix.TIMEOUT}s per-file timeout[/bold yellow] "
+                      f"— killed mid-repair:")
+        for _rel, _r in _timeouts[:10]:
+            console.print(f"  [yellow]{_rel}[/yellow]")
+        if len(_timeouts) > 10:
+            console.print(f"  [dim]… and {len(_timeouts) - 10} more[/dim]")
+        console.print("  [dim]Marked .timeout.stl in the output folder and skipped "
+                      "on future runs — delete the marker to retry, or raise "
+                      "Timeout.[/dim]")
+        console.print()
+    if _review:
+        console.print(f"[yellow]{len(_review)} file(s) decimated "
+                      f"{_fix.REVIEW_RATIO:g}x or more[/yellow] — check thin walls "
+                      f"and connector holes:")
+        console.print(f"  [dim]{_fix.REVIEW_FILE}[/dim]")
+        console.print()
+    console.print(f"Total time: [cyan]{_mmss(time.monotonic() - _run_started)}[/cyan]"
+                  f"  [dim](mm:ss)[/dim]")
     console.print(f"Log: [dim]{_fix.LOG_FILE}[/dim]")
-
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -572,9 +955,64 @@ def main():
 
     # ── Collect files ──────────────────────────────────────────────────────
     files = _fix.collect_stl_files(values['INPUT_FOLDER'], values['RECURSIVE'])
+    # Smallest first, with sizes retained: run_progress_screen uses them to
+    # decide how many workers may run concurrently as the meshes grow.
+    # Drop files that already have an output or an indicator, before any worker
+    # is started — otherwise each one costs a process dispatch just to be told
+    # it was already handled.
+    _found_total = len(files)
+    files, _already = _fix.partition_already_done(files, values['INPUT_FOLDER'],
+                                                  values['OUTPUT_SUFFIX'])
+    if _already:
+        _by_reason = {}
+        for _p, _why in _already:
+            _by_reason[_why] = _by_reason.get(_why, 0) + 1
+        _order = [('fixed', 'already fixed', 'green'),
+                  ('open', 'left with open edges', 'yellow'),
+                  ('unrepaired', 'unrepaired', 'magenta'),
+                  ('timeout', 'timed out before', 'yellow'),
+                  ('failed', 'previously failed', 'red'),
+                  ('broken', 'bad mesh data', 'red')]
+        _parts = [f"[{c}]{_by_reason[k]} {label}[/{c}]"
+                  for k, label, c in _order if k in _by_reason]
+        console.print(f"[dim]Skipping {len(_already)} of {_found_total} file(s) "
+                      f"from previous runs:[/dim] " + ", ".join(_parts))
+        _retryable = sum(_by_reason.get(k, 0)
+                         for k in ('failed', 'unrepaired', 'open', 'timeout'))
+        if _retryable:
+            console.print(f"[dim]  {_retryable} can be retried — delete the matching "
+                          f".failed/.unrepaired/.open/.timeout .stl in the output "
+                          f"folder.[/dim]")
+
+    _sized_files = _fix.measure_files(files)
+    files = [p for _, p in _sized_files]
     if not files:
-        console.print(f"[yellow]No STL files found in:[/yellow] {values['INPUT_FOLDER']}")
+        if _already:
+            console.print(f"[green]Nothing to do — all {_found_total} file(s) "
+                          f"already processed.[/green]")
+        else:
+            console.print(f"[yellow]No STL files found in:[/yellow] {values['INPUT_FOLDER']}")
         sys.exit(0)
+
+    # WORKERS=0 means auto: pick a ceiling from cores and the memory budget,
+    # sized against the heavy end of this particular collection.  Per-file
+    # admission still lowers it further for individual large meshes.
+    if values['WORKERS'] <= 0:
+        values['WORKERS'] = _fix.auto_worker_count(_sized_files)
+        _budget = _fix._run_memory_budget()
+        console.print(f"[dim]Workers: auto -> [cyan]{values['WORKERS']}[/cyan] "
+                      f"({os.cpu_count()} cores, "
+                      f"{_budget/1024**3:.0f} GB budget)[/dim]")
+
+    # Never start more workers than there are files.  A worker that never gets
+    # work still pays ~80 MB to import numpy/pymeshlab/pymeshfix, so on a run
+    # with three files left over from a previous pass the extras are pure waste.
+    # Applies to a hand-set WORKERS too, not just the auto value.
+    if values['WORKERS'] > len(files):
+        _asked = values['WORKERS']
+        values['WORKERS'] = max(1, len(files))
+        console.print(f"[dim]Workers: {_asked} -> [cyan]{values['WORKERS']}[/cyan] "
+                      f"(only {len(files)} file(s) to process)[/dim]")
 
     # Copy companion files before starting workers.
     companions = _fix.collect_companion_files(values['INPUT_FOLDER'], values['RECURSIVE'])
@@ -596,7 +1034,7 @@ def main():
     time.sleep(0.5)  # brief pause so user can read the message
 
     # ── Run ────────────────────────────────────────────────────────────────
-    run_progress_screen(values, files, cfg)
+    run_progress_screen(values, files, cfg, sized=_sized_files)
 
 
 if __name__ == '__main__':
