@@ -673,6 +673,14 @@ def find_winding_seams(verts, faces):
 # models stayed within a percent.
 _VOLUME_LOSS_LIMIT = 0.95
 
+# Below this enclosed volume (mm^3) the ratio above is not trusted.  A thin
+# shell or a flat scrap encloses almost nothing, so the "loss" is a ratio
+# between two rounding errors: a full-collection run fired the split on twelve
+# parts reading "volume 0 -> 0 (3%)" and similar, none of which had any
+# geometry to lose.  Only two of the fourteen were real, and both were well
+# over this.
+_VOLUME_MIN_MEANINGFUL = 1.0
+
 
 def _mesh_volume(path):
     """Signed volume enclosed by a mesh, or None if it cannot be read.
@@ -2317,6 +2325,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                 _vol_before = _mesh_volume(working)
                 _vol_after = _mesh_volume(_pmf_tmp)
                 if (_vol_before and _vol_after
+                        and _vol_before >= _VOLUME_MIN_MEANINGFUL
                         and _vol_after < _vol_before * _VOLUME_LOSS_LIMIT
                         and not _is_seam_piece):
                     L(f"pymeshfix: volume {_vol_before:,.0f} -> {_vol_after:,.0f} "
