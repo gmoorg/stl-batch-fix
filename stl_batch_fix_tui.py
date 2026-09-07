@@ -218,6 +218,114 @@ console = Console()
 # Config screen (plain prompt-based, no curses)
 # ---------------------------------------------------------------------------
 
+# Signal files the run writes, with what each one means and whether deleting it
+# makes the pipeline retry that file.  Order is the order shown in the menu.
+_SIGNAL_KINDS = [
+    ('.failed.stl',     'Failed',     'copy of source; transient error', True),
+    ('.timeout.stl',    'Timed out',  'copy of source; exceeded the time limit', True),
+    ('.unrepaired.stl', 'Unrepaired', 'copy of source; non-manifold edges remain', True),
+    ('.broken.stl',     'Broken',     'copy of source; permanently bad mesh', True),
+    ('.open.stl',       'Open edges', 'REPAIRED output; open edges remain', True),
+    ('.original.stl',   'Bbox check', 'copy of source; repair moved the bounding box', False),
+]
+
+
+def _find_signal_files(out_root):
+    """Return {suffix: [paths]} for every signal file under out_root."""
+    found = {suf: [] for suf, _, _, _ in _SIGNAL_KINDS}
+    for root, _dirs, files in os.walk(out_root):
+        for name in files:
+            for suf in found:
+                if name.endswith(suf):
+                    found[suf].append(os.path.join(root, name))
+                    break
+    return found
+
+
+def run_delete_signals_screen(cfg):
+    """Delete signal files by kind, so a run can retry what they suppress.
+
+    The markers are full copies of the source, so this is the one screen that
+    can remove real data — every deletion is counted, sized and confirmed
+    before anything is touched."""
+    out_root = os.path.join(
+        os.path.dirname(os.path.abspath(cfg.get('INPUT_FOLDER', '.'))), 'Fixed')
+    console.print()
+    console.rule('[bold yellow]Delete signal files[/bold yellow]')
+    console.print(f"[dim]Output folder: {out_root}[/dim]")
+    console.print()
+    if not os.path.isdir(out_root):
+        console.print(f"[red]Output folder does not exist.[/red]")
+        console.print()
+        return
+
+    found = _find_signal_files(out_root)
+    if not any(found.values()):
+        console.print("[green]No signal files found — nothing to delete.[/green]")
+        console.print()
+        return
+
+    t = Table(box=box.SIMPLE, show_header=True, header_style='bold')
+    t.add_column('#', style='dim', width=3)
+    t.add_column('Kind', style='cyan', width=12)
+    t.add_column('Files', style='yellow', justify='right', width=6)
+    t.add_column('Size', style='yellow', justify='right', width=10)
+    t.add_column('Meaning', style='dim')
+    shown = []
+    for suf, label, desc, retries in _SIGNAL_KINDS:
+        paths = found.get(suf, [])
+        if not paths:
+            continue
+        size = sum(os.path.getsize(p) for p in paths if os.path.exists(p))
+        shown.append((suf, label, paths))
+        note = desc + ('' if retries else '  (deleting does NOT change what runs)')
+        t.add_row(str(len(shown)), label, str(len(paths)), _human_bytes(size), note)
+    console.print(t)
+    _all = sum(len(p) for _, _, p in shown)
+    _allsize = sum(os.path.getsize(p) for _, _, ps in shown for p in ps
+                   if os.path.exists(p))
+    console.print(f"Enter a number to delete that kind, [yellow]a[/yellow] for all "
+                  f"({_all} files, {_human_bytes(_allsize)}), "
+                  f"[green]b[/green] to go back.")
+    console.print()
+
+    while True:
+        choice = Prompt.ask('Delete', default='b').strip().lower()
+        if choice in ('b', ''):
+            console.print()
+            return
+        if choice == 'a':
+            targets = [p for _, _, ps in shown for p in ps]
+            what = 'ALL signal files'
+        elif choice.isdigit() and 1 <= int(choice) <= len(shown):
+            suf, label, targets = shown[int(choice) - 1]
+            what = f'{label} ({suf})'
+        else:
+            console.print('[red]Not a valid choice.[/red]')
+            continue
+
+        size = sum(os.path.getsize(p) for p in targets if os.path.exists(p))
+        console.print(f"[yellow]About to delete {len(targets)} file(s), "
+                      f"{_human_bytes(size)} — {what}.[/yellow]")
+        console.print("[dim]These are full copies of your source meshes. The "
+                      "originals in the input folder are not touched.[/dim]")
+        if not Confirm.ask('Delete them?', default=False):
+            console.print('[dim]Nothing deleted.[/dim]')
+            console.print()
+            return
+        n = failed = 0
+        for p in targets:
+            try:
+                os.unlink(p)
+                n += 1
+            except OSError:
+                failed += 1
+        console.print(f"[green]Deleted {n} file(s).[/green]"
+                      + (f" [red]{failed} could not be removed.[/red]" if failed else ""))
+        console.print()
+        return
+
+
 def run_config_screen(cfg):
     """Show current config, let user edit fields, return updated cfg dict."""
     console.rule('[bold cyan]STL Batch Fix — Configuration[/bold cyan]')
@@ -233,7 +341,8 @@ def run_config_screen(cfg):
         t.add_row(str(i), label, str(cfg[key]), desc)
     console.print(t)
 
-    console.print("Enter a field number to edit, [green]s[/green] to start, [red]q[/red] to quit.")
+    console.print("Enter a field number to edit, [green]s[/green] to start, "
+                  "[yellow]d[/yellow] to delete signal files, [red]q[/red] to quit.")
     console.print()
 
     while True:
@@ -243,6 +352,9 @@ def run_config_screen(cfg):
             sys.exit(0)
         if choice == 's':
             break
+        if choice == 'd':
+            run_delete_signals_screen(cfg)
+            continue
         if choice.isdigit():
             idx = int(choice) - 1
             if 0 <= idx < len(CFG_FIELDS):

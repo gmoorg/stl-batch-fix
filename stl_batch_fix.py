@@ -679,6 +679,31 @@ def partition_already_done(files, input_folder, suffix=None):
     return todo, done
 
 
+def save_original_copy(src, dst_base):
+    """Keep the source as <dst_base>.original.stl next to a suspect output.
+
+    Written when a repair moved the model's bounding box.  That signal cannot
+    distinguish a correct repair (Transhuman_Girl/Leg1, where a stray artifact
+    was removed) from a destructive one (Zelda NSFW/Chair_foot1, where the end
+    caps were pulled shut), so the repaired file stays as the normal output and
+    the original is kept beside it.  Whichever is right, both are on disk.
+
+    Deliberately not one of the .broken/.failed/.unrepaired markers: those mean
+    "this file was not repaired" and stop the pre-filter from retrying it.  This
+    one carries no such meaning — the output next to it is a real result.
+
+    Returns the path written, or None."""
+    marker = dst_base + '.original.stl'
+    try:
+        if os.path.exists(marker):
+            return marker
+        _ensure_parent(marker)
+        shutil.copy2(src, marker)
+        return marker
+    except OSError:
+        return None
+
+
 def mark_timeout(src, input_folder=None, suffix=None):
     """Write <dst_base>.timeout.stl for a file whose worker was killed on time.
 
@@ -933,6 +958,7 @@ def collect_companion_files(folder, recursive):
 _SIGNAL_SUFFIXES = (
     # Result indicators.
     '.unrepaired.stl', '.failed.stl', '.broken.stl', '.open.stl', '.timeout.stl',
+    '.original.stl',
     # Pipeline intermediates — left behind if a run is killed mid-file (todo M4).
     '.decimate.stl', '.repairnm.stl', '.pymeshfix.stl', '.merge.stl', '.partial',
 )
@@ -1770,6 +1796,14 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                 if _drift:
                     L(f"pymeshfix: bbox changed (inspect) — {_drift}")
                     stats['bbox_drift'] = _drift
+                    # Keep the source next to the output.  The repair may be
+                    # correct (a stray artifact removed) or destructive (end
+                    # caps pulled shut) — the numbers cannot tell those apart,
+                    # so both files are kept and the choice is made by eye.
+                    _orig = save_original_copy(src, dst_base)
+                    if _orig:
+                        L(f"saved {os.path.basename(_orig)} — original geometry, "
+                          f"in case the repair is wrong")
                 # open_in -> open_out here is the boundary-loop fill that could
                 # have sealed an intentional connector hole.
                 stats['path'].append(f'pymeshfix(nm{nm_src}->{_pmf_nm},'
@@ -1838,6 +1872,10 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         if _bl_drift:
             L(f"blender: bbox changed (inspect) — {_bl_drift}")
             stats['bbox_drift'] = _bl_drift
+            _orig = save_original_copy(src, dst_base)
+            if _orig:
+                L(f"saved {os.path.basename(_orig)} — original geometry, "
+                  f"in case the repair is wrong")
 
     # Clean up pre-pass temps now that Blender is done.
     if blender_src != src and os.path.exists(blender_src):
