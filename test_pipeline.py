@@ -455,9 +455,22 @@ class TestSeam(PipelineCase):
                       'the winding seam was not detected')
         self.assertIn('closed loop', self.log)
 
-    def test_split_happened(self):
-        self.assertIn('step E0', self.log,
-                      'a mesh with a closed seam loop was not split')
+    def test_repaired_without_needing_a_split(self):
+        """PyMeshFix re-winds a reversed region when it can, and that is the
+        cheaper answer: on this fixture it returns the same 760 faces with the
+        winding corrected, where splitting first gave 880 faces and introduced
+        2 non-manifold edges.
+
+        The split is a RECOVERY path, taken only when PyMeshFix answers by
+        deleting the region instead — which is measured after the fact, from
+        the enclosed volume, because nothing beforehand distinguishes the two
+        cases: this fixture and the mesh that lost its head both had exactly
+        40 seam edges."""
+        self.assertNotIn('step E0', self.log,
+                         'split preemptively instead of letting pymeshfix '
+                         'try first')
+        self.assertNotIn('geometry was deleted', self.log,
+                         'pymeshfix deleted geometry on a mesh it can re-wind')
 
     def test_no_seam_remains(self):
         """The point of the exercise: the output is consistently wound."""
@@ -477,6 +490,15 @@ class TestSeam(PipelineCase):
         self.assertGreater(self.after.tris, self.before.tris * 0.9,
                            'a region was deleted rather than repaired')
         self.assert_bounds_within()
+
+    def test_volume_check_would_catch_deletion(self):
+        """The guard that decides whether to split: a repair leaving under
+        _VOLUME_LOSS_LIMIT of the volume has deleted geometry, not fixed it.
+        It caught every known case, including two the bounding box missed
+        because the lost geometry was inside the silhouette."""
+        self.assertLess(fix._VOLUME_LOSS_LIMIT, 1.0)
+        self.assertGreater(fix._VOLUME_LOSS_LIMIT, 0.5)
+        self.assertIsNotNone(fix._mesh_volume(self.dst))
 
 
 class TestNoSeamNoSplit(PipelineCase):

@@ -666,6 +666,88 @@ def find_winding_seams(verts, faces):
     return seam, loops
 
 
+# A repair that leaves less than this fraction of the enclosed volume has
+# deleted geometry rather than fixed it.  Repairs legitimately change volume a
+# little — capping a hole adds some, removing a stray artifact takes some — but
+# the known destructive cases lost 15% and more, while good repairs on the same
+# models stayed within a percent.
+_VOLUME_LOSS_LIMIT = 0.95
+
+
+def _mesh_volume(path):
+    """Signed volume enclosed by a mesh, or None if it cannot be read.
+
+    The measure that catches a repair deleting geometry INSIDE the model, where
+    the bounding box cannot: the model that lost its head kept its exact bbox
+    and lost 15% of its volume."""
+    try:
+        verts, faces = _weld_binary_stl(path)
+    except Exception:
+        return None
+    tri = verts[faces]
+    vol = _np.einsum('ij,ij->i', tri[:, 0],
+                     _np.cross(tri[:, 1], tri[:, 2])).sum() / 6.0
+    del verts, faces, tri
+    return abs(float(vol))
+
+
+def _repair_by_seam_split(src_mesh, dst, dst_base, temps, stats, L, rel,
+                          failed_copy, unrepaired_copy, open_copy):
+    """Split at the winding seams, repair each region, merge back.
+
+    The recovery path for a mesh PyMeshFix answered by deleting part of it.
+    Each region is internally consistent once separated, so PyMeshFix preserves
+    it: measured 100.0% and 100.2% of volume on the two regions of a mesh that
+    lost 15% when they were joined.
+
+    Returns a result dict on success, or None to leave the caller's own result
+    in place."""
+    try:
+        verts, faces = _weld_binary_stl(src_mesh)
+    except Exception as exc:
+        L(f"seam split: cannot read the mesh — {exc}")
+        return None
+    seam, loops = find_winding_seams(verts, faces)
+    if not seam:
+        L("seam split: no winding seams to split on")
+        del verts, faces
+        return None
+    L(f"seam split: {len(seam)} seam edges in {loops} closed loop(s)")
+    pieces = split_at_seams(verts, faces, seam)
+    del verts, faces
+    if len(pieces) < 2:
+        L("seam split: the seams do not separate the mesh")
+        return None
+
+    seam_dir = os.path.join(os.path.dirname(os.path.abspath(dst)),
+                            PARTS_DIRNAME)
+    _ensure_parent(os.path.join(seam_dir, 'x'))
+    base = os.path.splitext(os.path.basename(dst))[0]
+    parts = []
+    for i, (pv, pf) in enumerate(pieces):
+        p = os.path.join(seam_dir, f"{base}{_SEAM_MARKER}{i}.stl")
+        _write_binary_stl(p, pv, pf)
+        temps.append(p)
+        parts.append(p)
+    L("split: " + ", ".join(f"{len(pf):,} faces" for _, pf in pieces))
+
+    n_ok = 0
+    for p in parts:
+        r = process_file(p, is_part=True)
+        L(f"  region {os.path.basename(p)}: {r['status']}")
+        if r['status'] in ('ok', 'skip'):
+            n_ok += 1
+    if n_ok != len(parts):
+        L(f"seam split: {n_ok}/{len(parts)} regions repaired")
+        return None
+
+    merged = _merge_parts(parts, dst, seam_dir, L, stats, failed_copy,
+                          unrepaired_copy, open_copy, rel)
+    if merged is not None:
+        stats['path'].append(f'seamsplit{len(parts)}')
+    return merged
+
+
 def split_at_seams(verts, faces, seam):
     """Separate a mesh into regions that do not cross the given seam edges.
 
@@ -2122,7 +2204,11 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
 
         # Step E — PyMeshFix.  Repairs non-manifold edges and open edges alike,
         # so it runs whenever either is present.
-        _needs_pmf = nm_src > 0 or open_src > 0
+        # Winding seams count as needing repair.  A mesh can be nm=0 open=0
+        # and still have a reversed region — that is exactly the case PyMeshFix
+        # re-winds correctly, and without this it skipped step E entirely and
+        # the seam survived into the output.
+        _needs_pmf = nm_src > 0 or open_src > 0 or _seam_loops > 0
         if not _PYMESHFIX_AVAILABLE:
             L("skip E: pymeshfix unavailable")
         elif nm_src == -1 or open_src == -1:
@@ -2153,7 +2239,17 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         # on the name as well makes that explicit and bounds the recursion at
         # one level even if a piece somehow came back with a loop of its own.
         _is_seam_piece = _SEAM_MARKER in os.path.basename(src).lower()
-        if _seam_loops > 0 and not _is_seam_piece:
+        # Seam loops alone do NOT justify splitting.  PyMeshFix re-winds a
+        # reversed region correctly when it can — on a sphere with its cap
+        # reversed (40 seam edges, 1 loop) it returns the same 760 faces with
+        # the winding corrected, where splitting first gives 880 faces and
+        # introduces 2 non-manifold edges.  The split is only worth it when
+        # PyMeshFix would instead DELETE the region, and nothing measurable
+        # here distinguishes those two cases in advance: both meshes had
+        # exactly 40 seam edges.  So the decision is deferred until after
+        # step E, where the damage is a measured fact rather than a guess —
+        # see the volume check below.
+        if False and _seam_loops > 0 and not _is_seam_piece:
             try:
                 _sv, _sf = _weld_binary_stl(working)
                 _seam = _seam_edges
@@ -2203,6 +2299,37 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
             try:
                 _pmf_nm, _pmf_open = run_pymeshfix(working, _pmf_tmp)
                 L(f"pymeshfix: nm={_pmf_nm}  open={_pmf_open}")
+
+                # Did it repair the mesh, or delete part of it?
+                #
+                # PyMeshFix rebuilds one coherent surface.  Given a mesh whose
+                # regions disagree about which way is out it usually re-winds
+                # them, which is correct and cheap — but sometimes it discards
+                # one instead, and nothing measurable beforehand says which:
+                # the model that lost its head and a sphere with its cap
+                # reversed both had exactly 40 seam edges, and PyMeshFix
+                # re-wound the sphere while deleting 30% of the model.
+                #
+                # So the question is asked afterwards, when the answer is a
+                # measured fact.  Enclosed volume is the signal: it caught
+                # every known case, including two the bounding box could not
+                # because the lost geometry was inside the silhouette.
+                _vol_before = _mesh_volume(working)
+                _vol_after = _mesh_volume(_pmf_tmp)
+                if (_vol_before and _vol_after
+                        and _vol_after < _vol_before * _VOLUME_LOSS_LIMIT
+                        and not _is_seam_piece):
+                    L(f"pymeshfix: volume {_vol_before:,.0f} -> {_vol_after:,.0f} "
+                      f"({100 * _vol_after / _vol_before:.0f}%) — geometry was "
+                      f"deleted, retrying split at the winding seams")
+                    _recovered = _repair_by_seam_split(
+                        working, dst, dst_base, temps, stats, L, rel,
+                        failed_copy, unrepaired_copy, open_copy)
+                    if _recovered is not None:
+                        return _recovered
+                    L("seam split did not recover it — keeping the "
+                      "pymeshfix result")
+
                 # Observe only — the extents are recorded, never acted on.  A
                 # repair should not move a model's bounding box: a shrink means
                 # geometry was deleted, growth means it was invented.  Logged so
