@@ -2168,12 +2168,18 @@ def process_file_subprocess(src, is_part=False):
         os.close(_wr)
         _wr = None
         _payload = b''
+        _stderr = ''
         try:
+            # Wait FIRST, then read.  Reading the pipe up front blocks until the
+            # child closes it, which a hung child never does — the timeout then
+            # could not fire, and the kill arrived down the wrong path with the
+            # wrong status.  Once the process has exited the pipe is closed, so
+            # the read cannot block.
+            _, _stderr = proc.communicate(timeout=TIMEOUT)
+            _rc = proc.returncode
             with os.fdopen(_rd, 'rb') as _f:
                 _rd = None
                 _payload = _f.read()
-            _, _stderr = proc.communicate(timeout=max(1, TIMEOUT - (_t.monotonic() - started)))
-            _rc = proc.returncode
         except _sp.TimeoutExpired:
             # Kill the whole tree: the child may itself have a Blender running.
             for _k in _child_pids_of(proc.pid):
