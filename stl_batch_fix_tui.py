@@ -123,7 +123,32 @@ def _abandon_pool(pool):
     So the shutdown is handed to a daemon thread and never joined.  If it hangs
     there it hangs alone; the daemon flag keeps it from holding up interpreter
     exit.  The pool's processes are already dead or dying, and any file that was
-    in flight has been requeued by the caller."""
+    in flight has been requeued by the caller.
+
+    The workers are SIGKILLed first, and that part is not optional.
+    shutdown(cancel_futures=True) does not wake a worker already blocked reading
+    the call queue: it sits in anon_pipe_read forever, and the executor's own
+    management thread then blocks in waitpid() joining it.  A real run reached
+    the end, printed its whole report, and never exited — parent in do_wait, one
+    worker holding 2 GB, two zombies unreaped.  Killing the processes outright
+    is what actually lets the pool go."""
+    try:
+        procs = list(getattr(pool, '_processes', {}).values())
+    except Exception:
+        procs = []
+    for p in procs:
+        try:
+            if p.is_alive():
+                p.kill()            # SIGKILL; a blocked pipe read ignores SIGTERM
+        except Exception:
+            pass
+    # Reap them so they do not linger as zombies holding their PIDs.
+    for p in procs:
+        try:
+            p.join(timeout=2)
+        except Exception:
+            pass
+
     def _drain():
         try:
             pool.shutdown(wait=False, cancel_futures=True)
@@ -1009,10 +1034,13 @@ def run_progress_screen(values, files, cfg, sized=None):
         # shutdown() blocks on the dead process's orphaned queue lock — and this
         # runs on Ctrl-C, which is precisely when that has happened.
         _abandon_pool(_pool)
-        try:
-            _mgr.shutdown()
-        except Exception:
-            pass
+        # Bounded for the same reason: the manager process can refuse to go down
+        # while anything still holds a proxy reference, and by this point the
+        # run is over — a hang here costs the user their shell, not any work.
+        _t = threading.Thread(target=lambda: _mgr.shutdown(), daemon=True,
+                              name='mgr-shutdown')
+        _t.start()
+        _t.join(5)
 
     # Print final summary outside of Live — this is the first point at which
     # console output is actually visible, so the interrupt is reported here
@@ -1277,3 +1305,13 @@ def main():
 
 if __name__ == '__main__':
     main()
+    # Leave immediately rather than waiting for interpreter teardown.  The
+    # report above is the last thing the run has to say, but multiprocessing
+    # joins its children at exit, and a worker blocked in a pipe read never
+    # returns — a real run printed its entire summary and then sat there with
+    # the parent in waitpid(), one worker holding 2 GB and two zombies unreaped.
+    # Everything is already flushed and on disk by this point; os._exit skips
+    # the atexit handlers that would otherwise block.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
