@@ -615,6 +615,108 @@ def _weld_binary_stl(path):
     return verts, faces
 
 
+def find_winding_seams(verts, faces):
+    """Locate edges where two faces disagree about which way the surface faces.
+
+    On a consistently wound surface, the two faces sharing an edge traverse it
+    in OPPOSITE directions.  Traversing it the same way means the surface
+    reverses there — and when those edges form CLOSED LOOPS, they are the
+    boundary between two regions whose winding cannot be reconciled: hair over
+    a scalp, cloth over a body, a separately-sculpted part fused to its host.
+
+    Returns (seam_edges, n_closed_loops).  The loop count is what matters, not
+    the edge count.  Measured on one model:
+
+        head deleted by PyMeshFix   40 seam edges, 7 closed loops, 0 loose ends
+        renders and prints fine      5 seam edges, 0 closed loops, 4 loose ends
+
+    A few edges with dangling ends are local noise that stops on its own.  A
+    closed loop encircles something."""
+    from collections import defaultdict
+    edge_dir = defaultdict(list)
+    for a, b, c in faces:
+        for u, w in ((a, b), (b, c), (c, a)):
+            edge_dir[(min(u, w), max(u, w))].append(u < w)
+    seam = [k for k, dirs in edge_dir.items()
+            if len(dirs) == 2 and dirs[0] == dirs[1]]
+    if not seam:
+        return [], 0
+
+    # A closed loop is a connected run of seam edges where every vertex has
+    # exactly two of them — no ends, no branches.
+    adj = defaultdict(list)
+    for a, b in seam:
+        adj[a].append(b)
+        adj[b].append(a)
+    seen = set()
+    loops = 0
+    for start in list(adj):
+        if start in seen:
+            continue
+        stack, group = [start], []
+        while stack:
+            x = stack.pop()
+            if x in seen:
+                continue
+            seen.add(x)
+            group.append(x)
+            stack.extend(adj[x])
+        if all(len(adj[x]) == 2 for x in group):
+            loops += 1
+    return seam, loops
+
+
+def split_at_seams(verts, faces, seam):
+    """Separate a mesh into regions that do not cross the given seam edges.
+
+    Each region comes back internally consistent, which is the whole point:
+    PyMeshFix given the joined mesh keeps one region and deletes the rest —
+    562,288 faces in, 394,432 out, the model's head gone.  Given the regions
+    separately it preserved 100.0% and 100.2% of their volume.
+
+    Returns a list of (verts, faces) with their own vertex numbering, largest
+    first, dropping anything under _MIN_SHELL_FACES as debris."""
+    from collections import defaultdict, deque
+    blocked = set(seam)
+    edge_faces = defaultdict(list)
+    for i, (a, b, c) in enumerate(faces):
+        for u, w in ((a, b), (b, c), (c, a)):
+            edge_faces[(min(u, w), max(u, w))].append(i)
+
+    region = _np.full(len(faces), -1, dtype=_np.int64)
+    n_regions = 0
+    for start in range(len(faces)):
+        if region[start] >= 0:
+            continue
+        region[start] = n_regions
+        queue = deque([start])
+        while queue:
+            fi = queue.popleft()
+            a, b, c = faces[fi]
+            for u, w in ((a, b), (b, c), (c, a)):
+                key = (min(u, w), max(u, w))
+                if key in blocked:
+                    continue                # the seam is the cut line
+                for fj in edge_faces[key]:
+                    if region[fj] < 0:
+                        region[fj] = n_regions
+                        queue.append(fj)
+        n_regions += 1
+
+    out = []
+    for r in range(n_regions):
+        mask = region == r
+        if mask.sum() < _MIN_SHELL_FACES:
+            continue
+        sub = faces[mask]
+        used = _np.unique(sub)
+        remap = _np.zeros(len(verts), dtype=_np.int64)
+        remap[used] = _np.arange(len(used))
+        out.append((verts[used], remap[sub]))
+    out.sort(key=lambda vf: -len(vf[1]))
+    return out
+
+
 def _write_binary_stl(path, verts, faces):
     """Write an indexed mesh out as a binary STL, with real facet normals.
 
@@ -1715,7 +1817,29 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         stats['open_in'] = open_src
 
         # Perfect mesh within limit — just copy, nothing to do.
-        if nm_src == 0 and open_src == 0 and (MAX_FACES == 0 or n_tris <= MAX_FACES):
+        # Winding seams are a defect scan_mesh_errors cannot see — it counts
+        # non-manifold and open edges only.  A mesh can be nm=0 open=0 and
+        # still contain two regions that disagree about which way is out; the
+        # model that prompted all this was exactly that, and took the clean
+        # copy path straight past every repair stage.  Checked here, before
+        # that shortcut, and reused by step E0 below.
+        _seam_edges, _seam_loops = [], 0
+        if not is_part and nm_src != -1 and open_src != -1:
+            try:
+                # `working` is not assigned until below; at this point the
+                # source file is what would be copied or repaired.
+                _sv, _sf = _weld_binary_stl(src)
+                _seam_edges, _seam_loops = find_winding_seams(_sv, _sf)
+                del _sv, _sf
+                if _seam_loops:
+                    L(f"seam check: {len(_seam_edges)} winding-seam edges in "
+                      f"{_seam_loops} closed loop(s)")
+                    stats['seam_loops'] = _seam_loops
+            except Exception as _sc_err:
+                L(f"seam check failed — {_sc_err}")
+
+        if (nm_src == 0 and open_src == 0 and not _seam_loops
+                and (MAX_FACES == 0 or n_tris <= MAX_FACES)):
             if src != dst:
                 # Create dst's own parent directly — never recompute it via
                 # output_path(), which for a part file resolves somewhere else
@@ -1992,6 +2116,66 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
             L("skip E: mesh too large to scan")
         elif not _needs_pmf:
             L("skip E: nm=0 open=0 (nothing to repair)")
+        # Step E0 — separate regions whose winding cannot be reconciled.
+        #
+        # PyMeshFix rebuilds one coherent surface.  Handed a mesh containing two
+        # regions that disagree about which way is out — hair over a scalp,
+        # cloth over a body — it keeps one and deletes the other, reporting
+        # success.  On one model that cost 562,288 faces -> 394,432 and the
+        # model's head, with the bounding box unchanged so nothing flagged it.
+        #
+        # The two regions meet along closed loops of "seam" edges, where both
+        # faces traverse the shared edge the same way.  Cutting there gives
+        # pieces that are each internally consistent, and PyMeshFix then
+        # preserves them: 100.0% and 100.2% of their volume, where the joined
+        # mesh lost 15%.  The pieces are repaired separately and written back
+        # as separate shells of one file — measured volume afterwards was
+        # identical to the source, to the digit.
+        #
+        # Only CLOSED loops trigger this.  A few seam edges with loose ends are
+        # local noise: the same model before repair had 5 such edges in 0 loops
+        # and needed no split.
+        if _seam_loops > 0 and not is_part:
+            try:
+                _sv, _sf = _weld_binary_stl(working)
+                _seam = _seam_edges
+                if _seam:
+                    L(f"step E0: splitting at {len(_seam)} seam edges "
+                      f"({_seam_loops} closed loop(s))")
+                    _pieces = split_at_seams(_sv, _sf, _seam)
+                    del _sv, _sf
+                    if len(_pieces) > 1:
+                        _seam_dir = os.path.join(
+                            os.path.dirname(os.path.abspath(dst)), PARTS_DIRNAME)
+                        _ensure_parent(os.path.join(_seam_dir, 'x'))
+                        _base = os.path.splitext(os.path.basename(dst))[0]
+                        _seam_parts = []
+                        for _i, (_pv, _pf) in enumerate(_pieces):
+                            _p = os.path.join(_seam_dir,
+                                              f"{_base}.seam.{_i}.stl")
+                            _write_binary_stl(_p, _pv, _pf)
+                            temps.append(_p)
+                            _seam_parts.append(_p)
+                        L(f"split: {len(_seam_parts)} region(s) — "
+                          + ", ".join(f"{len(pf):,} faces" for _, pf in _pieces))
+                        _n_ok = 0
+                        for _p in _seam_parts:
+                            _r = process_file(_p, is_part=True)
+                            L(f"  region {os.path.basename(_p)}: {_r['status']}")
+                            if _r['status'] in ('ok', 'skip'):
+                                _n_ok += 1
+                        if _n_ok == len(_seam_parts):
+                            _merged = _merge_parts(_seam_parts, dst, _seam_dir, L,
+                                                   stats, failed_copy,
+                                                   unrepaired_copy, open_copy, rel)
+                            if _merged is not None:
+                                stats['path'].append(f'seamsplit{len(_seam_parts)}')
+                                return _merged
+                        L("seam split: not all regions repaired — "
+                          "falling through to whole-mesh repair")
+            except Exception as _seam_err:
+                L(f"step E0: seam check failed — {_seam_err}")
+
         if _PYMESHFIX_AVAILABLE and _needs_pmf and nm_src != -1 and open_src != -1:
             _pmf_tmp = dst + '.pymeshfix.stl'
             temps.append(_pmf_tmp)
