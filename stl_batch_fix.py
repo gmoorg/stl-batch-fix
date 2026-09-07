@@ -373,6 +373,39 @@ def scan_mesh_errors(path, n_tris=None, return_edges=False):
         return _out(-1, -1, f"{type(_e).__name__}: {_e}")
 
 
+def _merge_parts(parts, dst, dst_dir, L, stats, failed_copy, unrepaired_copy,
+                 open_copy, rel):
+    """Merge repaired shell parts back into one output file.
+
+    Shared by step B (split before decimation) and step B2 (split deferred until
+    after it).  Returns a result dict on success, or None to let the caller fall
+    through to whole-mesh repair — the parts are left in place for that."""
+    try:
+        ms_merge = _pymeshlab.MeshSet()
+        for part_path in parts:
+            if os.path.exists(part_path):
+                ms_merge.load_new_mesh(part_path)
+        # generate_by_merging_visible_meshes was added in PyMeshLab 2022.2;
+        # fall back to flatten_visible_layers on older builds.
+        if hasattr(ms_merge, 'generate_by_merging_visible_meshes'):
+            ms_merge.generate_by_merging_visible_meshes()
+        else:
+            ms_merge.flatten_visible_layers(mergevisible=True)
+        _ensure_parent(dst)
+        ms_merge.save_current_mesh(dst, binary=True)
+        size = os.path.getsize(dst)
+        _clear_stale(failed_copy, unrepaired_copy, open_copy)
+        _n_removed = _cleanup_parts(dst_dir, parts)
+        L(f"merged {len(parts)} parts → {os.path.basename(dst)}  ({size:,} bytes)"
+          f"; removed {_n_removed} part file(s)")
+        stats['path'].append(f'split{len(parts)}+merge')
+        return {'rel': rel, 'status': 'ok', 'dst': os.path.basename(dst),
+                'size': size, 'is_ascii': False, 'split': len(parts)}
+    except Exception as _merge_err:
+        L(f"merge failed: {_merge_err}")
+        return None
+
+
 def split_shells(src, dst_dir, L=None):
     """Split a mesh file into per-shell part files using PyMeshLab's connected
     component analysis. Parts are written into dst_dir (caller supplies the ~parts subfolder).
@@ -1625,6 +1658,17 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         # Step B — split multi-shell (only on original files, not parts).
         # Parts are written to the output folder; source is never modified.
         # Skip entirely if dst or dst.failed already exists, or mesh is too large for PyMeshLab.
+        #
+        # A mesh over the size limit is not simply skipped — the split is
+        # deferred until after decimation (step B2 below), which brings it under
+        # the limit.  Skipping outright is how a 39-shell model 3% over the
+        # threshold reached PyMeshFix intact and came back as a single shell
+        # with its head deleted.
+        _split_deferred = (not is_part and _PYMESHLAB_AVAILABLE
+                           and n_tris > _LARGE_MESH_TRI_LIMIT)
+        if _split_deferred:
+            L(f"step B: deferred — {n_tris:,} tris over the {_LARGE_MESH_TRI_LIMIT:,} "
+              f"scan limit; will split after decimation")
         if not is_part and _PYMESHLAB_AVAILABLE and n_tris <= _LARGE_MESH_TRI_LIMIT:
             if os.path.exists(dst) or os.path.exists(dst_base + '.failed.stl'):
                 pass  # already handled — fall through to normal repair
@@ -1772,6 +1816,55 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                     L(f"review: decimated {_ratio:.1f}x — listed in "
                       f"{os.path.basename(REVIEW_FILE)}")
                     log_review(rel, n_tris, working_tris)
+
+            # Step B2 — the split step B was too large to run, retried now that
+            # decimation has brought the mesh under the limit.
+            #
+            # PyMeshFix rebuilds a single manifold surface and discards every
+            # other component, so a multi-shell mesh that reaches it unsplit
+            # loses all but its largest shell.  That is how a 39-shell model
+            # 3% over the threshold came back as one shell with its head
+            # deleted: 2,061,994 -> 394,432 faces, reported ok.
+            #
+            # Decimation preserves components (measured: 444 shells in, 445
+            # out, smallest still 3 verts), so the deferred split sees the same
+            # structure the source had — and splitting a 900k mesh costs less
+            # than splitting the 2M original would have.  split_shells() drops
+            # fragments under max(100, largest/1000) faces, so debris-only
+            # meshes still return no parts and take the normal path.
+            if _split_deferred and _dec_done and working_tris <= _LARGE_MESH_TRI_LIMIT:
+                if os.path.exists(dst) or os.path.exists(dst_base + '.failed.stl'):
+                    pass
+                else:
+                    dst_dir = os.path.join(
+                        os.path.dirname(os.path.abspath(dst)), PARTS_DIRNAME)
+                    L(f"step B2: split multi-shell (post-decimation, "
+                      f"{working_tris:,} tris)")
+                    parts = split_shells(working, dst_dir, L=L)
+                    if parts:
+                        L(f"split: {len(parts)} shells → "
+                          f"{', '.join(os.path.basename(p) for p in parts)}")
+                        part_results = []
+                        for part_path in parts:
+                            L(f"  part: {os.path.basename(part_path)}")
+                            part_result = process_file(part_path, is_part=True)
+                            part_results.append(part_result)
+                            L(f"  part {os.path.basename(part_path)}: "
+                              f"{part_result['status']}")
+                        if all(r['status'] in ('ok', 'skip') for r in part_results):
+                            _merged = _merge_parts(parts, dst, dst_dir, L, stats,
+                                                   failed_copy, unrepaired_copy,
+                                                   open_copy, rel)
+                            if _merged is not None:
+                                return _merged
+                        else:
+                            _n_ok = sum(1 for r in part_results
+                                        if r['status'] in ('ok', 'skip'))
+                            L(f"split: {_n_ok}/{len(parts)} parts repaired — "
+                              f"falling through to whole-mesh repair")
+                    else:
+                        L("split: single shell (or only fragments) — "
+                          "continuing with the whole mesh")
 
         # Step D (PyMeshLab NM repair) was removed here.
         #
