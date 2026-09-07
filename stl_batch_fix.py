@@ -1185,6 +1185,12 @@ _SIGNAL_SUFFIXES = (
 # Per-shell files written by split_shells() into the ~parts subfolder (todo H2).
 _PART_MARKER = '.part.'
 
+# <base>.seam.<N>.stl — a region cut out at a winding seam, repaired on its own
+# and merged back.  Like a shell part it lives in the output tree and must never
+# be collected as an input; unlike one there can be any number of them, so this
+# is matched as a marker rather than enumerated.
+_SEAM_MARKER = '.seam.'
+
 def collect_stl_files(folder, recursive):
     files = []
     suffix_lower = OUTPUT_SUFFIX.lower()
@@ -1197,7 +1203,7 @@ def collect_stl_files(folder, recursive):
             if name_lower.endswith(sig):
                 return False
         # <base>.part.<N>.stl — a split shell, not an input mesh.
-        if _PART_MARKER in name_lower:
+        if _PART_MARKER in name_lower or _SEAM_MARKER in name_lower:
             return False
         if suffix_lower and ext == '.stl':
             base = os.path.splitext(name_lower)[0]
@@ -1823,8 +1829,15 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         # model that prompted all this was exactly that, and took the clean
         # copy path straight past every repair stage.  Checked here, before
         # that shortcut, and reused by step E0 below.
+        # Runs for shell parts too, not just whole files.  The two splits cut on
+        # different things and nest rather than compete: the shell split
+        # separates components that do not touch, this one separates connected
+        # regions that disagree about which way is out.  A shell part is exactly
+        # where the second kind lives — a head shell with hair sculpted onto it
+        # is one component containing two surfaces, and without this it reached
+        # PyMeshFix unprotected and came back with the hair deleted.
         _seam_edges, _seam_loops = [], 0
-        if not is_part and nm_src != -1 and open_src != -1:
+        if nm_src != -1 and open_src != -1:
             try:
                 # `working` is not assigned until below; at this point the
                 # source file is what would be copied or repaired.
@@ -2135,7 +2148,12 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         # Only CLOSED loops trigger this.  A few seam edges with loose ends are
         # local noise: the same model before repair had 5 such edges in 0 loops
         # and needed no split.
-        if _seam_loops > 0 and not is_part:
+        # A seam piece is seam-free by construction — split_at_seams() cuts
+        # exactly those edges — so it can never re-enter this branch.  Guarding
+        # on the name as well makes that explicit and bounds the recursion at
+        # one level even if a piece somehow came back with a loop of its own.
+        _is_seam_piece = _SEAM_MARKER in os.path.basename(src).lower()
+        if _seam_loops > 0 and not _is_seam_piece:
             try:
                 _sv, _sf = _weld_binary_stl(working)
                 _seam = _seam_edges
@@ -2152,7 +2170,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                         _seam_parts = []
                         for _i, (_pv, _pf) in enumerate(_pieces):
                             _p = os.path.join(_seam_dir,
-                                              f"{_base}.seam.{_i}.stl")
+                                              f"{_base}{_SEAM_MARKER}{_i}.stl")
                             _write_binary_stl(_p, _pv, _pf)
                             temps.append(_p)
                             _seam_parts.append(_p)
