@@ -45,12 +45,32 @@ measured.
 
 ---
 
-## Millenium_Falcon fails where it used to succeed
+## Millenium_Falcon — diagnosed, no change wanted
 
-Both copies (`Hanna and Chewie/` and `Hanna and Chewie/Alternative Version/`)
-came back `failed` in the first full run of the current pipeline. This file
-previously completed via the Blender fallback — PyMeshFix returns an empty mesh
-on it, which is expected for a source with `nm=147,448` out of 393,198 faces,
-and Blender recovered it.
+Not a regression. The file splits into five shells and four of them repair:
 
-Not yet investigated. The step log for that file is the place to start.
+```text
+393,198 tris, nm=147,448 -> 5 shells
+
+part.0   392,088 tris  nm=147,033  pymeshfix empty -> blender      -> ok
+part.1       624 tris  nm=234      pymeshfix empty -> blender      -> ok
+part.2       160 tris  nm=60       pymeshfix empty -> BLENDER_EMPTY -> broken
+part.3       160 tris  nm=60       pymeshfix empty -> blender      -> ok
+part.4       144 tris  nm=54       pymeshfix empty -> blender      -> ok
+
+split partial: 4/5 parts ok — saved as Millenium_Falcon.failed.stl
+```
+
+`part.2` is a 160-face fragment with 60 non-manifold edges — 37% of its edges
+are bad — and both tools reduce it to zero faces. `part.3` is the same size
+with the same defect count and survives, so the exact geometry decides it.
+
+One unsalvageable 0.04% fragment therefore fails the whole file, discarding
+four good parts including the 392,088-face body. Options existed — drop
+unrepairable debris and merge the rest, or merge what worked and flag the file
+— but **the user prefers to repair such files by hand**: the `.failed.stl`
+marker names the file, and the source copy beside it is what they work from.
+Guessing which small shells are disposable risks silently dropping a real part.
+
+Closed. Recorded here because the same shape will recur and the analysis
+should not be repeated.
