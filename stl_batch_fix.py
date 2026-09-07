@@ -14,6 +14,7 @@ import argparse
 import concurrent.futures
 import os
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -90,6 +91,15 @@ if __name__ == '__main__' and len(sys.argv) > 1:
                         help=f"Seconds before killing a hung Blender process (default: {TIMEOUT})")
     parser.add_argument('--max-faces',    type=int, default=None,
                         help=f"Decimate mesh if face count exceeds this (default: {MAX_FACES}, 0=disabled)")
+    parser.add_argument('--one-file',     default=None,
+                        help="Repair exactly this one file and exit. Used by the "
+                             "worker to run each file in its own process, and "
+                             "usable by hand to debug a single mesh.")
+    parser.add_argument('--is-part',      action='store_true',
+                        help="With --one-file: treat the path as a split shell part.")
+    parser.add_argument('--result-fd',    type=int, default=None,
+                        help="With --one-file: write the result dict as JSON to "
+                             "this file descriptor.")
     args = parser.parse_args()
     if args.input      is not None: INPUT_FOLDER  = args.input
     if args.suffix     is not None: OUTPUT_SUFFIX = args.suffix
@@ -98,6 +108,12 @@ if __name__ == '__main__' and len(sys.argv) > 1:
     if args.workers    is not None: WORKERS       = args.workers
     if args.timeout    is not None: TIMEOUT       = args.timeout
     if args.max_faces  is not None: MAX_FACES     = args.max_faces
+    _ONE_FILE   = args.one_file
+    _ONE_IS_PART = args.is_part
+    _RESULT_FD  = args.result_fd
+else:
+    _ONE_FILE = _RESULT_FD = None
+    _ONE_IS_PART = False
 
 # ---------------------------------------------------------------------------
 # Blender script template — loaded from the companion file at startup.
@@ -2090,6 +2106,167 @@ def release_worker_memory():
         _libc = False       # unavailable — stop retrying
 
 
+def process_file_subprocess(src, is_part=False):
+    """Run one file in its own process and report what happened to it.
+
+    This is what the pool calls.  The mesh work happens in a child, so a
+    timeout or the OOM killer takes the child and leaves this worker alive:
+    ProcessPoolExecutor fails EVERY pending future when one of its own workers
+    dies, so killing a worker previously destroyed every file running beside
+    it — one run lost 635s of work on an innocent 7M-triangle mesh that way.
+
+    Because this process spawned the child, it also knows exactly what killed
+    it.  A negative returncode is the signal number: -9 is SIGKILL, and this
+    worker knows whether it did the killing (its own timeout) or something
+    else did (the OOM killer).  That is the attribution the parent could never
+    make from a summary row stuck at 'started' — which is how a set of
+    timeouts once got reported as 'likely out of memory'.
+
+    The timeout is enforced here rather than by the parent's watchdog: this
+    process is already doing nothing but waiting, whereas the parent has to be
+    scheduled to notice, and under memory pressure that ran ~500s late.
+    """
+    import json as _json
+    import subprocess as _sp
+    import time as _t
+
+    rel = os.path.relpath(src, INPUT_FOLDER) if not is_part else os.path.basename(src)
+    _pid = os.getpid()
+    if _worker_status is not None:
+        try:
+            try:
+                _bytes = os.path.getsize(src)
+            except OSError:
+                _bytes = 0
+            _tris, _hdr_err = _read_stl_header(src)
+            _worker_status[_pid] = {'rel': rel, 'started': _t.monotonic(),
+                                    'bytes': _bytes,
+                                    'tris': 0 if _hdr_err else _tris}
+        except Exception:
+            pass
+
+    _rd, _wr = os.pipe()
+    cmd = [sys.executable, os.path.abspath(__file__),
+           '--one-file', src,
+           '--input', INPUT_FOLDER,
+           '--suffix', OUTPUT_SUFFIX,
+           '--merge-dist', str(MERGE_DIST),
+           '--max-faces', str(MAX_FACES),
+           '--timeout', str(TIMEOUT),
+           '--result-fd', str(_wr)]
+    if is_part:
+        cmd.append('--is-part')
+
+    result = None
+    started = _t.monotonic()
+    try:
+        proc = _sp.Popen(cmd, pass_fds=(_wr,),
+                         stdout=_sp.DEVNULL, stderr=_sp.PIPE, text=True,
+                         # The child must not inherit a cap that would kill it
+                         # for the parent's reasons (see the RLIMIT_AS history).
+                         preexec_fn=_unlimit_child_address_space)
+        os.close(_wr)
+        _wr = None
+        _payload = b''
+        try:
+            with os.fdopen(_rd, 'rb') as _f:
+                _rd = None
+                _payload = _f.read()
+            _, _stderr = proc.communicate(timeout=max(1, TIMEOUT - (_t.monotonic() - started)))
+            _rc = proc.returncode
+        except _sp.TimeoutExpired:
+            # Kill the whole tree: the child may itself have a Blender running.
+            for _k in _child_pids_of(proc.pid):
+                try:
+                    os.kill(_k, signal.SIGKILL)
+                except OSError:
+                    pass
+            proc.kill()
+            try:
+                _, _stderr = proc.communicate(timeout=30)
+            except Exception:
+                _stderr = ''
+            _held = _t.monotonic() - started
+            log_step(rel, f"TIMEOUT after {_held:.0f}s (limit {TIMEOUT}s) — "
+                          f"killed the repair process")
+            _marker = mark_timeout(src, INPUT_FOLDER, OUTPUT_SUFFIX)
+            if _marker:
+                log_step(rel, f"wrote {os.path.basename(_marker)} — "
+                              f"delete it to retry this file")
+            result = {'rel': rel, 'status': 'interrupted',
+                      'reason': f'exceeded the {TIMEOUT}s per-file timeout',
+                      'timed_out': True, 'stdout': '', 'stderr': ''}
+            _rc = None
+        if result is None:
+            if _payload:
+                try:
+                    result = _json.loads(_payload.decode('utf-8', 'replace'))
+                except ValueError:
+                    result = None
+            if result is None:
+                # No result came back: the child died before it could write one.
+                # The signal says what happened, which is the whole point of
+                # running it out here.
+                if _rc is not None and _rc < 0:
+                    _sig = -_rc
+                    _why = {9: 'SIGKILL — almost certainly the OOM killer',
+                            11: 'SIGSEGV — crash inside a mesh library',
+                            6: 'SIGABRT — library aborted'}.get(
+                                _sig, f'signal {_sig}')
+                    _msg = f'repair process died: {_why}'
+                else:
+                    _msg = (f'repair process exited {_rc} without a result'
+                            + (f': {(_stderr or "").strip()[:300]}' if _stderr else ''))
+                log_step(rel, _msg)
+                try:
+                    _dst_base = os.path.splitext(
+                        output_path(src, OUTPUT_SUFFIX, INPUT_FOLDER))[0]
+                    _failed = _dst_base + '.failed.stl'
+                    _ensure_parent(_failed)
+                    if not os.path.exists(_failed):
+                        shutil.copy2(src, _failed)
+                except Exception:
+                    pass
+                result = {'rel': rel, 'status': 'failed', 'is_mesh_bad': False,
+                          'stdout': _msg, 'stderr': (_stderr or '')[:2000]}
+    except Exception as _exc:
+        log_step(rel, f"could not run repair process: {type(_exc).__name__}: {_exc}")
+        result = {'rel': rel, 'status': 'failed', 'is_mesh_bad': False,
+                  'stdout': str(_exc), 'stderr': ''}
+    finally:
+        for _fd in (_rd, _wr):
+            if _fd is not None:
+                try:
+                    os.close(_fd)
+                except OSError:
+                    pass
+
+    if _worker_status is not None:
+        try:
+            _worker_status.pop(_pid, None)
+        except Exception:
+            pass
+    release_worker_memory()
+    return result
+
+
+def _child_pids_of(pid):
+    """Direct children of `pid`, from /proc.  Used to reach a Blender that the
+    repair process launched, which would otherwise be reparented to init and
+    keep its memory for as long as it runs."""
+    out = []
+    try:
+        for tid in os.listdir(f'/proc/{pid}/task'):
+            try:
+                with open(f'/proc/{pid}/task/{tid}/children') as f:
+                    out.extend(int(k) for k in f.read().split())
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        pass
+    return out
+
+
 def process_file_safe(src, is_part=False):
     """Wrapper around process_file that catches any unhandled exception, writes it
     to the log, saves a .failed.stl indicator, and returns a failed result dict
@@ -2139,6 +2316,33 @@ def process_file_safe(src, is_part=False):
             pass
     release_worker_memory()
     return result
+
+
+if __name__ == '__main__' and _ONE_FILE:
+    # Single-file mode.  The pool worker runs each file this way so that a
+    # timeout or an OOM kill lands on this process rather than on the worker:
+    # ProcessPoolExecutor fails EVERY pending future when one of its own
+    # workers dies, so killing a worker used to destroy every file running
+    # beside it (one real run lost 635s of work on an innocent 7M-triangle
+    # mesh that way).  Here the worker stays alive, sees the exit code, and
+    # reports an ordinary failed result.
+    #
+    # Also usable by hand to debug one mesh:
+    #   python stl_batch_fix.py --one-file "Zelda NSFW/Chair_foot1.stl"
+    import json as _json
+    _r = process_file_safe(_ONE_FILE, is_part=_ONE_IS_PART)
+    if _RESULT_FD is not None:
+        # The result travels over an inherited pipe rather than stdout, which
+        # carries Blender's chatter and anything a C library decides to print.
+        try:
+            with os.fdopen(_RESULT_FD, 'w') as _f:
+                _json.dump(_r, _f)
+        except Exception:
+            pass
+    else:
+        print(_json.dumps(_r, indent=2))
+    # 0 = handled (whatever the outcome), 1 = no result at all.
+    sys.exit(0 if _r else 1)
 
 
 if __name__ == '__main__':

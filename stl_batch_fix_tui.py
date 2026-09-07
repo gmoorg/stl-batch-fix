@@ -784,7 +784,11 @@ def run_progress_screen(values, files, cfg, sized=None):
                         break
                     _queue.pop(0)
                     try:
-                        fut = _pool.submit(_fix.process_file_safe, src)
+                        # Runs the mesh work in a child process, so a timeout or
+                        # an OOM kill lands there instead of on the pool worker.
+                        # A dying worker fails every pending future, which used
+                        # to destroy every file running alongside the culprit.
+                        fut = _pool.submit(_fix.process_file_subprocess, src)
                     except (concurrent.futures.process.BrokenProcessPool,
                             RuntimeError):
                         # Pool died as this file was being handed over.  It has
@@ -810,8 +814,15 @@ def run_progress_screen(values, files, cfg, sized=None):
 
             _timed_out = {}      # pid -> rel, so one kill is not repeated
 
-            def _watchdog():
-                """Kill any worker that has held a single file past TIMEOUT.
+            def _watchdog(grace=1.0):
+                """Kill a pool worker that has held one file far past TIMEOUT.
+
+                Now a backstop only.  The worker enforces the real timeout on
+                its own repair subprocess, which leaves the pool intact; killing
+                a worker from here fails every pending future and takes the
+                innocent files running beside it down too.  `grace` multiplies
+                the limit so this fires only when the worker itself has stopped
+                responding — not merely because a file is slow.
 
                 TIMEOUT used to reach only Blender, via communicate(timeout=).
                 Everything else in the pipeline — fast_simplification, pymeshfix,
@@ -855,7 +866,7 @@ def run_progress_screen(values, files, cfg, sized=None):
                     if (pid, started) in _timed_out:
                         continue
                     held = now - started
-                    if held < _fix.TIMEOUT:
+                    if held < _fix.TIMEOUT * grace:
                         continue
                     _timed_out[(pid, started)] = rel
                     _fix.log_step(rel, f"TIMEOUT after {held:.0f}s "
@@ -905,7 +916,13 @@ def run_progress_screen(values, files, cfg, sized=None):
                         pending, timeout=0.25,
                         return_when=concurrent.futures.FIRST_COMPLETED)
 
-                    _watchdog()
+                    # The timeout is enforced by the worker, which waits on its
+                    # own repair process and kills that instead — killing a pool
+                    # worker from here is the very thing that took innocent
+                    # files down with it.  _watchdog() stays as a backstop for a
+                    # worker that stops reporting entirely, at several times the
+                    # limit, where something has gone wrong beyond a slow file.
+                    _watchdog(grace=3.0)
 
                     for future in done:
                         i, src = future_to_src[future]
