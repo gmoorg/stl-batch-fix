@@ -66,6 +66,73 @@ CFG_DEFAULTS = {
 }
 
 
+def _pid_is_live(pid):
+    """True if `pid` is a running process, treating a zombie as dead.
+
+    os.kill(pid, 0) is not enough: it succeeds for a zombie, because the process
+    entry survives until the parent reaps it.  A SIGKILLed worker therefore kept
+    its row in the worker panel with the clock still counting up — which is what
+    made a killed run look alive.  /proc/<pid>/stat field 3 is the state letter;
+    'Z' means the process is gone in every sense that matters here."""
+    try:
+        with open(f'/proc/{pid}/stat') as f:
+            # The comm field can contain spaces and parentheses, so the state
+            # letter is read relative to the LAST ')', not by splitting.
+            data = f.read()
+        return data[data.rindex(')') + 2] != 'Z'
+    except (OSError, ValueError, IndexError, TypeError):
+        return False
+
+
+def _status_snapshot(proxy, timeout=2.0):
+    """Read a Manager dict proxy without ever blocking the caller.
+
+    Manager proxies talk to a separate process over a socket, and the call has
+    no timeout: if a worker is SIGKILLed while holding the connection lock, or
+    the manager itself is wedged, an ordinary .items() never returns.  The read
+    therefore happens on a daemon thread that is waited on, not joined — if it
+    does not answer in `timeout` seconds it is abandoned (it dies with the
+    interpreter) and None is returned.
+
+    Returns a list of (key, value) pairs, or None if the read did not complete.
+    """
+    box = {}
+
+    def _read():
+        try:
+            box['v'] = list(proxy.items())
+        except Exception:
+            box['v'] = None
+
+    t = threading.Thread(target=_read, daemon=True, name='status-read')
+    t.start()
+    t.join(timeout)
+    return box.get('v') if not t.is_alive() else None
+
+
+def _abandon_pool(pool):
+    """Discard a pool whose worker was SIGKILLed, without ever blocking.
+
+    shutdown(wait=False) is not safe here.  It still closes the executor's
+    _call_queue, and Queue.close() joins the feeder thread — which is blocked
+    writing to a pipe whose reader was the killed worker, holding the queue's
+    internal lock that the dead process never released.  The parent then waits
+    on that futex forever: observed as a run stuck at 0% CPU with no children
+    while the TUI kept redrawing stale worker rows.
+
+    So the shutdown is handed to a daemon thread and never joined.  If it hangs
+    there it hangs alone; the daemon flag keeps it from holding up interpreter
+    exit.  The pool's processes are already dead or dying, and any file that was
+    in flight has been requeued by the caller."""
+    def _drain():
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+    threading.Thread(target=_drain, daemon=True,
+                     name='abandon-pool').start()
+
+
 def _child_pids(pid):
     """Direct children of `pid`, read from /proc.
 
@@ -379,19 +446,18 @@ def run_progress_screen(values, files, cfg, sized=None):
         t.add_column('Size',   style='cyan',   width=9,  justify='right')
         t.add_column('Tris',   style='cyan',   width=11, justify='right')
         t.add_column('Time',   style='yellow', width=8,  justify='right')
-        try:
-            active = dict(worker_status)
-        except Exception:
-            active = {}
+        # Bounded read — a Manager proxy call can block forever if a worker was
+        # killed while holding the connection lock, and this runs every 0.25s on
+        # the same thread that redraws.  Stale data for one frame beats a frozen
+        # UI (see _status_snapshot).
+        _snap = _status_snapshot(worker_status, timeout=1.0)
+        active = dict(_snap) if _snap is not None else {}
         # Drop entries left by workers that died. process_file_safe removes its
-        # own entry when a file finishes, but a SIGKILLed worker (the OOM killer)
-        # never runs that line, so its row would otherwise sit here for the rest
-        # of the run with a timer counting up on a file nothing is working on.
-        # os.kill(pid, 0) asks the kernel whether the process still exists.
+        # own entry when a file finishes, but a SIGKILLed worker never runs that
+        # line, so its row would otherwise sit here for the rest of the run with
+        # a timer counting up on a file nothing is working on.
         for _pid in list(active):
-            try:
-                os.kill(_pid, 0)
-            except (OSError, TypeError):
+            if not _pid_is_live(_pid):
                 active.pop(_pid, None)
                 try:
                     worker_status.pop(_pid, None)
@@ -624,10 +690,17 @@ def run_progress_screen(values, files, cfg, sized=None):
                 if _fix.TIMEOUT <= 0:
                     return
                 now = time.monotonic()
-                try:
-                    snapshot = list(worker_status.items())
-                except Exception:
-                    return                      # manager died; nothing to police
+                # worker_status is a Manager().dict() proxy: every read is a
+                # blocking socket round-trip to the manager process, with no
+                # timeout available.  A worker SIGKILLed while holding that
+                # connection's lock leaves this call waiting forever — which is
+                # what froze a real run: parent at futex_do_wait, 0% CPU, the
+                # TUI still redrawing stale rows because the redraw loop shares
+                # this thread.  _status_snapshot() does the read on a throwaway
+                # thread and gives up rather than joining it.
+                snapshot = _status_snapshot(worker_status)
+                if snapshot is None:
+                    return                      # manager wedged or gone
                 for pid, info in snapshot:
                     try:
                         started = info['started']
@@ -768,10 +841,7 @@ def run_progress_screen(values, files, cfg, sized=None):
                     for _s in _to_retry:
                         _queue.append((_size_of.get(_s, 0), _s))
                     _n_back, _to_retry = len(_to_retry), []
-                    try:
-                        _pool.shutdown(wait=False, cancel_futures=True)
-                    except Exception:
-                        pass
+                    _abandon_pool(_pool)
                     _pool = concurrent.futures.ProcessPoolExecutor(
                         max_workers=n_workers,
                         initializer=_fix._worker_init,
@@ -815,8 +885,14 @@ def run_progress_screen(values, files, cfg, sized=None):
             layout['summary'].update(_summary_panel())
             layout['log'].update(_log_panel())
     finally:
-        _pool.shutdown(wait=False, cancel_futures=True)
-        _mgr.shutdown()
+        # Same hazard as the restart path: if a worker was SIGKILLed, a direct
+        # shutdown() blocks on the dead process's orphaned queue lock — and this
+        # runs on Ctrl-C, which is precisely when that has happened.
+        _abandon_pool(_pool)
+        try:
+            _mgr.shutdown()
+        except Exception:
+            pass
 
     # Print final summary outside of Live — this is the first point at which
     # console output is actually visible, so the interrupt is reported here
@@ -869,26 +945,44 @@ def run_progress_screen(values, files, cfg, sized=None):
         _died = [r for r in _fix.read_summary() if r['status'] == 'started']
     except Exception:
         _died = []
-    if _died:
-        console.print(f"[bold red]{len(_died)} file(s) killed a worker "
-                      f"before completing[/bold red] — likely out of memory:")
-        for _r in _died[:10]:
+    # A row stuck at 'started' only says the worker never reported back — it does
+    # not say why.  The watchdog's own kills land here too, and reporting those
+    # as "likely out of memory" sends you hunting a memory problem that does not
+    # exist.  A .timeout.stl marker next to the output is the discriminator: the
+    # watchdog writes it, a crash cannot.
+    def _was_timed_out(rel):
+        try:
+            _d = _fix.output_path(os.path.join(values['INPUT_FOLDER'], rel),
+                                  values['OUTPUT_SUFFIX'], values['INPUT_FOLDER'])
+            return os.path.exists(os.path.splitext(_d)[0] + '.timeout.stl')
+        except Exception:
+            return False
+    _timed_kills = [r for r in _died if _was_timed_out(r['file'])]
+    _crashed = [r for r in _died if r not in _timed_kills]
+    if _crashed:
+        console.print(f"[bold red]{len(_crashed)} file(s) killed a worker "
+                      f"before completing[/bold red] — crash or out of memory:")
+        for _r in _crashed[:10]:
             console.print(f"  [red]{_r['file']}[/red] [dim]({_r['path']})[/dim]")
-        if len(_died) > 10:
-            console.print(f"  [dim]… and {len(_died) - 10} more[/dim]")
+        if len(_crashed) > 10:
+            console.print(f"  [dim]… and {len(_crashed) - 10} more[/dim]")
         console.print(f"  [dim]{_fix.SUMMARY_FILE}[/dim]")
         console.print()
     # Files the watchdog killed for exceeding the per-file limit.  These are
     # counted under INTERRUPT, so name them here — otherwise the one thing that
     # distinguishes them from a Ctrl-C is buried in the step log.
-    _timeouts = [r for r in results_log
+    # Two sources, because a timed-out file may never produce a result at all:
+    # the watchdog SIGKILLs the worker, so the row can be left at 'started' and
+    # only the .timeout.stl marker records what happened.
+    _timeouts = [r[0] for r in results_log
                  if r[1].get('status') == 'interrupted'
                  and 'timeout' in str(r[1].get('reason', '')).lower()]
+    _timeouts += [r['file'] for r in _timed_kills if r['file'] not in _timeouts]
     if _timeouts:
         console.print(f"[bold yellow]{len(_timeouts)} file(s) hit the "
                       f"{_fix.TIMEOUT}s per-file timeout[/bold yellow] "
                       f"— killed mid-repair:")
-        for _rel, _r in _timeouts[:10]:
+        for _rel in _timeouts[:10]:
             console.print(f"  [yellow]{_rel}[/yellow]")
         if len(_timeouts) > 10:
             console.print(f"  [dim]… and {len(_timeouts) - 10} more[/dim]")
@@ -901,6 +995,25 @@ def run_progress_screen(values, files, cfg, sized=None):
                       f"{_fix.REVIEW_RATIO:g}x or more[/yellow] — check thin walls "
                       f"and connector holes:")
         console.print(f"  [dim]{_fix.REVIEW_FILE}[/dim]")
+        console.print()
+    # Files whose bounding box moved during repair.  Observational only — no
+    # policy is applied — so a full-collection run can show how often this
+    # happens and by how much before deciding what to do about it.
+    try:
+        _drifted = [r for r in _fix.read_summary() if r.get('bbox_drift')]
+    except Exception:
+        _drifted = []
+    if _drifted:
+        console.print(f"[bold yellow]{len(_drifted)} file(s) changed dimensions "
+                      f"during repair[/bold yellow] — worth a look; this catches "
+                      f"both lost geometry and removed artifacts:")
+        for _r in _drifted[:15]:
+            console.print(f"  [yellow]{_r['file']}[/yellow]")
+            console.print(f"    [dim]{_r['bbox_drift']}[/dim]")
+        if len(_drifted) > 15:
+            console.print(f"  [dim]… and {len(_drifted) - 15} more[/dim]")
+        console.print(f"  [dim]Full list in {os.path.basename(_fix.SUMMARY_FILE)} "
+                      f"(bbox_drift column).[/dim]")
         console.print()
     console.print(f"Total time: [cyan]{_mmss(time.monotonic() - _run_started)}[/cyan]"
                   f"  [dim](mm:ss)[/dim]")

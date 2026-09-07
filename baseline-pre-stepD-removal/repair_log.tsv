@@ -1,0 +1,25 @@
+Mysterium_Megha/Head.stl.stl	+  0.0s  dt=  0.0s  src: tris=3,433,390  nm=-1  open=-1  (too large to scan — will decimate+repair)
+Mysterium_Megha/Head.stl.stl	+  0.0s  dt=  0.0s  step C: decimate 3,433,390 tris → target 900,000 (fast_simplification)
+Demon Queen/arm_right.stl.stl	+  2.0s  dt=  2.0s  src: tris=791,892  nm=2  open=0
+Demon Queen/arm_right.stl.stl	+  2.0s  dt=  0.0s  step B: split multi-shell
+Demon Queen/arm_right.stl.stl	+  4.3s  dt=  2.3s  step D: pymeshlab NM repair (nm=2)
+Demon Queen/body.stl.stl	+  5.2s  dt=  5.2s  src: tris=1,789,954  nm=3  open=0
+Demon Queen/body.stl.stl	+  5.2s  dt=  0.0s  step B: split multi-shell
+Demon Queen/arm_right.stl.stl	+  9.0s  dt=  4.7s  pymeshlab NM repair: nm=0  open=6
+Demon Queen/arm_right.stl.stl	+  9.0s  dt=  0.0s  step E: pymeshfix open-edge fill (open=6)
+Demon Queen/body.stl.stl	+ 14.9s  dt=  9.7s  step C: decimate 1,789,954 tris → target 900,000 (fast_simplification)
+Mysterium_Megha/Head.stl.stl	+ 14.9s  dt= 14.9s  decimate: 3,433,390 → 900,000 faces  nm=86  open=0
+Mysterium_Megha/Head.stl.stl	+ 14.9s  dt=  0.0s  review: decimated 3.8x — listed in review_decimated.tsv
+Mysterium_Megha/Head.stl.stl	+ 14.9s  dt=  0.0s  step D: pymeshlab NM repair (nm=86)
+Demon Queen/body.stl.stl	+ 22.1s  dt=  7.1s  decimate: 1,789,954 → 900,000 faces  nm=3  open=0
+Demon Queen/body.stl.stl	+ 22.1s  dt=  0.0s  step D: pymeshlab NM repair (nm=3)
+Mysterium_Megha/Head.stl.stl	+ 22.6s  dt=  7.6s  pymeshlab NM repair: nm=0  open=137
+Mysterium_Megha/Head.stl.stl	+ 22.6s  dt=  0.0s  step E: pymeshfix open-edge fill (open=137)
+Demon Queen/body.stl.stl	+ 29.1s  dt=  7.1s  pymeshlab NM repair: nm=0  open=12
+Demon Queen/body.stl.stl	+ 29.1s  dt=  0.0s  step E: pymeshfix open-edge fill (open=12)
+Demon Queen/body.stl.stl	+ 83.7s  dt= 54.6s  pymeshfix: nm=0  open=0
+Demon Queen/body.stl.stl	+ 85.8s  dt=  2.1s  result: ok (no blender needed)
+Demon Queen/arm_right.stl.stl	+124.0s  dt=115.0s  pymeshfix: nm=0  open=0
+Demon Queen/arm_right.stl.stl	+125.7s  dt=  1.7s  result: ok (no blender needed)
+Mysterium_Megha/Head.stl.stl	+216.1s  dt=193.5s  pymeshfix: nm=0  open=0
+Mysterium_Megha/Head.stl.stl	+218.2s  dt=  2.1s  result: ok (no blender needed)

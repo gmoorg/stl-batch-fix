@@ -1,0 +1,9 @@
+file	status	secs	tris_in	tris_out	nm_in	open_in	blender_secs	path
+Demon Queen/body.stl.stl	started							pid=192767
+Demon Queen/arm_right.stl.stl	started							pid=192765
+Mysterium_Megha/Head.stl.stl	started							pid=192769
+Mysterium_Megha/Head.stl.stl	exception	54.2	3433390		-1	-1		none
+Demon Queen/body.stl.stl	exception	121.8	1789954		3	0		fastsimp+nmrepair
+Demon Queen/body.stl.stl	ok	85.8	1789954	748856	3	0		fastsimp+nmrepair+pymeshfix(12->0)
+Demon Queen/arm_right.stl.stl	ok	125.7	791892	743504	2	0		nmrepair+pymeshfix(6->0)
+Mysterium_Megha/Head.stl.stl	ok	218.2	3433390	803110	-1	-1		fastsimp+nmrepair+pymeshfix(137->0)

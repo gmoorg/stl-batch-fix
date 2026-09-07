@@ -199,6 +199,80 @@ def _read_stl_header(path):
         return -1, f"{type(_e).__name__}: {_e}"
 
 
+# Bounding-box changes below this (mm) are not worth reporting.  Calibrated
+# against inspected results from a 141-file run:
+#
+#   0.0005 mm  decimation drift          invisible
+#   0.033  mm  Goblin/Poni1              inspected: no visible difference
+#   1.077  mm  Zelda NSFW/Chair_foot1    inspected: end caps destroyed
+#  89.190  mm  Transhuman_Girl/Leg1      inspected: stray artifact removed, fine
+#
+# 0.1 mm sits in the empty gap between the noise and the real changes, and is
+# below one layer height, so nothing printable hides under it.  Note the top of
+# that table: magnitude alone does not say whether a change is damage or
+# cleanup — only that it is worth a look.
+_BBOX_TOLERANCE = 0.1
+
+
+def stl_bounds(path):
+    """Return ((minx,miny,minz), (maxx,maxy,maxz)) for a binary STL, or None.
+
+    Streams the vertex block in chunks rather than welding the mesh: the extents
+    need no connectivity, and welding a 900k-face mesh to answer this would cost
+    hundreds of MB inside a worker that is already near its budget."""
+    n_tris, err = _read_stl_header(path)
+    if err or n_tris <= 0:
+        return None
+    try:
+        lo = _np.full(3, _np.inf, dtype=_np.float64)
+        hi = _np.full(3, -_np.inf, dtype=_np.float64)
+        CHUNK = 200_000                      # triangles per pass (~10 MB)
+        with open(path, 'rb') as f:
+            f.seek(84)
+            remaining = n_tris
+            while remaining > 0:
+                take = min(CHUNK, remaining)
+                buf = f.read(take * 50)
+                if len(buf) < take * 50:
+                    return None
+                block = _np.frombuffer(buf, dtype=_np.uint8).reshape(take, 50)
+                # Bytes 12:48 are the three vertices; 0:12 is the normal, which
+                # must not be included in the extents.
+                verts = block[:, 12:48].copy().view(_np.float32).reshape(-1, 3)
+                _np.minimum(lo, verts.min(axis=0), out=lo)
+                _np.maximum(hi, verts.max(axis=0), out=hi)
+                remaining -= take
+        if not _np.all(_np.isfinite(lo)) or not _np.all(_np.isfinite(hi)):
+            return None
+        return tuple(lo), tuple(hi)
+    except (OSError, ValueError):
+        return None
+
+
+def compare_bounds(before, after, tol=_BBOX_TOLERANCE):
+    """Describe how a repair changed a mesh's extents, or None if unchanged.
+
+    A repair — filling holes, resolving non-manifold edges — adds or adjusts
+    triangles inside an existing boundary, so it should never move the model's
+    extents.  A shrink means geometry was deleted; growth means geometry was
+    invented.  Both are worth knowing about: pymeshlab's NM repair once deleted
+    17% of a mesh and 4.9 mm off its base while reporting a successful repair.
+
+    Returns a short human-readable string naming the axes that moved."""
+    if not before or not after:
+        return None
+    (lo0, hi0), (lo1, hi1) = before, after
+    parts = []
+    for i, axis in enumerate('xyz'):
+        d_lo = lo1[i] - lo0[i]      # positive = min rose = geometry lost
+        d_hi = hi1[i] - hi0[i]      # negative = max fell = geometry lost
+        if abs(d_lo) > tol:
+            parts.append(f"{axis} min {lo0[i]:.3f}->{lo1[i]:.3f} ({d_lo:+.3f})")
+        if abs(d_hi) > tol:
+            parts.append(f"{axis} max {hi0[i]:.3f}->{hi1[i]:.3f} ({d_hi:+.3f})")
+    return "  ".join(parts) if parts else None
+
+
 def _build_edge_counts(raw, n_tris):
     """Count how many faces use each undirected edge of a binary STL triangle block.
 
@@ -459,7 +533,7 @@ def _write_binary_stl(path, verts, faces):
 SUMMARY_FILE = "/mnt/sda2/STL/Fixed/repair_summary.tsv"
 
 _SUMMARY_COLUMNS = ('file', 'status', 'secs', 'tris_in', 'tris_out',
-                    'nm_in', 'open_in', 'blender_secs', 'path')
+                    'nm_in', 'open_in', 'blender_secs', 'path', 'bbox_drift')
 
 
 def _reset_summary_file():
@@ -481,7 +555,10 @@ def log_summary_start(rel, pid):
     file missing from the summary.  Reconciliation is by row order: a file whose
     last row is status='started' never finished, and the PID says which worker
     died.  Best-effort, like the other log writers."""
-    line = '\t'.join([rel, 'started', '', '', '', '', '', '', f'pid={pid}']) + '\n'
+    # Built from _SUMMARY_COLUMNS rather than a fixed field list, so adding a
+    # column cannot silently misalign this row against the real ones.
+    row = {'file': rel, 'status': 'started', 'path': f'pid={pid}'}
+    line = '\t'.join(row.get(c, '') for c in _SUMMARY_COLUMNS) + '\n'
     _append_locked(SUMMARY_FILE, line)
 
 
@@ -1105,18 +1182,6 @@ def run_pymeshfix(src, dst, edge_counts=None):
     return nm, open_e
 
 
-def run_pymeshlab_repair_nm(src, dst):
-    """Remove NM edges and vertices using PyMeshLab. Returns (nm, open_edges) after repair."""
-    ms = _pymeshlab.MeshSet()
-    ms.load_new_mesh(src)
-    ms.meshing_repair_non_manifold_edges()
-    ms.meshing_repair_non_manifold_vertices()
-    ms.save_current_mesh(dst, binary=True)
-    n = ms.current_mesh().face_number()
-    nm, open_e, _ = scan_mesh_errors(dst, n)
-    return nm, open_e
-
-
 def _run_blender_script(script):
     """Run `script` in headless Blender.  Returns (rc, stdout, stderr, timed_out).
 
@@ -1383,6 +1448,7 @@ def process_file(src, is_part=False):
                 'open_in':      stats.get('open_in', ''),
                 'blender_secs': stats.get('blender_secs', ''),
                 'path':         '+'.join(stats['path']) or 'none',
+                'bbox_drift':   stats.get('bbox_drift', ''),
             })
 
 
@@ -1507,7 +1573,6 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         working = src
         working_tris = n_tris
         _dec_tmp = None
-        _nm_tmp = None
         _pmf_tmp = None
 
         # Step B — split multi-shell (only on original files, not parts).
@@ -1661,50 +1726,54 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                       f"{os.path.basename(REVIEW_FILE)}")
                     log_review(rel, n_tris, working_tris)
 
-        # Step D — PyMeshLab NM repair.
-        if not _PYMESHLAB_AVAILABLE:
-            L("skip D: pymeshlab unavailable")
-        elif nm_src == -1:
-            L("skip D: mesh too large to scan")
-        elif nm_src == 0:
-            L("skip D: nm=0 (no NM edges)")
-        if _PYMESHLAB_AVAILABLE and nm_src > 0:
-            _nm_tmp = dst + '.repairnm.stl'
-            temps.append(_nm_tmp)
-            _ensure_parent(_nm_tmp)
-            L(f"step D: pymeshlab NM repair (nm={nm_src})")
-            try:
-                _nm_nm, _nm_open = run_pymeshlab_repair_nm(working, _nm_tmp)
-                L(f"pymeshlab NM repair: nm={_nm_nm}  open={_nm_open}")
-                stats['path'].append('nmrepair')
-                if working != src and os.path.exists(working):
-                    os.unlink(working)
-                working = _nm_tmp
-                nm_src = _nm_nm
-                open_src = _nm_open
-            except Exception as _nm_err:
-                if os.path.exists(_nm_tmp):
-                    os.unlink(_nm_tmp)
-                _nm_tmp = None
-                L(f"pymeshlab NM repair: FAILED — {_nm_err}")
+        # Step D (PyMeshLab NM repair) was removed here.
+        #
+        # It resolved non-manifold edges by deleting the offending faces, which
+        # turns a topology defect into boundary loops: on a 900k-face mesh with
+        # nm=3 it deleted 6 faces and produced 12 open edges.  PyMeshFix then
+        # reconstructed around those holes and deleted 151,144 faces — 17% of
+        # the mesh — cutting 4.9mm off the bottom of the model.  Measured:
+        #
+        #   decimated             900,000 tris  nm=3  open=0   z=[0.00,108.23]
+        #   + step D + pymeshfix  748,856 tris  nm=0  open=0   z=[4.90,108.23]
+        #   pymeshfix alone       899,976 tris  nm=0  open=0   z=[0.00,108.23]
+        #
+        # PyMeshFix repairs non-manifold edges directly, so step D was creating
+        # the damage it then had to repair.  Its output is now handled by step E
+        # alone, which is both cleaner and faster (29s vs 62s on that file).
+        # See tag v1.0-pre-stepD-removal for the previous behaviour.
 
-        # Step E — PyMeshFix for open edges.
+        # Step E — PyMeshFix.  Repairs non-manifold edges and open edges alike,
+        # so it runs whenever either is present.
+        _needs_pmf = nm_src > 0 or open_src > 0
         if not _PYMESHFIX_AVAILABLE:
             L("skip E: pymeshfix unavailable")
-        elif open_src == -1:
+        elif nm_src == -1 or open_src == -1:
             L("skip E: mesh too large to scan")
-        elif open_src == 0:
-            L("skip E: open=0 (no open edges)")
-        if _PYMESHFIX_AVAILABLE and open_src > 0:
+        elif not _needs_pmf:
+            L("skip E: nm=0 open=0 (nothing to repair)")
+        if _PYMESHFIX_AVAILABLE and _needs_pmf and nm_src != -1 and open_src != -1:
             _pmf_tmp = dst + '.pymeshfix.stl'
             temps.append(_pmf_tmp)
-            L(f"step E: pymeshfix open-edge fill (open={open_src})")
+            _ensure_parent(_pmf_tmp)
+            L(f"step E: pymeshfix repair (nm={nm_src} open={open_src})")
+            _bounds_before = stl_bounds(working)
             try:
                 _pmf_nm, _pmf_open = run_pymeshfix(working, _pmf_tmp)
                 L(f"pymeshfix: nm={_pmf_nm}  open={_pmf_open}")
+                # Observe only — the extents are recorded, never acted on.  A
+                # repair should not move a model's bounding box: a shrink means
+                # geometry was deleted, growth means it was invented.  Logged so
+                # a full-collection run can show how often this happens and to
+                # what, before any policy is decided.
+                _drift = compare_bounds(_bounds_before, stl_bounds(_pmf_tmp))
+                if _drift:
+                    L(f"pymeshfix: bbox changed (inspect) — {_drift}")
+                    stats['bbox_drift'] = _drift
                 # open_in -> open_out here is the boundary-loop fill that could
                 # have sealed an intentional connector hole.
-                stats['path'].append(f'pymeshfix({open_src}->{_pmf_open})')
+                stats['path'].append(f'pymeshfix(nm{nm_src}->{_pmf_nm},'
+                                     f'open{open_src}->{_pmf_open})')
                 if working != src and os.path.exists(working):
                     os.unlink(working)
                 working = _pmf_tmp
@@ -1752,6 +1821,8 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
     # Blender's own wall time, isolated from the post-verify and file writes.
     _bl_t0 = _time.monotonic()
     L("blender: start")
+    # Captured before the call: blender_src is unlinked a few lines below.
+    _bl_bounds_before = stl_bounds(blender_src)
     success, open_only, unrepaired, stdout, stderr = fix_stl(
         blender_src, dst, MERGE_DIST,
         is_ascii=is_ascii, is_obj=is_obj,
@@ -1760,6 +1831,13 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
     L(f"blender: done in {_bl_secs:.1f}s")
     stats['blender_secs'] = f"{_bl_secs:.1f}"
     stats['path'].append('blender')
+    # Observe only, as in step E.  Blender merges doubles and can decimate, so
+    # small movement here is expected — the number is what makes it judgeable.
+    if os.path.exists(dst):
+        _bl_drift = compare_bounds(_bl_bounds_before, stl_bounds(dst))
+        if _bl_drift:
+            L(f"blender: bbox changed (inspect) — {_bl_drift}")
+            stats['bbox_drift'] = _bl_drift
 
     # Clean up pre-pass temps now that Blender is done.
     if blender_src != src and os.path.exists(blender_src):

@@ -1,0 +1,4 @@
+# Files decimated 2x or more — worth checking that thin
+# walls and connector holes (magnets, pins) survived.
+# file	faces_before	faces_after	ratio
+Mysterium_Megha/Head.stl.stl	3433390	900000	3.8x
