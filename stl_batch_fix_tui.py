@@ -522,6 +522,9 @@ def run_progress_screen(values, files, cfg, sized=None):
     # Prepare log file.  Previous runs age off as .1 … .N (see _fix.LOG_KEEP)
     # rather than being overwritten, so restarting after a bad run does not
     # destroy the log that explains it.
+    # Logs follow the configured input folder, so a run on a different tree
+    # keeps its diagnostics beside its results.
+    _fix.retarget_logs(values['INPUT_FOLDER'])
     log_dir = os.path.dirname(_fix.LOG_FILE)
     os.makedirs(log_dir, exist_ok=True)
     _fix.rotate_all_logs()

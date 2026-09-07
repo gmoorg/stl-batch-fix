@@ -1,4 +1,4 @@
-#!/mnt/sda2/python/.venv/bin/python
+#!/usr/bin/env python3
 """
 STL Batch Fix
 =============
@@ -46,7 +46,10 @@ except ImportError:
 INPUT_FOLDER   = os.environ.get('INPUT_FOLDER', "/mnt/sda2/STL/Fixing/")
 OUTPUT_SUFFIX  = ""
 MERGE_DIST     = 0.01 # mm — merge vertices closer than this (T-junction fix)
-BLENDER        = "blender"
+# run.sh and install.sh both document BLENDER_BIN as the way to point at a
+# non-PATH Blender, and install.sh probes it — but this module ignored it, so a
+# custom path passed the installer's check and then failed here as "not found".
+BLENDER        = os.environ.get("BLENDER_BIN", "blender")
 RECURSIVE      = True
 WORKERS        = 0      # parallel workers; 0 = auto from cores and memory budget
 TIMEOUT        = 1_200   # seconds — kill Blender if it runs longer than this
@@ -459,6 +462,27 @@ def split_shells(src, dst_dir, L=None):
         return []
 
 
+def retarget_logs(input_folder=None):
+    """Point the log files at the output tree for `input_folder`.
+
+    The three log paths default to this machine's own folders, so a run given a
+    different --input wrote its meshes to that folder's Fixed/ while its logs
+    went on landing in /mnt/sda2/STL/Fixed — the diagnostics for a run ended up
+    somewhere unrelated to its results.  Called once at run start, after the
+    config is settled and before anything is written."""
+    global LOG_FILE, REVIEW_FILE, SUMMARY_FILE
+    if input_folder is None:
+        input_folder = INPUT_FOLDER
+    try:
+        root = os.path.join(
+            os.path.dirname(os.path.abspath(input_folder)), 'Fixed')
+    except (OSError, TypeError):
+        return
+    LOG_FILE     = os.path.join(root, os.path.basename(LOG_FILE))
+    REVIEW_FILE  = os.path.join(root, os.path.basename(REVIEW_FILE))
+    SUMMARY_FILE = os.path.join(root, os.path.basename(SUMMARY_FILE))
+
+
 def _ensure_parent(path):
     """Create the directory holding `path`.  Absolute-ises first so a bare
     filename yields '.' rather than an empty dirname."""
@@ -817,12 +841,13 @@ def auto_worker_count(sized=None, budget=None, cores=None):
                 (BLAS/MKL are pinned to one thread in _worker_init), so beyond
                 one per core they only contend.
       cap     — AUTO_WORKERS_CAP, a flat ceiling regardless of hardware.
-      memory  — the budget divided by what a *typical large* file costs.  The
-                median file is a poor basis: it allows 36 workers here, which
-                would be catastrophic the moment a big mesh arrived.  The 90th
-                percentile is used instead, so the ceiling suits the heavy end
-                of the collection while plan_worker_count() still throttles
-                further for individual outliers.
+      memory  — the budget divided by what the *median* file costs.  A high
+                percentile was tried first and is wrong: it lets one outlier
+                set the ceiling for the whole run, and with three files left
+                whose largest was 7M triangles it gave a single worker for all
+                of them.  plan_worker_count() already lowers concurrency when a
+                big file actually comes up, and files run smallest-first, so
+                this ceiling only has to suit the typical file.
 
     Falls back to a conservative 2 when nothing can be measured.  The result is
     only a ceiling — per-file admission may run fewer."""
@@ -2476,13 +2501,23 @@ if __name__ == '__main__':
     # Truncate log files at the start of each run, keeping LOG_KEEP previous
     # runs as .1 … .N so a run that has to be restarted does not take its own
     # evidence with it.
+    retarget_logs()
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     rotate_all_logs()
     open(LOG_FILE, 'w').close()
     _reset_review_file()
     _reset_summary_file()
 
-    workers = min(WORKERS, len(files))
+    # WORKERS = 0 means "decide from RAM and cores", the same contract the TUI
+    # honours.  Without this the standalone CLI passed max_workers=0 straight to
+    # ProcessPoolExecutor, which raises ValueError — the default config made the
+    # documented `python stl_batch_fix.py --input ...` invocation unusable.
+    if WORKERS <= 0:
+        workers = auto_worker_count(measure_files(files))
+        print(f"Workers       : auto → {min(workers, len(files))}")
+    else:
+        workers = WORKERS
+    workers = max(1, min(workers, len(files)))
     print(f"Found {len(files)} STL file(s) in '{INPUT_FOLDER}'")
     print(f"Output suffix : {OUTPUT_SUFFIX!r}")
     print(f"Merge dist    : {MERGE_DIST} mm")
