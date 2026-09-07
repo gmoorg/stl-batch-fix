@@ -1079,6 +1079,16 @@ def is_ascii_stl(path):
     Tiebreaker: if the header text looks like ASCII but the declared triangle count
     is consistent with the file size, treat it as binary — some exporters (SolidWorks,
     older Slic3r) write 'solid <name>' headers on binary files.
+
+    Known limit, deliberately left alone: only the first 256 bytes are read, so a
+    valid ASCII STL whose solid name runs past ~240 characters before the first
+    'facet normal' is misread as binary.  The mis-detection is one-directional —
+    such a file is then parsed as binary, where the triangle-count field is
+    garbage and _read_stl_header's size cross-check rejects it as corrupt rather
+    than repairing the wrong bytes.  So the failure mode is a false 'corrupt'
+    report on a file nobody produces, not silent damage.  Reading further would
+    cost a larger read on every file in the collection to defend against that.
+    Revisit only if a real file is ever reported corrupt with a long solid name.
     """
     try:
         with open(path, 'rb') as f:
