@@ -523,8 +523,11 @@ def run_progress_screen(values, files, cfg, sized=None):
     # Stable display slot per worker PID, so files don't jump between rows as
     # workers come and go (todo M7).
     worker_slots = {}
+    # 'bbox' is not an outcome like the others — a file counted there is also
+    # counted under ok/open/etc.  It tallies repairs that moved the model's
+    # bounding box, which is a flag for inspection, not a failure.
     counts = {'ok': 0, 'open': 0, 'skip': 0, 'failed': 0, 'corrupt': 0,
-              'unrepaired': 0, 'interrupted': 0}
+              'unrepaired': 0, 'interrupted': 0, 'bbox': 0}
     counts_lock = threading.Lock()
     done_count  = [0]
 
@@ -606,12 +609,13 @@ def run_progress_screen(values, files, cfg, sized=None):
         t = Table(box=box.SIMPLE, show_header=True, header_style='bold')
         for col, style in [('OK','green'),('OPEN','yellow'),('SKIP','dim'),
                            ('FAIL','red'),('CORRUPT','red'),('UNREPAIRED','magenta'),
-                       ('INTERRUPT','yellow')]:
-            t.add_column(col, style=style, justify='right', width=10)
+                           ('INTERRUPT','yellow'),('BBOX','cyan')]:
+            t.add_column(col, style=style, justify='right', width=9)
         with counts_lock:
             t.add_row(str(counts['ok']), str(counts['open']), str(counts['skip']),
                       str(counts['failed']), str(counts['corrupt']),
-                      str(counts['unrepaired']), str(counts['interrupted']))
+                      str(counts['unrepaired']), str(counts['interrupted']),
+                      str(counts['bbox']))
         return Panel(t, title='[bold]Summary[/bold]', border_style='green')
 
     def _log_panel():
@@ -925,6 +929,10 @@ def run_progress_screen(values, files, cfg, sized=None):
                                 counts[s] += 1
                             else:
                                 counts['failed'] += 1
+                            # Cuts across the outcome columns rather than being
+                            # one of them: a bbox-flagged file is still ok/open.
+                            if result.get('bbox_drift'):
+                                counts['bbox'] += 1
                         done_count[0] += 1
                         progress.update(task, advance=1)
 
@@ -1024,12 +1032,17 @@ def run_progress_screen(values, files, cfg, sized=None):
     t = Table(box=box.SIMPLE, show_header=True, header_style='bold')
     for col, style in [('OK','green'),('OPEN','yellow'),('SKIP','dim'),
                        ('FAIL','red'),('CORRUPT','red'),('UNREPAIRED','magenta'),
-                       ('INTERRUPT','yellow')]:
-        t.add_column(col, style=style, justify='right', width=12)
+                       ('INTERRUPT','yellow'),('BBOX','cyan')]:
+        t.add_column(col, style=style, justify='right', width=10)
     t.add_row(str(counts['ok']), str(counts['open']), str(counts['skip']),
               str(counts['failed']), str(counts['corrupt']),
-              str(counts['unrepaired']), str(counts['interrupted']))
+              str(counts['unrepaired']), str(counts['interrupted']),
+              str(counts['bbox']))
     console.print(t)
+    if counts['bbox']:
+        console.print("[dim]BBOX counts repairs that moved the model's bounding "
+                      "box — those files are also counted in the column for their "
+                      "outcome. Sources kept as .original.stl.[/dim]")
 
     # List non-ok files (from the retained tail — see _RESULTS_KEPT).
     n_listed = 0

@@ -1452,6 +1452,11 @@ def process_file(src, is_part=False):
                 pass
         # Parts are an internal detail of splitting a parent mesh; summarising
         # them would double-count the parent's triangles.
+        # Carry the bbox finding on the result too, not just into the summary
+        # file — the TUI counts it live, and re-reading the summary every 0.25s
+        # to find out would be absurd.
+        if result is not None and stats.get('bbox_drift'):
+            result['bbox_drift'] = stats['bbox_drift']
         if not is_part:
             # Read the delivered triangle count from the output itself rather
             # than tracking it through the pipeline — whatever path ran, this is
