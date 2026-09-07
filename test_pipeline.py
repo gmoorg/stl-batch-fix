@@ -239,10 +239,43 @@ class TestArms(PipelineCase):
         self.assert_output()
         self.assert_bounds_within()
 
-    def test_took_the_normal_split_path(self):
+    def test_budget_shared_across_shells(self):
+        """A mesh that will be decimated splits AFTER decimation, so one face
+        budget is spread across every shell instead of each shell receiving the
+        full budget on its own.
+
+        Split first and a 240-face speck is left untouched while a 1.3M-face
+        body absorbs the whole reduction alone."""
+        self.assertIn('step B: deferred', self.log)
+        self.assertIn('step B2', self.log,
+                      'a decimated mesh split before decimation')
+        self.assertLessEqual(self.after.tris, self.max_faces * 1.05,
+                             'the shared budget was not applied to the whole mesh')
+
+
+class TestSplitWithoutDecimation(PipelineCase):
+    """Defects but no decimation: splits immediately, via step B.
+
+    A file that is never decimated has no "after decimation" to split at, so
+    step B still exists for it — the other half of the pair with TestArms,
+    which covers the deferred path.
+
+    The fixture must actually need repair.  A mesh with nm=0 open=0 under
+    MAX_FACES short-circuits to a clean copy before step B is ever reached,
+    which is correct: splitting exists to help the repair, and there is nothing
+    to repair."""
+    fixture = 'falcon'
+    max_faces = 0             # decimation off — this is the point of the test
+    scan_limit = 10_000       # comfortably above its 2,560 faces
+
+    def test_split_immediately(self):
         self.assertIn('step B: split multi-shell', self.log)
         self.assertNotIn('step B2', self.log,
-                         'a mesh under the limit used the deferred split')
+                         'an undecimated mesh deferred a split it cannot defer')
+
+    def test_repaired(self):
+        self.assert_output()
+        self.assert_repaired()
 
 
 class TestLeg(PipelineCase):
@@ -384,7 +417,8 @@ class TestDecimation(PipelineCase):
 
 
 def _suite(names):
-    table = {'body': TestBody, 'arms': TestArms, 'leg': TestLeg,
+    table = {'body': TestBody, 'arms': TestArms,
+             'split-nodec': TestSplitWithoutDecimation, 'leg': TestLeg,
              'foot1': TestFoot1, 'foot2': TestFoot2, 'falcon': TestFalcon,
              'decimation': TestDecimation}
     loader = unittest.TestLoader()
@@ -399,8 +433,8 @@ def _suite(names):
 
 if __name__ == '__main__':
     args = [a for a in sys.argv[1:] if not a.startswith('-')]
-    names = args or ['body', 'arms', 'leg', 'foot1', 'foot2', 'falcon',
-                     'decimation']
+    names = args or ['body', 'arms', 'split-nodec', 'leg', 'foot1', 'foot2',
+                     'falcon', 'decimation']
     t0 = time.monotonic()
     ok = unittest.TextTestRunner(verbosity=2).run(_suite(names)).wasSuccessful()
     print(f'\ntotal {time.monotonic()-t0:.1f}s')

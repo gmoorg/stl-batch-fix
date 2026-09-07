@@ -154,6 +154,23 @@ COMPANION_EXTENSIONS = {
 # Removed after a successful merge; never walked when collecting inputs.
 PARTS_DIRNAME = '~parts'
 
+# Shells smaller than this (in faces) are treated as debris by split_shells()
+# and dropped rather than repaired as parts.
+#
+# Flat, not a fraction of the largest shell.  The old rule was
+# max(100, largest // 1000), and the ratio is what went wrong: it discards more
+# the bigger the model gets.  On a 2M-face figure it set the floor at 1,315
+# faces, and 562 after decimation — a magnet peg or locating pin is smaller
+# than that and is a part, not debris.
+#
+# Measured on the collection, this is a wide gap rather than a fine judgement:
+#   Mandy_Body_Dinamuuu3D  39 real shells, smallest 750 faces after decimation
+#   whole-costume01        444 shells, of which 443 are under 100 faces
+# So 100 keeps every real part with 7.5x margin and still rejects the specks.
+# Lower is not free: at a floor of 10, whole-costume01 splits into 381 parts,
+# each one a separate repair and merge.
+_MIN_SHELL_FACES = 100
+
 # Above this limit all in-process Python work (edge scan, PyMeshLab split/decimate/NM repair,
 # PyMeshFix pre-scan) is skipped — the file goes straight to Blender, which streams from disk.
 # Keeps per-worker RAM within bounds when running multiple workers in parallel.
@@ -435,8 +452,17 @@ def split_shells(src, dst_dir, L=None):
             n = ms.current_mesh().face_number()
             meshes.append((n, i))
         meshes.sort(reverse=True)
-        # Minimum shell size: at least 0.1% of the largest shell, or 100 faces.
-        min_faces = max(100, meshes[0][0] // 1000) if meshes else 100
+        # Minimum shell size, in faces.  A flat floor, deliberately: the old
+        # rule was max(100, largest // 1000), which scales with the biggest
+        # shell and so discards more as the model grows.  On a 2M-face figure
+        # that floor was 1,315 faces at full size and 562 after decimation —
+        # large enough to silently drop a magnet peg, a locating pin or a small
+        # accessory, which are parts, not debris.
+        #
+        # 10 is below anything printable (a cube is 12 triangles) and still
+        # excludes the stray specks that make split_shells decline: 443 of
+        # whole-costume01's 444 shells are 3-to-100 vertex fragments.
+        min_faces = _MIN_SHELL_FACES
         meshes = [(n, i) for n, i in meshes if n >= min_faces]
         if len(meshes) <= 1:
             return []
@@ -1694,17 +1720,36 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         # Parts are written to the output folder; source is never modified.
         # Skip entirely if dst or dst.failed already exists, or mesh is too large for PyMeshLab.
         #
-        # A mesh over the size limit is not simply skipped — the split is
-        # deferred until after decimation (step B2 below), which brings it under
-        # the limit.  Skipping outright is how a 39-shell model 3% over the
-        # threshold reached PyMeshFix intact and came back as a single shell
-        # with its head deleted.
+        # The split is deferred to step B2 whenever decimation is going to run,
+        # for two separate reasons.
+        #
+        # Over the size limit, it has to be: the mesh cannot be scanned or split
+        # at full resolution.  Skipping the split outright is how a 39-shell
+        # model 3% over the threshold reached PyMeshFix intact and came back as
+        # a single shell with its head deleted.
+        #
+        # Under the limit it is a choice, and the right one, because MAX_FACES
+        # is a per-file budget.  Split first and every part gets the full
+        # budget: a 240-face speck is left untouched while a 1.3M-face body
+        # absorbs the entire reduction alone.  Decimate first and one budget is
+        # spread across the whole model, so every shell is reduced by the same
+        # proportion — measured on Mandy_Body_Dinamuuu3D, all 39 shells kept
+        # 43-50% of their faces.
+        #
+        # A file under MAX_FACES is never decimated, so there is no "after
+        # decimation" for it: those still split here.
+        _will_decimate = MAX_FACES > 0 and n_tris > MAX_FACES
         _split_deferred = (not is_part and _PYMESHLAB_AVAILABLE
-                           and n_tris > _LARGE_MESH_TRI_LIMIT)
+                           and (n_tris > _LARGE_MESH_TRI_LIMIT or _will_decimate))
         if _split_deferred:
-            L(f"step B: deferred — {n_tris:,} tris over the {_LARGE_MESH_TRI_LIMIT:,} "
-              f"scan limit; will split after decimation")
-        if not is_part and _PYMESHLAB_AVAILABLE and n_tris <= _LARGE_MESH_TRI_LIMIT:
+            _why = ('over the '
+                    f'{_LARGE_MESH_TRI_LIMIT:,} scan limit'
+                    if n_tris > _LARGE_MESH_TRI_LIMIT
+                    else 'so one face budget is shared across every shell')
+            L(f"step B: deferred — {n_tris:,} tris, {_why}; "
+              f"will split after decimation")
+        if (not is_part and _PYMESHLAB_AVAILABLE and not _split_deferred
+                and n_tris <= _LARGE_MESH_TRI_LIMIT):
             if os.path.exists(dst) or os.path.exists(dst_base + '.failed.stl'):
                 pass  # already handled — fall through to normal repair
             else:
@@ -1867,6 +1912,9 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
             # than splitting the 2M original would have.  split_shells() drops
             # fragments under max(100, largest/1000) faces, so debris-only
             # meshes still return no parts and take the normal path.
+            # Runs for every deferred split, whether it was deferred because the
+            # mesh was too large to scan or so that one face budget could be
+            # shared across all its shells.
             if _split_deferred and _dec_done and working_tris <= _LARGE_MESH_TRI_LIMIT:
                 if os.path.exists(dst) or os.path.exists(dst_base + '.failed.stl'):
                     pass
