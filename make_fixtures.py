@@ -188,9 +188,17 @@ def build_leg():
 
 
 def build_foot1():
-    """A closed body with a genuine boundary hole (open edges, nm=0)."""
+    """A closed body plus an open-ended tube: real boundary holes, nm=0.
+
+    The tube is `seg=64` so it lands above _MIN_SHELL_FACES and is split out as
+    its own shell, which is what the real Chair_foot1.stl does — its second
+    shell is 384 faces.  An earlier version used seg=24, giving 48 faces, which
+    fell under the floor and was discarded as debris; the test then pinned
+    damage the real model no longer suffers.  The debris floor is what saved
+    that file: the old max(100, largest // 1000) rule put the cutoff at 680
+    faces on a 681k mesh and threw the cap away."""
     return combine(sphere(0, 0, 0, 10, seg=24),
-                   tube_open_ends(0, 0, 20, 4, 6, seg=24))
+                   tube_open_ends(0, 0, 20, 4, 6, seg=64))
 
 
 def build_foot2():

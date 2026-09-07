@@ -303,15 +303,20 @@ class TestLeg(PipelineCase):
 
 
 class TestFoot1(PipelineCase):
-    """Open edges, no non-manifold edges — the destructive-repair case.
+    """Open-edge repair that must not collapse the boundary.
 
-    pymeshfix closes a boundary loop by pulling it shut, which on the real
-    chair feet removed ~1.1 mm of end cap.  The fixture is a tube with open
-    ends, and the repair does the same thing to it.
+    PyMeshFix closes a boundary loop by pulling it shut rather than capping it.
+    On Zelda NSFW/Chair_foot1.stl that cost 12% of the model's volume and 1.1mm
+    off its end — the end caps.
 
-    This asserts the CURRENT behaviour and that the loss is FLAGGED.  If a
-    later change stops the geometry loss, this test fails — that is the signal
-    to tighten it to assert_bounds_within(), not a regression."""
+    What saved it was the debris floor.  The caps are a separate 384-face
+    shell, and the old max(100, largest // 1000) rule put the cutoff at 680
+    faces on that 681k mesh, so they were discarded before the split could
+    protect them.  With a flat floor of 100 they are split out and repaired on
+    their own, and the real file now keeps its full volume and extent.
+
+    The fixture's second shell is sized above the floor to match.
+    """
     fixture = 'foot1'
 
     def test_output_exists(self):
@@ -321,25 +326,34 @@ class TestFoot1(PipelineCase):
         self.assert_output()
         self.assert_repaired()
 
-    def test_geometry_loss_is_flagged(self):
+    def test_boundary_not_collapsed(self):
+        """The regression: closing the holes must not shrink the model."""
         self.assert_output()
-        drift = fix.compare_bounds((self.before.lo, self.before.hi),
-                                   (self.after.lo, self.after.hi))
-        self.assertIsNotNone(
-            drift, 'geometry is no longer lost here — if that is a real fix, '
-                   'tighten this test to assert_bounds_within()')
-        self.assertIn('bbox changed', self.log,
-                      'geometry was lost without the run flagging it')
+        self.assert_bounds_within()
 
-    def test_original_saved_as_fallback(self):
-        """A flagged repair keeps the source beside it, so the full-size mesh
-        is still printable if the repair turns out wrong."""
+    def test_volume_preserved(self):
+        """Bounds alone are not enough — a collapsed tube can keep its extent
+        while losing what is inside it."""
         self.assert_output()
-        original = os.path.splitext(self.dst)[0] + '.original.stl'
-        self.assertTrue(os.path.exists(original),
-                        'no .original.stl beside a flagged repair')
-        self.assertEqual(os.path.getsize(original), os.path.getsize(self.src),
-                         '.original.stl is not a full copy of the source')
+        before = self._volume(self.src)
+        after = self._volume(self.dst)
+        self.assertGreater(
+            after, before * 0.9,
+            f'volume {before:.1f} -> {after:.1f}: the boundary was pulled shut '
+            f'rather than capped')
+
+    def test_cap_shell_survives(self):
+        self.assert_output()
+        self.assert_shells_preserved()
+
+    @staticmethod
+    def _volume(path):
+        verts, faces = fix._weld_binary_stl(path)
+        tri = verts[faces]
+        vol = np.einsum('ij,ij->i', tri[:, 0],
+                        np.cross(tri[:, 1], tri[:, 2])).sum() / 6.0
+        del verts, faces, tri
+        return float(vol)
 
 
 class TestFoot2(PipelineCase):
