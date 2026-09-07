@@ -616,11 +616,28 @@ def _weld_binary_stl(path):
 
 
 def _write_binary_stl(path, verts, faces):
-    """Write an indexed mesh out as a binary STL (flat normals left zeroed —
-    slicers recompute them, and Blender ignores the stored value)."""
+    """Write an indexed mesh out as a binary STL, with real facet normals.
+
+    The normals used to be left zeroed on the reasoning that slicers recompute
+    them from the winding.  Slicers do, but viewers do not all agree: given a
+    zero normal some fall back to the winding and some to a guess, so the same
+    file could render inside-out in one program and correctly in another.  That
+    made a genuine comparison between two outputs impossible — one file with
+    normals and one without are not being drawn the same way.
+
+    Computing them is a cross product over the face array; the cost is
+    negligible beside the repair that produced the mesh."""
     n = len(faces)
     tv  = verts[faces].astype(_np.float32)          # (n, 3, 3)
+    nrm = _np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0])
+    ln  = _np.linalg.norm(nrm, axis=1)
+    # Degenerate faces have no normal to speak of; leave those zeroed rather
+    # than dividing by zero and writing NaNs into the file.
+    ok = ln > 1e-20
+    nrm[ok] /= ln[ok][:, None]
+    nrm[~ok] = 0.0
     buf = _np.zeros((n, 50), dtype=_np.uint8)
+    buf[:, 0:12]  = nrm.astype(_np.float32).view(_np.uint8)
     buf[:, 12:48] = tv.reshape(n, 9).view(_np.uint8)
     _ensure_parent(path)
     with open(path, 'wb') as f:
