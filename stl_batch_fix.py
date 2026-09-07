@@ -716,16 +716,44 @@ def _repair_by_seam_split(src_mesh, dst, dst_base, temps, stats, L, rel,
         L(f"seam split: cannot read the mesh — {exc}")
         return None
     seam, loops = find_winding_seams(verts, faces)
-    if not seam:
-        L("seam split: no winding seams to split on")
-        del verts, faces
-        return None
     L(f"seam split: {len(seam)} seam edges in {loops} closed loop(s)")
-    pieces = split_at_seams(verts, faces, seam)
+    pieces = split_at_seams(verts, faces, seam) if seam else []
     del verts, faces
+
     if len(pieces) < 2:
-        L("seam split: the seams do not separate the mesh")
-        return None
+        # No boundary to cut on — but Blender's repair creates one.  Measured
+        # on the mesh this exists for: straight from decimation it has 5 seam
+        # edges in 0 loops and cannot be separated, and after Blender it has 40
+        # in 7 loops and splits cleanly into the body and the head.  Blender
+        # rebuilds the surface where the two regions meet, which turns an
+        # ambiguous join into an explicit boundary.
+        #
+        # Blender is worth running here on its own merits too: it keeps 99.9%
+        # of the geometry where PyMeshFix deleted 15% of it.  What it does not
+        # do is resolve the seam, which is why the split follows it.
+        L("seam split: nothing to separate — running Blender first, "
+          "its repair makes the boundary explicit")
+        bl_tmp = dst_base + '.seamblender.stl'
+        temps.append(bl_tmp)
+        _ensure_parent(bl_tmp)
+        ok, _open_only, _unrep, _out, _err = fix_stl(src_mesh, bl_tmp, MERGE_DIST)
+        if not ok or not os.path.exists(bl_tmp):
+            L("seam split: Blender did not produce a mesh")
+            return None
+        try:
+            verts, faces = _weld_binary_stl(bl_tmp)
+        except Exception as exc:
+            L(f"seam split: cannot read Blender's output — {exc}")
+            return None
+        seam, loops = find_winding_seams(verts, faces)
+        L(f"seam split: after Blender, {len(seam)} seam edges in "
+          f"{loops} closed loop(s)")
+        pieces = split_at_seams(verts, faces, seam) if seam else []
+        del verts, faces
+        if len(pieces) < 2:
+            L("seam split: still nothing to separate")
+            return None
+        src_mesh = bl_tmp
 
     seam_dir = os.path.join(os.path.dirname(os.path.abspath(dst)),
                             PARTS_DIRNAME)
