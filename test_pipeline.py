@@ -416,11 +416,80 @@ class TestDecimation(PipelineCase):
         self.assert_shells_preserved()
 
 
+class TestSeam(PipelineCase):
+    """Two regions wound against each other, joined at a closed seam loop.
+
+    This is the hair-over-scalp case.  PyMeshFix rebuilds one coherent surface,
+    so handed the joined mesh it keeps one region and deletes the other — on
+    the real model, 562,288 faces in, 394,432 out, and the figure lost its
+    head, reported as a clean repair.
+
+    Nothing else in the pipeline can see it: the deleted region sits inside the
+    model's own bounding box so the bbox guard stays quiet, and
+    scan_mesh_errors counts only non-manifold and open edges, so the file
+    reports nm=0 open=0 and takes the clean-copy path past every repair stage.
+    """
+    fixture = 'seam'
+    max_faces = 0             # no decimation: this is about the seam alone
+    scan_limit = 10_000
+
+    def test_output_exists(self):
+        self.assert_output()
+
+    def test_seam_was_detected(self):
+        self.assertIn('seam check', self.log,
+                      'the winding seam was not detected')
+        self.assertIn('closed loop', self.log)
+
+    def test_split_happened(self):
+        self.assertIn('step E0', self.log,
+                      'a mesh with a closed seam loop was not split')
+
+    def test_no_seam_remains(self):
+        """The point of the exercise: the output is consistently wound."""
+        self.assert_output()
+        verts, faces = fix._weld_binary_stl(self.dst)
+        seam, loops = fix.find_winding_seams(verts, faces)
+        del verts, faces
+        self.assertEqual((len(seam), loops), (0, 0),
+                         f'output still has {len(seam)} seam edges in '
+                         f'{loops} loop(s)\nlog:\n{self.log}')
+
+    def test_geometry_preserved(self):
+        """The failure this guards against deletes a whole region, so face
+        count and enclosed volume are what matter, not the bounding box —
+        the deleted region was inside it."""
+        self.assert_output()
+        self.assertGreater(self.after.tris, self.before.tris * 0.9,
+                           'a region was deleted rather than repaired')
+        self.assert_bounds_within()
+
+
+class TestNoSeamNoSplit(PipelineCase):
+    """A mesh with no closed seam loop must not be split.
+
+    Only closed loops trigger the split: a loop encircles something, whereas a
+    few seam edges with loose ends are local noise.  The real model before
+    repair had 5 such edges in 0 loops and correctly split nothing."""
+    fixture = 'foot2'
+    max_faces = 0
+    scan_limit = 10_000
+
+    def test_no_split(self):
+        self.assertNotIn('step E0', self.log,
+                         'a mesh with no closed seam loop was split anyway')
+
+    def test_untouched(self):
+        self.assert_output()
+        self.assertEqual(self.after.tris, self.before.tris)
+
+
 def _suite(names):
     table = {'body': TestBody, 'arms': TestArms,
              'split-nodec': TestSplitWithoutDecimation, 'leg': TestLeg,
              'foot1': TestFoot1, 'foot2': TestFoot2, 'falcon': TestFalcon,
-             'decimation': TestDecimation}
+             'decimation': TestDecimation,
+             'seam': TestSeam, 'noseam': TestNoSeamNoSplit}
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for n in names:
@@ -434,7 +503,7 @@ def _suite(names):
 if __name__ == '__main__':
     args = [a for a in sys.argv[1:] if not a.startswith('-')]
     names = args or ['body', 'arms', 'split-nodec', 'leg', 'foot1', 'foot2',
-                     'falcon', 'decimation']
+                     'falcon', 'decimation', 'seam', 'noseam']
     t0 = time.monotonic()
     ok = unittest.TextTestRunner(verbosity=2).run(_suite(names)).wasSuccessful()
     print(f'\ntotal {time.monotonic()-t0:.1f}s')

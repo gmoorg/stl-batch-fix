@@ -72,8 +72,9 @@ python stl_batch_fix.py --one-file "Zelda NSFW/Chair_foot1.stl"
 
 Files are collected by walking `INPUT_FOLDER`. Excluded from collection:
 
-- anything whose name contains `.part.` (`_PART_MARKER`) — split parts live in
-  the output tree and are processed inline, never collected
+- anything whose name contains `.part.` (`_PART_MARKER`) or `.seam.`
+  (`_SEAM_MARKER`) — split parts and seam regions live in the output tree and
+  are processed inline, never collected
 - every `_SIGNAL_SUFFIXES` name: `.failed.stl`, `.timeout.stl`, `.broken.stl`,
   `.unrepaired.stl`, `.open.stl`, `.original.stl`, and the pipeline temporaries
   `.decimate.stl`, `.repairnm.stl`, `.pymeshfix.stl`, `.merge.stl`, `.partial`
@@ -123,6 +124,9 @@ Step C — decimate if > MAX_FACES
   ↓
 Step B2 — the deferred split, now that decimation has brought the mesh
           under the scan limit
+  ↓
+Step E0 — split at winding seams  (closed seam loops only)
+          regions repaired separately, merged back as one file
   ↓
 Step E — repair with PyMeshFix  (runs when nm > 0 OR open > 0)
   ↓
@@ -205,6 +209,55 @@ original would have.
 that is one real body plus hundreds of specks still returns no parts and takes
 the normal path — 443 of `whole-costume01`'s 444 shells are 3-to-100 vertex
 debris, and PyMeshFix discarding those is not a loss.
+
+---
+
+## Winding seams (step E0)
+
+PyMeshFix rebuilds one coherent surface. Handed a mesh containing two regions
+that disagree about which way is *out* — hair over a scalp, cloth over a body,
+a separately-sculpted part fused to its host — it keeps one and deletes the
+other, and reports success. Measured on `Mandy_Body_Dinamuuu3D.stl` part 0:
+
+```text
+joined    562,288 faces -> 394,432   volume 13,730 -> 11,676   head GONE
+split     394,148 + 167,321 faces, each internally consistent
+each piece through PyMeshFix: 100.0% and 100.2% of volume preserved
+merged    561,368 faces  nm=0 open=0 seams=0   volume 13,730
+```
+
+**Nothing else in the pipeline can see this.** The deleted region sits inside
+the model's own bounding box, so the bbox check stays quiet, and
+`scan_mesh_errors` counts non-manifold and open edges only — the file reports
+`nm=0 open=0` and takes the clean-copy shortcut past every repair stage. That
+is why the seam check runs *before* that shortcut rather than inside step E.
+
+The two regions meet along **seam edges**, where both faces traverse the shared
+edge the same way instead of in opposite directions. Only **closed loops** of
+them trigger a split: a loop encircles something, whereas a few seam edges with
+loose ends are local noise. The same model before repair had 5 seam edges in 0
+loops and correctly split nothing; after Blender's repair it had 40 in 7 loops.
+
+Symptom to recognise: a region renders **black** in viewers and in Bambu while
+every defect count reads zero.
+
+**Re-winding cannot fix this**, both approaches tried and measured:
+
+- flipping faces by local majority leaves the seam (67 → 22 inverted)
+- flipping globally from a BFS seed reaches 0 inverted but *inverts one of the
+  surfaces* — head volume +1,503 → −2,615, total 13,730 → 9,623
+
+The two surfaces cannot both be edge-consistent while joined, which is why an
+online repair service remeshes the junction (+3,432 faces) instead of
+re-winding it. Splitting sidesteps the question: each piece is already
+consistent on its own.
+
+Cost is one edge walk, ~3.5 s on a 560k mesh, against PyMeshFix's 16 s.
+
+The seam split runs on shell parts too, not only whole files. The two splits
+nest rather than compete — the shell split separates components that do not
+touch, this one separates connected regions that disagree about orientation —
+and a shell part is exactly where the second kind lives.
 
 ---
 
@@ -388,7 +441,7 @@ carrying `verified=False` display as `OK UNVERIFIED`.
 
 ## Tests
 
-`test_pipeline.py` — 25 end-to-end tests, ~0.5 s:
+`test_pipeline.py` — 34 end-to-end tests, ~0.7 s:
 
 ```bash
 .venv/bin/python test_pipeline.py            # all of it
@@ -439,6 +492,14 @@ triggers. For that, run the collection and read the bbox flags.
 
 - **Do not** run PyMeshFix on an unsplit multi-shell mesh — it rebuilds one
   manifold surface and discards the rest. This deleted a model's head.
+- **Do not** hand PyMeshFix a mesh with closed winding-seam loops. Same failure
+  for a different reason: the regions are connected, but disagree about which
+  way is out, and it keeps one and deletes the other. Split at the seam first.
+- **Do not** try to fix a winding seam by re-winding faces. Local flipping
+  leaves the seam; global flipping inverts one of the two surfaces. They cannot
+  both be edge-consistent while joined.
+- **Do not** gate the seam check on `not is_part`. A shell part is exactly where
+  nested surfaces live.
 - **Do not** skip the shell split for oversized meshes. Defer it until after
   decimation instead.
 - **Do not** reintroduce PyMeshLab's non-manifold repair between decimation and

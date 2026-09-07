@@ -15,6 +15,7 @@ on, not the model itself:
     foot1    one shell with a real boundary hole         (open-edge repair)
     foot2    one clean closed shell                      (passthrough)
     falcon   heavy non-manifold edges                    (blender fallback)
+    seam     two regions wound against each other        (PyMeshFix deletion)
 
 Verify with `--check`, which reports each fixture's measured properties so a
 generator change that stops reproducing a defect is visible immediately.
@@ -197,6 +198,29 @@ def build_foot2():
     return sphere(0, 0, 0, 10, seg=28)
 
 
+def build_seam():
+    """Two surfaces joined along a closed loop, wound against each other.
+
+    This is the hair-over-scalp case: one connected component containing two
+    regions that disagree about which way is out.  PyMeshFix handed the joined
+    mesh keeps one region and deletes the other — on the real model, 562,288
+    faces in, 394,432 out, and the figure lost its head.
+
+    Built by welding a smaller sphere onto a larger one at a shared ring of
+    vertices and reversing the smaller one's winding.  The shared ring is the
+    closed seam loop that find_winding_seams() looks for."""
+    verts, faces = sphere(0, 0, 0, 10, seg=20)
+    # Reverse every face in the northern cap.  The mesh stays one connected
+    # component — no vertex moves and no edge is removed — but the boundary
+    # between the reversed cap and the rest becomes a closed ring of edges
+    # whose two faces traverse them the same way.  That ring is the seam.
+    centroid = verts[faces].mean(axis=1)
+    cap = centroid[:, 2] > 5.0
+    faces = faces.copy()
+    faces[cap] = faces[cap][:, ::-1]
+    return verts, faces
+
+
 def build_falcon():
     """Heavy non-manifold edges: pymeshfix's failure case."""
     return combine(sphere(0, 0, 0, 10, seg=20),
@@ -206,6 +230,7 @@ def build_falcon():
 BUILDERS = {
     'body': build_body, 'arms': build_arms, 'leg': build_leg,
     'foot1': build_foot1, 'foot2': build_foot2, 'falcon': build_falcon,
+    'seam': build_seam,
 }
 
 
