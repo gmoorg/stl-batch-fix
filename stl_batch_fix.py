@@ -1471,6 +1471,15 @@ def collect_stl_files(folder, recursive):
         ext = os.path.splitext(name_lower)[1]
         if ext not in ('.stl', '.obj'):
             return False
+        # AppleDouble stubs.  macOS writes a "._<name>" sidecar next to every
+        # file it zips, carrying resource-fork metadata and no geometry.  They
+        # match *.stl, so they used to be collected, decimated past, handed to
+        # PyMeshFix, and finally to Blender, which reported "STL triangles: 0,
+        # Verts loaded: 0, BLENDER_EMPTY" — one wasted Blender launch each.
+        # A 822-file collection contained 61 of them: every one counted as a
+        # failure and they made the run look 44% broken.
+        if name.startswith('._'):
+            return False
         for sig in _SIGNAL_SUFFIXES:
             if name_lower.endswith(sig):
                 return False
@@ -1484,8 +1493,11 @@ def collect_stl_files(folder, recursive):
         return True
     if recursive:
         for root, dirs, names in os.walk(folder):
-            # Never descend into split-part scratch folders.
-            dirs[:] = [d for d in dirs if d != PARTS_DIRNAME]
+            # Never descend into split-part scratch folders, or into the
+            # __MACOSX tree a macOS zip carries alongside the real files —
+            # it holds nothing but AppleDouble sidecars (see _keep).
+            dirs[:] = [d for d in dirs
+                       if d != PARTS_DIRNAME and d != '__MACOSX']
             for name in names:
                 if _keep(name):
                     files.append(os.path.join(root, name))
