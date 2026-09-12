@@ -59,7 +59,17 @@ MIN_LAYER      = 0.6
 BLENDER        = os.environ.get("BLENDER_BIN", "blender")
 RECURSIVE      = True
 WORKERS        = 0      # parallel workers; 0 = auto from cores and memory budget
-TIMEOUT        = 1_200   # seconds — kill Blender if it runs longer than this
+# seconds — the budget for one mesh, whether that mesh is a whole unsplit model
+# or a single shell part.  This is the limit almost every file is judged by.
+# A six-shell file used to do six repairs under one shared budget and was killed
+# for being multi-part rather than slow; each part now gets its own.
+TIMEOUT_PART   = 600
+# seconds — ceiling for a file that splits, and nothing else.  An unsplit model
+# is capped by TIMEOUT_PART alone and never reaches this.  A split file's cap is
+#     min(TIMEOUT, TIMEOUT_PART * n_parts)
+# so the ceiling only binds when a file has enough parts to exceed it: a 2-part
+# file gets 1200s, a 40-part file gets TIMEOUT rather than 24000s.
+TIMEOUT        = 3_600
 MAX_FACES      = 900_000    # decimate if face count exceeds this (0 = disabled)
 LOG_FILE       = "/mnt/sda2/STL/Fixed/repair_log.tsv"
 # Files decimated by at least this factor are listed in REVIEW_FILE.  Heavy
@@ -102,7 +112,12 @@ if __name__ == '__main__' and len(sys.argv) > 1:
     parser.add_argument('--workers',      type=int, default=None,
                         help=f"Parallel Blender processes (default: {WORKERS})")
     parser.add_argument('--timeout',      type=int, default=None,
-                        help=f"Seconds before killing a hung Blender process (default: {TIMEOUT})")
+                        help=f"Ceiling for split files only; cap is "
+                             f"min(TIMEOUT, TIMEOUT_PART * n_parts) "
+                             f"(default: {TIMEOUT})")
+    parser.add_argument('--timeout-part', type=int, default=None,
+                        help=f"Seconds allowed for any single shell part "
+                             f"(default: {TIMEOUT_PART}, 0=one whole-file budget)")
     parser.add_argument('--max-faces',    type=int, default=None,
                         help=f"Decimate mesh if face count exceeds this (default: {MAX_FACES}, 0=disabled)")
     parser.add_argument('--one-file',     default=None,
@@ -122,6 +137,7 @@ if __name__ == '__main__' and len(sys.argv) > 1:
     if args.recursive  is not None: RECURSIVE     = args.recursive
     if args.workers    is not None: WORKERS       = args.workers
     if args.timeout    is not None: TIMEOUT       = args.timeout
+    if args.timeout_part is not None: TIMEOUT_PART = args.timeout_part
     if args.max_faces  is not None: MAX_FACES     = args.max_faces
     _ONE_FILE   = args.one_file
     _ONE_IS_PART = args.is_part
@@ -405,17 +421,29 @@ def scan_mesh_errors(path, n_tris=None, return_edges=False):
         return _out(-1, -1, f"{type(_e).__name__}: {_e}")
 
 
-def _unpack_edge_key(key):
-    """Recover the two endpoint coordinates from a packed edge key.
+def _blender_budget():
+    """Seconds any single Blender invocation may take.
 
-    _build_edge_counts() packs an edge as two 96-bit vertex halves (12 raw
-    float32 bytes each) combined into one int.  Splitting it back out costs
-    nothing and saves re-reading the mesh just to measure a boundary."""
-    lo = key & ((1 << 96) - 1)
-    hi = key >> 96
-    a = struct.unpack('<3f', lo.to_bytes(12, 'little'))
-    b = struct.unpack('<3f', hi.to_bytes(12, 'little'))
-    return a, b
+    Blender is where a mesh's time actually goes — 180s of 1st-body's 561s, and
+    33s of Mandy part.0's 104s — so capping this call is what bounds one mesh.
+    An unsplit model is spawned with TIMEOUT (the ceiling, because at spawn time
+    nobody knows whether it will split), and this is the tighter limit it is
+    really judged by.  A part gets the same cap for free.
+
+    Falls back to TIMEOUT when the per-part limit is disabled (0)."""
+    return TIMEOUT_PART or TIMEOUT
+
+
+def _part_cap(n_parts):
+    """Seconds allowed for a file that split into `n_parts` shells.
+
+    min(TIMEOUT, TIMEOUT_PART * n_parts): the per-part budget times the number
+    of parts, but never more than the ceiling.  A 2-part file gets 1200s, a
+    40-part file gets TIMEOUT rather than 24000s.  With TIMEOUT_PART disabled
+    (0) there is no per-part budget to multiply, so the ceiling is the cap."""
+    if not TIMEOUT_PART:
+        return TIMEOUT
+    return min(TIMEOUT, TIMEOUT_PART * max(1, int(n_parts)))
 
 
 def _open_loops_are_printable(edge_counts, limit=None):
@@ -1682,7 +1710,7 @@ def _run_blender_script(script):
         )
         _blender_proc = proc
         try:
-            stdout, stderr = proc.communicate(timeout=TIMEOUT)
+            stdout, stderr = proc.communicate(timeout=_blender_budget())
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
@@ -1703,7 +1731,7 @@ def fix_stl(src, dst, merge_dist, is_ascii=False, is_obj=False):
                                    is_obj=repr(bool(is_obj)))
     rc, stdout, stderr, timed_out = _run_blender_script(script)
     if timed_out:
-        return False, False, False, f'TIMEOUT after {TIMEOUT}s', ''
+        return False, False, False, f'TIMEOUT after {_blender_budget()}s', ''
     success    = rc == 0 and 'BLENDER_OK' in stdout
     open_only  = rc == 0 and 'BLENDER_OPEN' in stdout
     unrepaired = 'BLENDER_UNREPAIRED' in stdout
@@ -1715,7 +1743,7 @@ def blender_decimate(src, dst, max_faces):
     script = BLENDER_DECIMATE_SCRIPT.format(src=src, dst=dst, max_faces=max_faces)
     rc, stdout, stderr, timed_out = _run_blender_script(script)
     if timed_out:
-        return False, -1, f'TIMEOUT after {TIMEOUT}s', ''
+        return False, -1, f'TIMEOUT after {_blender_budget()}s', ''
     ok = rc == 0 and 'BLENDER_DECIMATE_OK' in stdout
     n_out = -1
     for line in stdout.splitlines():
@@ -2135,12 +2163,30 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                     # guarded by `not is_part`, and every recursive call passes
                     # is_part=True, so a part can never split again.  Removing
                     # that guard would recurse without bound (todo L4).
+                    # Each part gets TIMEOUT_PART; the file as a whole gets
+                    # min(TIMEOUT, TIMEOUT_PART * n_parts).  Two independent
+                    # caps, not a shared pool — a part that finishes in 1s
+                    # donates nothing to the next one.  The clock is checked
+                    # between parts only: a part already blocked inside a
+                    # library call cannot be interrupted from here, and does
+                    # not need to be, because a part that overruns dooms the
+                    # file anyway and the worker's own kill is the backstop.
+                    _cap = _part_cap(len(parts))
+                    _deadline = _time.monotonic() + _cap
+                    L(f"budget: {_cap:.0f}s for {len(parts)} part(s) "
+                      f"({TIMEOUT_PART}s each, ceiling {TIMEOUT}s)")
                     part_results = []
                     for part_path in parts:
+                        if _time.monotonic() >= _deadline:
+                            L(f"  budget exhausted after {len(part_results)}"
+                              f"/{len(parts)} part(s) — stopping")
+                            break
                         L(f"  part: {os.path.basename(part_path)}")
                         part_result = process_file(part_path, is_part=True)
                         part_results.append(part_result)
                         L(f"  part {os.path.basename(part_path)}: {part_result['status']}")
+                    if len(part_results) < len(parts):
+                        part_results.append({'status': 'interrupted'})
                     # 'skip' means the part was already repaired in a prior run — treat as ok.
                     all_ok = all(r['status'] in ('ok', 'skip') for r in part_results)
                     if all_ok:
@@ -2296,13 +2342,24 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                     if parts:
                         L(f"split: {len(parts)} shells → "
                           f"{', '.join(os.path.basename(p) for p in parts)}")
+                        _cap = _part_cap(len(parts))
+                        _deadline = _time.monotonic() + _cap
+                        L(f"budget: {_cap:.0f}s for {len(parts)} part(s) "
+                          f"({TIMEOUT_PART}s each, ceiling {TIMEOUT}s)")
                         part_results = []
                         for part_path in parts:
+                            if _time.monotonic() >= _deadline:
+                                L(f"  budget exhausted after "
+                                  f"{len(part_results)}/{len(parts)} part(s) "
+                                  f"— stopping")
+                                break
                             L(f"  part: {os.path.basename(part_path)}")
                             part_result = process_file(part_path, is_part=True)
                             part_results.append(part_result)
                             L(f"  part {os.path.basename(part_path)}: "
                               f"{part_result['status']}")
+                        if len(part_results) < len(parts):
+                            part_results.append({'status': 'interrupted'})
                         if all(r['status'] in ('ok', 'skip') for r in part_results):
                             _merged = _merge_parts(parts, dst, dst_dir, L, stats,
                                                    failed_copy, unrepaired_copy,
@@ -2405,8 +2462,18 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                             _seam_parts.append(_p)
                         L(f"split: {len(_seam_parts)} region(s) — "
                           + ", ".join(f"{len(pf):,} faces" for _, pf in _pieces))
+                        _seam_cap = _part_cap(len(_seam_parts))
+                        _seam_deadline = _time.monotonic() + _seam_cap
+                        L(f"budget: {_seam_cap:.0f}s for "
+                          f"{len(_seam_parts)} region(s)")
                         _n_ok = 0
+                        _n_run = 0
                         for _p in _seam_parts:
+                            if _time.monotonic() >= _seam_deadline:
+                                L(f"  budget exhausted after {_n_run}"
+                                  f"/{len(_seam_parts)} region(s) — stopping")
+                                break
+                            _n_run += 1
                             _r = process_file(_p, is_part=True)
                             L(f"  region {os.path.basename(_p)}: {_r['status']}")
                             if _r['status'] in ('ok', 'skip'):
@@ -2778,7 +2845,7 @@ def release_worker_memory():
         _libc = False       # unavailable — stop retrying
 
 
-def process_file_subprocess(src, is_part=False):
+def process_file_subprocess(src, is_part=False, budget=None):
     """Run one file in its own process and report what happened to it.
 
     This is what the pool calls.  The mesh work happens in a child, so a
@@ -2801,6 +2868,22 @@ def process_file_subprocess(src, is_part=False):
     import json as _json
     import subprocess as _sp
     import time as _t
+
+    # How long this one mesh may take.  A caller repairing a shell part passes
+    # that part's remaining budget; an unsplit model passes nothing and gets
+    # TIMEOUT_PART — the same limit a single part gets, because an unsplit model
+    # IS a single mesh.  TIMEOUT is a ceiling for split files only and is
+    # applied by the split loop, not here.  Floored, because a nearly exhausted
+    # file cap would otherwise hand the child a budget it cannot meet and then
+    # report it as a hang.
+    # A whole file is spawned with TIMEOUT, the ceiling, because at spawn time
+    # nobody knows yet whether it will split or into how many parts.  The child
+    # applies the tighter limit itself once it knows: _part_cap(n) for a split,
+    # TIMEOUT_PART for a mesh that stays whole.  Spawning with TIMEOUT_PART
+    # instead would kill a five-part file before its second part started.
+    _budget = int(budget) if budget else TIMEOUT
+    if _budget < 30:
+        _budget = 30
 
     rel = os.path.relpath(src, INPUT_FOLDER) if not is_part else os.path.basename(src)
     _pid = os.getpid()
@@ -2825,7 +2908,8 @@ def process_file_subprocess(src, is_part=False):
            '--merge-dist', str(MERGE_DIST),
            '--min-layer', str(MIN_LAYER),
            '--max-faces', str(MAX_FACES),
-           '--timeout', str(TIMEOUT),
+           '--timeout', str(_budget),
+           '--timeout-part', str(TIMEOUT_PART),
            '--result-fd', str(_wr)]
     if is_part:
         cmd.append('--is-part')
@@ -2848,7 +2932,7 @@ def process_file_subprocess(src, is_part=False):
             # could not fire, and the kill arrived down the wrong path with the
             # wrong status.  Once the process has exited the pipe is closed, so
             # the read cannot block.
-            _, _stderr = proc.communicate(timeout=TIMEOUT)
+            _, _stderr = proc.communicate(timeout=_budget)
             _rc = proc.returncode
             with os.fdopen(_rd, 'rb') as _f:
                 _rd = None
@@ -2866,14 +2950,22 @@ def process_file_subprocess(src, is_part=False):
             except Exception:
                 _stderr = ''
             _held = _t.monotonic() - started
-            log_step(rel, f"TIMEOUT after {_held:.0f}s (limit {TIMEOUT}s) — "
+            log_step(rel, f"TIMEOUT after {_held:.0f}s (limit {_budget}s) — "
                           f"killed the repair process")
-            _marker = mark_timeout(src, INPUT_FOLDER, OUTPUT_SUFFIX)
-            if _marker:
-                log_step(rel, f"wrote {os.path.basename(_marker)} — "
-                              f"delete it to retry this file")
+            # Only whole files get a marker.  A part lives in ~parts/ and is
+            # deleted on merge, so a .timeout.stl beside it would be a copy of
+            # a transient fragment — not the printable fallback of the source
+            # that every other indicator is.  The part reports 'interrupted'
+            # upward instead and the file-level handler marks the real source.
+            if not is_part:
+                _marker = mark_timeout(src, INPUT_FOLDER, OUTPUT_SUFFIX)
+                if _marker:
+                    log_step(rel, f"wrote {os.path.basename(_marker)} — "
+                                  f"delete it to retry this file")
             result = {'rel': rel, 'status': 'interrupted',
-                      'reason': f'exceeded the {TIMEOUT}s per-file timeout',
+                      'reason': (f'exceeded the {_budget}s '
+                                 + ('part' if is_part else 'per-file')
+                                 + ' timeout'),
                       'timed_out': True, 'stdout': '', 'stderr': ''}
             _rc = None
         if result is None:

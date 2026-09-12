@@ -16,8 +16,15 @@ MIN_LAYER = 0.6
 # Parallel worker processes (0 = auto from RAM and cores)
 WORKERS = 0
 
-# Per-file limit; the worker is killed if a file exceeds it
-TIMEOUT = 1200
+# Budget for one mesh, whether it is a whole unsplit model or a single shell
+# part. This is the limit almost every file is judged by.
+TIMEOUT_PART = 600
+
+# Ceiling for a file that splits, and nothing else. An unsplit model is capped
+# by TIMEOUT_PART alone and never reaches this. A split file's cap is
+#     min(TIMEOUT, TIMEOUT_PART * n_parts)
+# so a 2-part file gets 1200s and a 40-part file gets 3600s rather than 24000s.
+TIMEOUT = 3600
 
 # Decimate threshold (0 = disabled)
 MAX_FACES = 900000
