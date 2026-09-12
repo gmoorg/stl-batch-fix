@@ -49,6 +49,7 @@ CFG_FIELDS = [
     ('INPUT_FOLDER',  'Input folder',      str,   'Source folder containing STL/OBJ files'),
     ('OUTPUT_SUFFIX', 'Output suffix',     str,   'Appended to output filename stem (blank = none)'),
     ('MERGE_DIST',    'Merge distance mm', float, 'Vertex merge radius for T-junction fix'),
+    ('MIN_LAYER',     'Min layer mm',      float, 'Finest print layer; open boundaries smaller than this are accepted (0 = require zero)'),
     ('WORKERS',       'Workers',           int,   'Parallel worker processes (0 = auto from RAM and cores)'),
     ('TIMEOUT',       'Timeout (s)',       int,   'Per-file limit; the worker is killed if a file exceeds it'),
     ('MAX_FACES',     'Max faces',         int,   'Decimate threshold (0 = disabled)'),
@@ -59,6 +60,7 @@ CFG_DEFAULTS = {
     'INPUT_FOLDER':  _fix.INPUT_FOLDER,
     'OUTPUT_SUFFIX': _fix.OUTPUT_SUFFIX,
     'MERGE_DIST':    str(_fix.MERGE_DIST),
+    'MIN_LAYER':     str(_fix.MIN_LAYER),
     'WORKERS':       str(_fix.WORKERS),
     'TIMEOUT':       str(_fix.TIMEOUT),
     'MAX_FACES':     str(_fix.MAX_FACES),
@@ -514,6 +516,7 @@ def run_progress_screen(values, files, cfg, sized=None):
     _fix.INPUT_FOLDER  = values['INPUT_FOLDER']
     _fix.OUTPUT_SUFFIX = values['OUTPUT_SUFFIX']
     _fix.MERGE_DIST    = values['MERGE_DIST']
+    _fix.MIN_LAYER     = values['MIN_LAYER']
     _fix.WORKERS       = values['WORKERS']
     _fix.TIMEOUT       = values['TIMEOUT']
     _fix.MAX_FACES     = values['MAX_FACES']

@@ -46,6 +46,13 @@ except ImportError:
 INPUT_FOLDER   = os.environ.get('INPUT_FOLDER', "/mnt/sda2/STL/Fixing/")
 OUTPUT_SUFFIX  = ""
 MERGE_DIST     = 0.01 # mm — merge vertices closer than this (T-junction fix)
+# mm — the finest layer this collection is printed at.  An open boundary loop
+# smaller than one layer cannot be expressed by the slicer: it produces no
+# toolpath, so closing it changes nothing that reaches the plate.  Repairs that
+# chase such holes are not free, and on one model the chase was catastrophic —
+# see _open_loops_are_printable() for the measurements.  0 disables the
+# tolerance and restores the old "open edges must be exactly zero" rule.
+MIN_LAYER      = 0.6
 # run.sh and install.sh both document BLENDER_BIN as the way to point at a
 # non-PATH Blender, and install.sh probes it — but this module ignored it, so a
 # custom path passed the installer's check and then failed here as "not found".
@@ -84,6 +91,10 @@ if __name__ == '__main__' and len(sys.argv) > 1:
     parser.add_argument('--suffix',      default=None,  help=f"Output filename suffix (default: {OUTPUT_SUFFIX!r})")
     parser.add_argument('--merge-dist',  type=float, default=None,
                         help=f"Vertex merge distance in mm (default: {MERGE_DIST})")
+    parser.add_argument('--min-layer',   type=float, default=None,
+                        help=f"Finest print layer in mm; open boundaries smaller "
+                             f"than this are accepted as-is (default: {MIN_LAYER}, "
+                             f"0=require zero open edges)")
     parser.add_argument('--recursive',    dest='recursive', action='store_true',  default=None,
                         help=f"Search input folder recursively (default: {RECURSIVE})")
     parser.add_argument('--no-recursive', dest='recursive', action='store_false',
@@ -107,6 +118,7 @@ if __name__ == '__main__' and len(sys.argv) > 1:
     if args.input      is not None: INPUT_FOLDER  = args.input
     if args.suffix     is not None: OUTPUT_SUFFIX = args.suffix
     if args.merge_dist is not None: MERGE_DIST    = args.merge_dist
+    if args.min_layer  is not None: MIN_LAYER     = args.min_layer
     if args.recursive  is not None: RECURSIVE     = args.recursive
     if args.workers    is not None: WORKERS       = args.workers
     if args.timeout    is not None: TIMEOUT       = args.timeout
@@ -391,6 +403,91 @@ def scan_mesh_errors(path, n_tris=None, return_edges=False):
         return _out(nm, open_e, None, ec)
     except Exception as _e:
         return _out(-1, -1, f"{type(_e).__name__}: {_e}")
+
+
+def _unpack_edge_key(key):
+    """Recover the two endpoint coordinates from a packed edge key.
+
+    _build_edge_counts() packs an edge as two 96-bit vertex halves (12 raw
+    float32 bytes each) combined into one int.  Splitting it back out costs
+    nothing and saves re-reading the mesh just to measure a boundary."""
+    lo = key & ((1 << 96) - 1)
+    hi = key >> 96
+    a = struct.unpack('<3f', lo.to_bytes(12, 'little'))
+    b = struct.unpack('<3f', hi.to_bytes(12, 'little'))
+    return a, b
+
+
+def _open_loops_are_printable(edge_counts, limit=None):
+    """True when every open boundary in the mesh is smaller than one layer.
+
+    Returns (printable, n_loops, largest_mm).  printable is False if there are
+    no open edges to judge (callers already handle open==0), if the limit is
+    disabled, or if any loop is at least `limit` across.
+
+    Why this exists.  The pipeline's success condition was `nm == 0 and
+    open == 0` — a mathematical standard, not a manufacturing one.  On
+    1st-body.stl that cost the model its head and torso:
+
+        after decimate      900,000 faces   volume 100.00%
+        after pymeshfix     879,332 faces   volume  99.99%   open=4
+          the 4 open edges spanned 0.01mm, all at one point
+        -> blender called to clear them (180s)
+        after blender       874,236 faces   volume 100.04%   open=142
+          blender closed the pinhole and punched 28 new holes,
+          every one between 0.023mm and 0.162mm across
+        -> pymeshfix called again to clear those
+        final               356,392 faces   volume  44.94%   open=0
+          head and torso gone, cut ragged at the waist
+
+    Every hole in that cascade was smaller than a third of the finest layer
+    this collection prints at, so none of them could reach the plate.  The
+    repair chasing them destroyed 55% of the model to fix nothing.
+
+    Size is measured as the diameter of each boundary loop — the span of its
+    vertices — not edge length or edge count.  A loop of many short edges can
+    still be a large hole, and a single long edge is not a hole at all."""
+    if limit is None:
+        limit = MIN_LAYER
+    if not limit or limit <= 0:
+        return False, 0, 0.0
+    open_keys = [k for k, c in edge_counts.items() if c == 1]
+    if not open_keys:
+        return False, 0, 0.0
+
+    # Group the open edges into connected chains, keyed by vertex position.
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    ends = []
+    for k in open_keys:
+        a, b = _unpack_edge_key(k)
+        ends.append((a, b))
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    groups = {}
+    for a, b in ends:
+        groups.setdefault(find(a), []).extend((a, b))
+
+    largest = 0.0
+    for pts in groups.values():
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        zs = [p[2] for p in pts]
+        span = (((max(xs) - min(xs)) ** 2
+                 + (max(ys) - min(ys)) ** 2
+                 + (max(zs) - min(zs)) ** 2) ** 0.5)
+        if span > largest:
+            largest = span
+    return largest < limit, len(groups), largest
 
 
 def _merge_parts(parts, dst, dst_dir, L, stats, failed_copy, unrepaired_copy,
@@ -2404,6 +2501,22 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         _pv_ok = True
         if nm_src == 0 and open_src == 0:
             nm_src, open_src, _pv_ok = _post_verify(working, L)
+        # Open edges that are too small to print do not justify another repair
+        # pass.  nm edges still do — those are topology, not a hole, and a
+        # slicer can genuinely mis-fill them.  See _open_loops_are_printable().
+        if nm_src == 0 and open_src > 0 and MIN_LAYER > 0:
+            try:
+                _n, _o, _e, _ec = scan_mesh_errors(working, return_edges=True)
+                if _ec is not None:
+                    _tiny, _nloops, _big = _open_loops_are_printable(_ec)
+                    if _tiny:
+                        L(f"open edges below print scale — {open_src} edge(s) in "
+                          f"{_nloops} loop(s), largest {_big:.4f}mm < "
+                          f"{MIN_LAYER}mm layer; accepting without blender")
+                        stats['path'].append(f'subprint-open{open_src}')
+                        open_src = 0
+            except Exception as _tiny_err:
+                L(f"print-scale check failed — {_tiny_err}")
         if nm_src == 0 and open_src == 0:
             _ensure_parent(dst)
             os.replace(working, dst)
@@ -2710,6 +2823,7 @@ def process_file_subprocess(src, is_part=False):
            '--input', INPUT_FOLDER,
            '--suffix', OUTPUT_SUFFIX,
            '--merge-dist', str(MERGE_DIST),
+           '--min-layer', str(MIN_LAYER),
            '--max-faces', str(MAX_FACES),
            '--timeout', str(TIMEOUT),
            '--result-fd', str(_wr)]

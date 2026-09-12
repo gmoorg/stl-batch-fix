@@ -8,6 +8,11 @@ OUTPUT_SUFFIX =
 # Vertex merge radius for T-junction fix
 MERGE_DIST = 0.01
 
+# Finest print layer in mm. Open boundaries smaller than this cannot reach the
+# plate, so they are accepted instead of triggering another repair pass.
+# 0 = require zero open edges (the old behaviour).
+MIN_LAYER = 0.6
+
 # Parallel worker processes (0 = auto from RAM and cores)
 WORKERS = 0
 
