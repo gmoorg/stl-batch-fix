@@ -20,6 +20,13 @@ WORKERS = 0
 # part. This is the limit almost every file is judged by.
 TIMEOUT_PART = 600
 
+# Percent of TIMEOUT_PART held back from Blender for the steps that follow it
+# (post-verify scan, a possible post-blender PyMeshFix pass, writing output).
+# Blender gets TIMEOUT_PART - elapsed - (TIMEOUT_PART * this / 100), and is not
+# started at all when that leaves under 30s. Measured over 17 Blender runs:
+# 10 needed no post-work, 2 took ~9s, 5 took 100.7-186.4s (p95 = 152.6s).
+BLENDER_RESERVE_PCT = 30
+
 # Ceiling for a file that splits, and nothing else. An unsplit model is capped
 # by TIMEOUT_PART alone and never reaches this. A split file's cap is
 #     min(TIMEOUT, TIMEOUT_PART * n_parts)

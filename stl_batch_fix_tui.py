@@ -53,6 +53,7 @@ CFG_FIELDS = [
     ('WORKERS',       'Workers',           int,   'Parallel worker processes (0 = auto from RAM and cores)'),
     ('TIMEOUT_PART',  'Timeout/mesh (s)',  int,   'Budget for one mesh: a whole unsplit model, or a single shell part'),
     ('TIMEOUT',       'Split ceiling (s)', int,   'Ceiling for split files only; cap is min(TIMEOUT, TIMEOUT_PART * n_parts)'),
+    ('BLENDER_RESERVE_PCT', 'Blender reserve %', int, 'Percent of TIMEOUT_PART held back from Blender for the steps after it'),
     ('MAX_FACES',     'Max faces',         int,   'Decimate threshold (0 = disabled)'),
     ('RECURSIVE',     'Recursive',         bool,  'Walk subdirectories'),
 ]
@@ -65,6 +66,7 @@ CFG_DEFAULTS = {
     'WORKERS':       str(_fix.WORKERS),
     'TIMEOUT':       str(_fix.TIMEOUT),
     'TIMEOUT_PART':  str(_fix.TIMEOUT_PART),
+    'BLENDER_RESERVE_PCT': str(_fix.BLENDER_RESERVE_PCT),
     'MAX_FACES':     str(_fix.MAX_FACES),
     'RECURSIVE':     str(_fix.RECURSIVE),
 }
@@ -522,6 +524,7 @@ def run_progress_screen(values, files, cfg, sized=None):
     _fix.WORKERS       = values['WORKERS']
     _fix.TIMEOUT       = values['TIMEOUT']
     _fix.TIMEOUT_PART  = values['TIMEOUT_PART']
+    _fix.BLENDER_RESERVE_PCT = values['BLENDER_RESERVE_PCT']
     _fix.MAX_FACES     = values['MAX_FACES']
     _fix.RECURSIVE     = values['RECURSIVE']
 

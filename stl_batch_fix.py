@@ -64,6 +64,16 @@ WORKERS        = 0      # parallel workers; 0 = auto from cores and memory budge
 # A six-shell file used to do six repairs under one shared budget and was killed
 # for being multi-part rather than slow; each part now gets its own.
 TIMEOUT_PART   = 600
+# percent of TIMEOUT_PART held back from Blender for the steps that follow it
+# (post-verify scan, a possible post-blender PyMeshFix pass, writing output).
+# Measured over 17 Blender invocations across two runs: 10 needed no post-work,
+# 2 took ~9s, and 5 took 100.7-186.4s — p95 was 152.6s, which is 25.4% of a
+# 600s budget.  30% covers that with headroom.  Blender gets
+#     TIMEOUT_PART - elapsed - (TIMEOUT_PART * BLENDER_RESERVE_PCT / 100)
+BLENDER_RESERVE_PCT = 30
+# below this many seconds a Blender run is not worth starting: it would be
+# killed before it could finish and the mesh would pay the time for nothing.
+_BLENDER_MIN_RUN = 30.0
 # seconds — ceiling for a file that splits, and nothing else.  An unsplit model
 # is capped by TIMEOUT_PART alone and never reaches this.  A split file's cap is
 #     min(TIMEOUT, TIMEOUT_PART * n_parts)
@@ -101,6 +111,10 @@ if __name__ == '__main__' and len(sys.argv) > 1:
     parser.add_argument('--suffix',      default=None,  help=f"Output filename suffix (default: {OUTPUT_SUFFIX!r})")
     parser.add_argument('--merge-dist',  type=float, default=None,
                         help=f"Vertex merge distance in mm (default: {MERGE_DIST})")
+    parser.add_argument('--blender-reserve-pct', type=int, default=None,
+                        help=f"Percent of TIMEOUT_PART held back from Blender "
+                             f"for the steps after it (default: "
+                             f"{BLENDER_RESERVE_PCT})")
     parser.add_argument('--min-layer',   type=float, default=None,
                         help=f"Finest print layer in mm; open boundaries smaller "
                              f"than this are accepted as-is (default: {MIN_LAYER}, "
@@ -134,6 +148,8 @@ if __name__ == '__main__' and len(sys.argv) > 1:
     if args.suffix     is not None: OUTPUT_SUFFIX = args.suffix
     if args.merge_dist is not None: MERGE_DIST    = args.merge_dist
     if args.min_layer  is not None: MIN_LAYER     = args.min_layer
+    if args.blender_reserve_pct is not None:
+        BLENDER_RESERVE_PCT = args.blender_reserve_pct
     if args.recursive  is not None: RECURSIVE     = args.recursive
     if args.workers    is not None: WORKERS       = args.workers
     if args.timeout    is not None: TIMEOUT       = args.timeout
@@ -421,17 +437,29 @@ def scan_mesh_errors(path, n_tris=None, return_edges=False):
         return _out(-1, -1, f"{type(_e).__name__}: {_e}")
 
 
-def _blender_budget():
-    """Seconds any single Blender invocation may take.
+def _blender_budget(elapsed=0.0):
+    """Seconds this Blender invocation may take, given time already spent.
 
-    Blender is where a mesh's time actually goes — 180s of 1st-body's 561s, and
-    33s of Mandy part.0's 104s — so capping this call is what bounds one mesh.
-    An unsplit model is spawned with TIMEOUT (the ceiling, because at spawn time
-    nobody knows whether it will split), and this is the tighter limit it is
-    really judged by.  A part gets the same cap for free.
+    Blender must finish before the mesh's own budget runs out, not merely be
+    given the whole of it: a mesh that has already spent 450s of a 600s budget
+    handing Blender a fresh 600s reaches 1050s, and the cap does not cap.  Worse,
+    an over-running Blender is killed by the worker's SIGKILL of the whole
+    process tree rather than timing out on its own, so the pipeline never gets
+    the clean 'TIMEOUT after Ns' it knows how to handle.
 
-    Falls back to TIMEOUT when the per-part limit is disabled (0)."""
-    return TIMEOUT_PART or TIMEOUT
+    So Blender gets   budget - elapsed - reserve,   where the reserve is what
+    the steps AFTER Blender need.  Measured across two runs (n=17 blender
+    invocations): 10 needed no post-Blender work at all, 2 took ~9s, and 5 took
+    100.7-186.4s — every one of those a post-blender PyMeshFix pass on a ~900k
+    face mesh.  p95 was 152.6s.  BLENDER_RESERVE_PCT of 30% covers that with
+    headroom at the default 600s budget.
+
+    Returns 0 when there is not enough time left to be worth starting; callers
+    must treat that as 'skip Blender and fail the mesh on time'."""
+    budget = TIMEOUT_PART or TIMEOUT
+    reserve = budget * (BLENDER_RESERVE_PCT / 100.0)
+    left = budget - elapsed - reserve
+    return left if left >= _BLENDER_MIN_RUN else 0.0
 
 
 def _part_cap(n_parts):
@@ -825,7 +853,7 @@ def _mesh_volume(path):
 
 
 def _repair_by_seam_split(src_mesh, dst, dst_base, temps, stats, L, rel,
-                          failed_copy, unrepaired_copy, open_copy):
+                          failed_copy, unrepaired_copy, open_copy, elapsed=0.0):
     """Split at the winding seams, repair each region, merge back.
 
     The recovery path for a mesh PyMeshFix answered by deleting part of it.
@@ -861,7 +889,8 @@ def _repair_by_seam_split(src_mesh, dst, dst_base, temps, stats, L, rel,
         bl_tmp = dst_base + '.seamblender.stl'
         temps.append(bl_tmp)
         _ensure_parent(bl_tmp)
-        ok, _open_only, _unrep, _out, _err = fix_stl(src_mesh, bl_tmp, MERGE_DIST)
+        ok, _open_only, _unrep, _out, _err = fix_stl(src_mesh, bl_tmp, MERGE_DIST,
+                                                     elapsed=elapsed)
         if not ok or not os.path.exists(bl_tmp):
             L("seam split: Blender did not produce a mesh")
             return None
@@ -1686,8 +1715,14 @@ def run_pymeshfix(src, dst, edge_counts=None):
     return nm, open_e
 
 
-def _run_blender_script(script):
+def _run_blender_script(script, elapsed=0.0):
     """Run `script` in headless Blender.  Returns (rc, stdout, stderr, timed_out).
+
+    `elapsed` is how long this mesh has already taken.  Blender is given the
+    time that leaves, less the reserve the post-Blender steps need — see
+    _blender_budget().  With too little left it is not started at all and the
+    call returns timed_out=True without spending anything, because a run that
+    cannot finish costs the mesh its remaining time and produces nothing.
 
     Centralises what both Blender entry points need to get right: the temp
     script is always unlinked, `_blender_proc` is published so the signal
@@ -1699,6 +1734,12 @@ def _run_blender_script(script):
     On timeout the child is killed and reaped before returning; rc is None and
     timed_out is True.  Callers map the result onto their own return shape."""
     global _blender_proc
+    _bud = _blender_budget(elapsed)
+    if not _bud:
+        # Not enough of the mesh's budget left to be worth starting.  Reported
+        # as a timeout so callers take their existing timeout path; nothing was
+        # run, so nothing has to be killed or cleaned up.
+        return None, '', f'skipped: under {_BLENDER_MIN_RUN:.0f}s left', True
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
         tmp.write(script)
         script_path = tmp.name
@@ -1710,7 +1751,7 @@ def _run_blender_script(script):
         )
         _blender_proc = proc
         try:
-            stdout, stderr = proc.communicate(timeout=_blender_budget())
+            stdout, stderr = proc.communicate(timeout=_bud)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
@@ -1725,25 +1766,27 @@ def _run_blender_script(script):
             pass
 
 
-def fix_stl(src, dst, merge_dist, is_ascii=False, is_obj=False):
+def fix_stl(src, dst, merge_dist, is_ascii=False, is_obj=False, elapsed=0.0):
     script = BLENDER_SCRIPT.format(src=src, dst=dst, merge_dist=merge_dist,
                                    is_ascii=repr(bool(is_ascii)),
                                    is_obj=repr(bool(is_obj)))
-    rc, stdout, stderr, timed_out = _run_blender_script(script)
+    _bud = _blender_budget(elapsed)
+    rc, stdout, stderr, timed_out = _run_blender_script(script, elapsed=elapsed)
     if timed_out:
-        return False, False, False, f'TIMEOUT after {_blender_budget()}s', ''
+        return False, False, False, f'TIMEOUT after {_bud:.0f}s', ''
     success    = rc == 0 and 'BLENDER_OK' in stdout
     open_only  = rc == 0 and 'BLENDER_OPEN' in stdout
     unrepaired = 'BLENDER_UNREPAIRED' in stdout
     return success, open_only, unrepaired, stdout, stderr
 
-def blender_decimate(src, dst, max_faces):
+def blender_decimate(src, dst, max_faces, elapsed=0.0):
     """Run stl_batch_fix.decimate.blender on src, writing a decimated binary STL to dst.
     Returns (ok, n_faces_out, stdout, stderr).  n_faces_out is -1 on failure."""
     script = BLENDER_DECIMATE_SCRIPT.format(src=src, dst=dst, max_faces=max_faces)
-    rc, stdout, stderr, timed_out = _run_blender_script(script)
+    _bud = _blender_budget(elapsed)
+    rc, stdout, stderr, timed_out = _run_blender_script(script, elapsed=elapsed)
     if timed_out:
-        return False, -1, f'TIMEOUT after {_blender_budget()}s', ''
+        return False, -1, f'TIMEOUT after {_bud:.0f}s', ''
     ok = rc == 0 and 'BLENDER_DECIMATE_OK' in stdout
     n_out = -1
     for line in stdout.splitlines():
@@ -2274,7 +2317,8 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
             if not _dec_done:
                 L(f"step C: decimate {working_tris:,} tris → target {MAX_FACES:,} (blender fallback)")
                 _bd_ok, _bd_faces, _bd_stdout, _bd_stderr = blender_decimate(
-                    working, _dec_tmp, MAX_FACES)
+                    working, _dec_tmp, MAX_FACES,
+                    elapsed=_time.monotonic() - _t0)
                 if _bd_ok and os.path.exists(_dec_tmp):
                     working = _dec_tmp
                     # Blender's reported face count is advisory only — the scan
@@ -2525,7 +2569,8 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                       f"deleted, retrying split at the winding seams")
                     _recovered = _repair_by_seam_split(
                         working, dst, dst_base, temps, stats, L, rel,
-                        failed_copy, unrepaired_copy, open_copy)
+                        failed_copy, unrepaired_copy, open_copy,
+                        elapsed=_time.monotonic() - _t0)
                     if _recovered is not None:
                         return _recovered
                     L("seam split did not recover it — keeping the "
@@ -2620,6 +2665,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
     success, open_only, unrepaired, stdout, stderr = fix_stl(
         blender_src, dst, MERGE_DIST,
         is_ascii=is_ascii, is_obj=is_obj,
+        elapsed=_time.monotonic() - _t0,
     )
     _bl_secs = _time.monotonic() - _bl_t0
     L(f"blender: done in {_bl_secs:.1f}s")
@@ -2907,6 +2953,7 @@ def process_file_subprocess(src, is_part=False, budget=None):
            '--suffix', OUTPUT_SUFFIX,
            '--merge-dist', str(MERGE_DIST),
            '--min-layer', str(MIN_LAYER),
+           '--blender-reserve-pct', str(BLENDER_RESERVE_PCT),
            '--max-faces', str(MAX_FACES),
            '--timeout', str(_budget),
            '--timeout-part', str(TIMEOUT_PART),
