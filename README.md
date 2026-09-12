@@ -65,7 +65,7 @@ directly, so the step was creating the damage it then had to repair.
 
 Source and output folders are siblings:
 
-```
+```text
 /path/to/STL/
   Fixing/          ← INPUT_FOLDER  (source files, never modified)
   Fixed/           ← output        (repaired copies, same relative structure)
@@ -74,7 +74,7 @@ Source and output folders are siblings:
 
 Split parts go directly to the output folder — the source file is never modified:
 
-```
+```text
 Fixing/
   Arms.stl            ← never touched
 
@@ -188,15 +188,38 @@ and keep its memory until it finishes on its own.
 
 ### Ctrl+C
 
-Depends on how the run was started:
+The process tree is three deep, and that is what makes this non-obvious:
 
-| launched via | on Ctrl+C |
-|---|---|
-| `stl_batch_fix_tui.py` | Workers get SIGTERM, each kills its Blender child and sweeps `/proc`; after 5 s anything still alive gets SIGKILL. A second Ctrl+C exits immediately. |
-| `stl_batch_fix.py` directly | **Blender is not killed.** No SIGINT handler is installed, so workers die of unhandled `KeyboardInterrupt` without running the SIGTERM path, and their Blender children reparent to init and keep running. |
+```text
+TUI (or bare script)
+  └─ pool worker            ← _worker_init installs a SIGTERM handler
+       └─ --one-file child  ← the process that actually spawns Blender
+            └─ Blender
+```
 
-Use the TUI for interactive runs. After interrupting a bare-script run, check
-for orphans with `pgrep -a blender` and kill them by hand.
+Every file goes through a `--one-file` child: `process_file_subprocess()` runs
+each one in its own process so that a timeout or an OOM kill lands there rather
+than on the worker (a dying pool worker fails *every* pending future). So the
+child is the normal production path, not just a debugging convenience.
+
+Blender is therefore two levels below the worker, while `_kill_own_children()`
+sweeps only **one**. The `--one-file` child now installs its own SIGINT/SIGTERM
+handler that kills `_blender_proc` and sweeps `/proc` before exiting, which is
+what closes the gap — on every entry point at once, since all of them route
+through that child.
+
+Ctrl+C reaches the child directly: it is spawned with a plain `Popen`, no
+`start_new_session`, so it stays in the caller's foreground process group.
+SIGTERM used to be the more dangerous of the two — its default disposition is
+`SIG_DFL`, so the child died instantly without running even a `finally` block.
+
+The timeout path was always safe, independently of any of this:
+`process_file_subprocess()` walks `_child_pids_of(proc.pid)` and SIGKILLs the
+tree before killing the child itself.
+
+After any interrupted run it is still worth checking `pgrep -a blender` — a
+Blender that was already orphaned by an earlier run will not be cleaned up by
+a later one.
 
 ---
 

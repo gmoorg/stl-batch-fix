@@ -3148,6 +3148,35 @@ if __name__ == '__main__' and _ONE_FILE:
     # Also usable by hand to debug one mesh:
     #   python stl_batch_fix.py --one-file "Zelda NSFW/Chair_foot1.stl"
     import json as _json
+
+    # Kill Blender before dying, on either signal.
+    #
+    # This process is the one that actually spawns Blender, and until this
+    # handler existed nothing killed it on an interrupt.  The sweep a pool
+    # worker runs on SIGTERM (_kill_own_children) reads /proc for its OWN
+    # direct children, which is this process — Blender is one level deeper and
+    # was never reached.  Both signals arrive here by default: SIGINT because
+    # this child stays in the caller's process group (no start_new_session), so
+    # Ctrl+C hits it directly, and SIGTERM from the worker's own shutdown.
+    #
+    # SIGTERM was the worse of the two: its default disposition is SIG_DFL, so
+    # the process died instantly without running even a finally block, and
+    # Blender reparented to init and kept its memory until it finished on its
+    # own.  Only the timeout path was safe, because process_file_subprocess
+    # explicitly walks _child_pids_of() before killing this child.
+    def _one_file_signal(_sig, _frame):
+        global _blender_proc
+        if _blender_proc is not None:
+            try:
+                _blender_proc.kill()
+            except Exception:
+                pass
+        _kill_own_children(signal.SIGKILL)
+        os._exit(130 if _sig == signal.SIGINT else 143)
+
+    signal.signal(signal.SIGINT, _one_file_signal)
+    signal.signal(signal.SIGTERM, _one_file_signal)
+
     _r = process_file_safe(_ONE_FILE, is_part=_ONE_IS_PART)
     if _RESULT_FD is not None:
         # The result travels over an inherited pipe rather than stdout, which
