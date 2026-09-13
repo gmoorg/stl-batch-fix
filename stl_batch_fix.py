@@ -580,7 +580,17 @@ def _arm_mesh_alarm(seconds, why=''):
 
     Raising TimeoutExpired (not exiting) lets the existing handler write the
     .timeout.stl marker and report a normal timeout, so the outcome is the same
-    shape the pipeline already knows how to report."""
+    shape the pipeline already knows how to report.
+
+    TIGHTENS ONLY.  An alarm already pending is replaced only by a SHORTER one.
+    Arming used to overwrite unconditionally, so a split widened the cap it was
+    supposed to respect: measured on Millenium_Falcon at TIMEOUT_PART=20,
+
+        t= 0.0s  ARM  20s  (whole mesh)
+        t= 3.5s  ARM 100s  (split)      <- _part_cap(5); the 20s is discarded
+
+    A file-level budget could therefore never fire on any file that split, and
+    the more shells a file had the longer it was allowed to run."""
     if _ONE_FILE is None or not hasattr(signal, 'SIGALRM'):
         return
     seconds = int(max(1, seconds))
@@ -595,10 +605,34 @@ def _arm_mesh_alarm(seconds, why=''):
         raise subprocess.TimeoutExpired(cmd='mesh', timeout=seconds)
 
     try:
+        # alarm() returns what was left of any pending alarm (0 = none) and
+        # cancels it, so this both reads and clears in one call.
+        pending = signal.alarm(0)
+        if pending and pending <= seconds:
+            signal.alarm(pending)     # keep the tighter existing deadline
+            return
         signal.signal(signal.SIGALRM, _fire)
         signal.alarm(seconds)
     except (ValueError, OSError):
         # Not the main thread, or no SIGALRM: the parent watchdog still applies.
+        pass
+
+
+def _cancel_mesh_alarm():
+    """Drop any pending mesh alarm.  Call when a file is done, however it ended.
+
+    Without this an alarm outlives the file it was armed for.  That is harmless
+    in the TUI path, where every file gets its own --one-file process and the
+    alarm dies with it, but the bare-script pool reuses one worker for many
+    files (max_tasks_per_child is deliberately not set), so an alarm armed for
+    file N fires during file N+1 and writes a .timeout.stl for a file that was
+    doing nothing wrong.  Demonstrated: arm 2s, finish at 0.3s, and the next
+    file takes the TimeoutExpired."""
+    if not hasattr(signal, 'SIGALRM'):
+        return
+    try:
+        signal.alarm(0)
+    except (ValueError, OSError):
         pass
 
 
@@ -3439,6 +3473,11 @@ def process_file_safe(src, is_part=False):
             pass
         result = {'rel': rel, 'status': 'failed', 'is_mesh_bad': False,
                   'stdout': msg, 'stderr': ''}
+    # Every outcome -- ok, timeout, unhandled exception -- converges here, so
+    # this is the one place that guarantees no alarm outlives its file.  A pool
+    # worker is reused across files, and a leftover alarm would otherwise fire
+    # during the next one and mark an innocent file .timeout.stl.
+    _cancel_mesh_alarm()
     if _worker_status is not None:
         try:
             _worker_status.pop(_pid, None)

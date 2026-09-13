@@ -6,41 +6,58 @@ not yet clear.
 
 ---
 
-## 1. The timeout configures nothing, and that is currently load-bearing
+## 1. Two runners with different timeout behaviour — partly fixed 2026-09-13
 
-`process_file_subprocess` — 100+ lines of child-spawn, `communicate(timeout=)`,
-`/proc` child-walk and SIGKILL-tree machinery — **is called from nowhere**. The
-pool submits `process_file_safe` directly:
+**The 2026-09-12 version of this entry was wrong.** It claimed
+`process_file_subprocess` is "called from nowhere". It is called — the TUI does
+it, passing the function as a value:
 
 ```python
-future_to_src = {pool.submit(process_file_safe, src): (i, src)   # line ~3540
+fut = _pool.submit(_fix.process_file_subprocess, src)   # stl_batch_fix_tui.py:915
 ```
 
-Consequences, all confirmed by process tree on the 2026-09-12 run (bash →
-parent → three pool workers, no `--one-file` child anywhere):
+An AST walker looking for call nodes and bare `Name` nodes missed it (the
+reference is an `ast.Attribute`), and plain grep found it. The same failure
+shape as the note at the bottom of this file.
 
-- `TIMEOUT_PART` and `TIMEOUT` bind on nothing during a batch run.
-- The SIGALRM cap added in `0f1712b` no-ops: `_arm_mesh_alarm` returns early
-  unless `_ONE_FILE` is set, and only the `--one-file` entry point sets it. It
-  was verified in a unit test and armed in **zero** processes in a real run.
-- `_kill_own_children` and the SIGKILL tree teardown are unreachable from the
-  pool path.
+There are **two runners**:
 
-**Do not simply revive it.** `Default_SubTool7.stl` needed **3,106 s** and
-succeeded (nm=33,353 → 0, 18.5 MB written, clean). A working 600 s cap would
-have killed it and written a `.timeout.stl` for a file that repairs correctly.
-The dead code is the only reason that output exists.
+| path | submits | child per file | watchdog | SIGALRM |
+|---|---|---|---|---|
+| TUI (normal use) | `process_file_subprocess` | `--one-file` | yes | arms |
+| bare script | `process_file_safe` | none | no | no-ops |
 
-**So the question is what the timeout is FOR**, before making it work:
+So `Default_SubTool7.stl` ran 3,106 s uncapped because the **bare script** was
+used to launch that run, not because the machinery is dead. Under the TUI it
+would have been capped.
 
-- 600 s has no measurement behind it.
-- PyMeshFix runtime tracks defect count more than face count (33,353 nm →
-  3,080 s; 2,055 nm → 289 s), so a flat per-mesh number is the wrong shape.
-- A timeout should stop a *hang*, not cap honest work — and nothing observed
-  so far was actually hung.
+### Fixed in this session
+
+- **Arming widened the cap it was meant to enforce.** `_arm_mesh_alarm`
+  overwrote any pending alarm, so a split replaced the file budget with
+  `_part_cap(n)` — a larger number. Measured on Millenium_Falcon at
+  `TIMEOUT_PART=20`: `t=0.0s ARM 20s (whole mesh)` → `t=3.5s ARM 100s (split)`.
+  A file-level budget could never fire on any file that split, and more shells
+  meant more allowance. Now tightens only.
+- **Nothing cancelled the alarm.** No `signal.alarm(0)` existed anywhere.
+  Harmless under the TUI (each file has its own process) but the bare-script
+  pool reuses a worker across files with `max_tasks_per_child` deliberately
+  unset, so an alarm armed for file N fired during file N+1 and would mark an
+  innocent file `.timeout.stl`. Demonstrated, then closed with
+  `_cancel_mesh_alarm()` on the single exit path of `process_file_safe`.
+
+### Still open
+
+- **The bare-script path still has no cap at all** — it arms nothing, because
+  `_ONE_FILE` is None there. Deliberately left alone: arming it would have
+  killed SubTool7 at 600 s, and that file repairs correctly at 3,106 s.
+- **So: what is the timeout FOR?** 600 s has no measurement behind it.
+  PyMeshFix runtime tracks defect count more than face count (33,353 nm →
+  3,080 s; 2,055 nm → 289 s), so a flat per-mesh number is the wrong shape. A
+  timeout should stop a *hang*, and nothing observed so far was actually hung.
 
 **What would settle it:** cost-per-defect figures from several large meshes,
-then decide between a scaled budget, a much larger flat cap, or dropping the
+then choose between a scaled budget, a much larger flat cap, or dropping the
 concept and relying on the user noticing a stuck run.
 
 ---
