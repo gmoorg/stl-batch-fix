@@ -63,7 +63,15 @@ WORKERS        = 0      # parallel workers; 0 = auto from cores and memory budge
 # or a single shell part.  This is the limit almost every file is judged by.
 # A six-shell file used to do six repairs under one shared budget and was killed
 # for being multi-part rather than slow; each part now gets its own.
-TIMEOUT_PART   = 600
+#
+# 3600 rather than 600 because 600 had no measurement behind it and cost a good
+# output: Default_SubTool7.stl (1.3M tris, nm=33,353) spent 3,080s in PyMeshFix
+# and finished clean.  A 600s cap would have written it a .timeout.stl.  Every
+# successful repair measured so far fits inside 3,106s, so this is that worst
+# case plus headroom.  Face count is deliberately NOT part of this: decimation
+# caps every mesh reaching PyMeshFix at MAX_FACES, so size cannot explain a 10x
+# runtime spread between two 900k-face meshes — defect count can.
+TIMEOUT_PART   = 3_600
 # percent of TIMEOUT_PART held back from Blender for the steps that follow it
 # (post-verify scan, a possible post-blender PyMeshFix pass, writing output).
 # Measured over 17 Blender invocations across two runs: 10 needed no post-work,
@@ -77,9 +85,19 @@ _BLENDER_MIN_RUN = 30.0
 # seconds — ceiling for a file that splits, and nothing else.  An unsplit model
 # is capped by TIMEOUT_PART alone and never reaches this.  A split file's cap is
 #     min(TIMEOUT, TIMEOUT_PART * n_parts)
-# so the ceiling only binds when a file has enough parts to exceed it: a 2-part
-# file gets 1200s, a 40-part file gets TIMEOUT rather than 24000s.
+# so the ceiling only binds when a file has enough parts to exceed it.
+#
+# This one is a CURATION rule, not a resource limit: a model that cannot be
+# repaired inside an hour is a model worth not keeping.  That is a judgement
+# about the collection, so it is set to taste rather than derived from timings.
+#
+# 0 means "no practical ceiling" and resolves to _NO_CEILING (24h) rather than
+# to infinity — a genuine runaway still stops eventually.  Use _effective_timeout()
+# to read it; the bare global still holds the literal 0.
 TIMEOUT        = 3_600
+# what TIMEOUT = 0 resolves to.  Long enough to never bind on real work, short
+# enough that a wedged file cannot hold a worker for the rest of the week.
+_NO_CEILING    = 86_400
 MAX_FACES      = 900_000    # decimate if face count exceeds this (0 = disabled)
 LOG_FILE       = "/mnt/sda2/STL/Fixed/repair_log.tsv"
 # Files decimated by at least this factor are listed in REVIEW_FILE.  Heavy
@@ -127,7 +145,8 @@ if __name__ == '__main__' and len(sys.argv) > 1:
                         help=f"Parallel Blender processes (default: {WORKERS})")
     parser.add_argument('--timeout',      type=int, default=None,
                         help=f"Ceiling for split files only; cap is "
-                             f"min(TIMEOUT, TIMEOUT_PART * n_parts) "
+                             f"min(TIMEOUT, TIMEOUT_PART * n_parts); "
+                             f"0 = no practical ceiling ({_NO_CEILING}s) "
                              f"(default: {TIMEOUT})")
     parser.add_argument('--timeout-part', type=int, default=None,
                         help=f"Seconds allowed for any single shell part "
@@ -556,7 +575,7 @@ def _blender_budget(elapsed=0.0):
 
     Returns 0 when there is not enough time left to be worth starting; callers
     must treat that as 'skip Blender and fail the mesh on time'."""
-    budget = TIMEOUT_PART or TIMEOUT
+    budget = TIMEOUT_PART or _effective_timeout()
     reserve = budget * (BLENDER_RESERVE_PCT / 100.0)
     left = budget - elapsed - reserve
     return left if left >= _BLENDER_MIN_RUN else 0.0
@@ -565,7 +584,7 @@ def _blender_budget(elapsed=0.0):
 def _arm_mesh_alarm(seconds, why=''):
     """Cap this process's own wall time with SIGALRM.  No-op outside the child.
 
-    The parent spawns every whole file with TIMEOUT (the 3600s ceiling) because
+    The parent spawns every whole file with the whole-file ceiling because
     at spawn time nobody knows whether the mesh will split, or into how many
     parts.  Nothing narrowed that back down afterwards, so a mesh that stayed
     whole kept the ceiling instead of TIMEOUT_PART: a 1.3M-tri single shell sat
@@ -636,16 +655,33 @@ def _cancel_mesh_alarm():
         pass
 
 
+def _effective_timeout():
+    """The whole-file ceiling in seconds, resolving the 0 sentinel.
+
+    TIMEOUT = 0 means "no practical ceiling" and becomes _NO_CEILING (24h)
+    rather than infinity, so a genuinely wedged file still stops.  Every reader
+    of the ceiling goes through here — reading the global directly would treat
+    0 as "no time at all" and kill every split file instantly."""
+    return _NO_CEILING if not TIMEOUT else TIMEOUT
+
+
 def _part_cap(n_parts):
     """Seconds allowed for a file that split into `n_parts` shells.
 
-    min(TIMEOUT, TIMEOUT_PART * n_parts): the per-part budget times the number
-    of parts, but never more than the ceiling.  A 2-part file gets 1200s, a
-    40-part file gets TIMEOUT rather than 24000s.  With TIMEOUT_PART disabled
-    (0) there is no per-part budget to multiply, so the ceiling is the cap."""
+    min(ceiling, TIMEOUT_PART * n_parts): the per-mesh budget times the number
+    of parts, but never more than the whole-file ceiling.  With TIMEOUT_PART at
+    3600 the ceiling binds almost at once — a 2-part file wants 7200s and gets
+    the hour — which is the intended curation rule: a split model that cannot
+    finish within TIMEOUT is one worth not keeping.  Raise TIMEOUT, or set it to
+    0 for the 24h no-practical-ceiling mode, if a large split model should be
+    allowed to run.
+
+    With TIMEOUT_PART disabled (0) there is no per-mesh budget to multiply, so
+    the ceiling is the cap."""
+    ceiling = _effective_timeout()
     if not TIMEOUT_PART:
-        return TIMEOUT
-    return min(TIMEOUT, TIMEOUT_PART * max(1, int(n_parts)))
+        return ceiling
+    return min(ceiling, TIMEOUT_PART * max(1, int(n_parts)))
 
 
 def _open_loops_are_printable(edge_counts, limit=None):
@@ -1948,7 +1984,7 @@ def _run_blender_script(script, elapsed=0.0, L=None, route='blender'):
         # run, so nothing has to be killed or cleaned up.
         if L:
             L(f"blender: skipped ({route}) — {elapsed:.0f}s of "
-              f"{TIMEOUT_PART or TIMEOUT}s spent, under "
+              f"{TIMEOUT_PART or _effective_timeout()}s spent, under "
               f"{_BLENDER_MIN_RUN:.0f}s left after the "
               f"{BLENDER_RESERVE_PCT}% reserve")
         return None, '', f'skipped: under {_BLENDER_MIN_RUN:.0f}s left', True
@@ -3256,7 +3292,7 @@ def process_file_subprocess(src, is_part=False, budget=None):
     # applies the tighter limit itself once it knows: _part_cap(n) for a split,
     # TIMEOUT_PART for a mesh that stays whole.  Spawning with TIMEOUT_PART
     # instead would kill a five-part file before its second part started.
-    _budget = int(budget) if budget else TIMEOUT
+    _budget = int(budget) if budget else _effective_timeout()
     if _budget < 30:
         _budget = 30
 
@@ -3534,7 +3570,7 @@ if __name__ == '__main__' and _ONE_FILE:
     # is narrowed back down.  A file that does split raises the cap to
     # _part_cap(n) once n is known, so only genuinely split files reach beyond
     # TIMEOUT_PART.
-    _arm_mesh_alarm(TIMEOUT_PART or TIMEOUT, 'whole mesh')
+    _arm_mesh_alarm(TIMEOUT_PART or _effective_timeout(), 'whole mesh')
 
     _r = process_file_safe(_ONE_FILE, is_part=_ONE_IS_PART)
     if _RESULT_FD is not None:
@@ -3605,7 +3641,9 @@ if __name__ == '__main__':
     print(f"Merge dist    : {MERGE_DIST} mm")
     print(f"Max faces     : {MAX_FACES:,}" if MAX_FACES > 0 else "Max faces     : disabled")
     print(f"Workers       : {workers} (configured: {WORKERS})")
-    print(f"Timeout       : {TIMEOUT} s")
+    print(f"Timeout/mesh  : {TIMEOUT_PART} s")
+    print(f"Split ceiling : {_effective_timeout()} s"
+          + ("  (TIMEOUT=0 — no practical ceiling)" if not TIMEOUT else ""))
     print(f"Recursive     : {RECURSIVE}")
     print(f"Blender       : {BLENDER}")
     print(f"PyMeshFix     : {'available' if _PYMESHFIX_AVAILABLE else 'not available'}")

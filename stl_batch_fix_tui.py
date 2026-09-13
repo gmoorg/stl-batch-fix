@@ -53,7 +53,7 @@ CFG_FIELDS = [
     ('MIN_LAYER',     'Min layer mm',      float, 'Finest print layer; open boundaries smaller than this are accepted (0 = require zero)'),
     ('WORKERS',       'Workers',           int,   'Parallel worker processes (0 = auto from RAM and cores)'),
     ('TIMEOUT_PART',  'Timeout/mesh (s)',  int,   'Budget for one mesh: a whole unsplit model, or a single shell part'),
-    ('TIMEOUT',       'Split ceiling (s)', int,   'Ceiling for split files only; cap is min(TIMEOUT, TIMEOUT_PART * n_parts)'),
+    ('TIMEOUT',       'Split ceiling (s)', int,   'Whole-file ceiling for a split model; 0 = no practical ceiling (24h)'),
     ('BLENDER_RESERVE_PCT', 'Blender reserve %', int, 'Percent of TIMEOUT_PART held back from Blender for the steps after it'),
     ('MAX_FACES',     'Max faces',         int,   'Decimate threshold (0 = disabled)'),
     ('RECURSIVE',     'Recursive',         bool,  'Walk subdirectories'),
@@ -963,7 +963,11 @@ def run_progress_screen(values, files, cfg, sized=None):
                 file is retried once, then set aside.  monotonic() is
                 system-wide on Linux, so the worker's 'started' is directly
                 comparable here."""
-                if _fix.TIMEOUT <= 0:
+                # 0 means "no practical ceiling" (24h), NOT "disabled" -- read
+                # it through the resolver or a config of 0 would silently turn
+                # off the only backstop against a worker wedged inside C++.
+                _limit = _fix._effective_timeout()
+                if _limit <= 0:
                     return
                 now = time.monotonic()
                 # worker_status is a Manager().dict() proxy: every read is a
@@ -990,11 +994,11 @@ def run_progress_screen(values, files, cfg, sized=None):
                     if (pid, started) in _timed_out:
                         continue
                     held = now - started
-                    if held < _fix.TIMEOUT * grace:
+                    if held < _limit * grace:
                         continue
                     _timed_out[(pid, started)] = rel
                     _fix.log_step(rel, f"TIMEOUT after {held:.0f}s "
-                                       f"(limit {_fix.TIMEOUT}s) — killing worker {pid}")
+                                       f"(limit {_limit}s) — killing worker {pid}")
                     # Write the indicator here, in the parent: the worker is
                     # about to be SIGKILLed and will never reach the code that
                     # writes the other .<signal>.stl markers.
@@ -1071,7 +1075,7 @@ def run_progress_screen(values, files, cfg, sized=None):
                             # the generic out-of-memory guess below.
                             if rel in _timed_out.values():
                                 result = {'status': 'interrupted', 'rel': rel,
-                                          'reason': f'exceeded the {_fix.TIMEOUT}s '
+                                          'reason': f'exceeded the {_fix._effective_timeout()}s '
                                                     'per-file timeout — raise Timeout '
                                                     'or decimate this file further',
                                           'stdout': '', 'stderr': ''}
@@ -1274,7 +1278,7 @@ def run_progress_screen(values, files, cfg, sized=None):
     _timeouts += [r['file'] for r in _timed_kills if r['file'] not in _timeouts]
     if _timeouts:
         console.print(f"[bold yellow]{len(_timeouts)} file(s) hit the "
-                      f"{_fix.TIMEOUT}s per-file timeout[/bold yellow] "
+                      f"{_fix._effective_timeout()}s per-file timeout[/bold yellow] "
                       f"— killed mid-repair:")
         for _rel in _timeouts[:10]:
             console.print(f"  [yellow]{_rel}[/yellow]")

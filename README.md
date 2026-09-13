@@ -142,8 +142,8 @@ All settings have defaults in `stl_batch_fix.py` and can be overridden via `--fl
 | `MERGE_DIST` | `0.01` mm | `--merge-dist` | — | Vertex merge radius |
 | `MIN_LAYER` | `0.6` mm | `--min-layer` | — | Finest layer you print at; open boundaries smaller than this are accepted rather than repaired (0 = require zero open edges) |
 | `WORKERS` | `0` (auto) | `--workers` | — | Parallel worker processes; 0 derives from cores and memory |
-| `TIMEOUT_PART` | `600` s | `--timeout-part` | — | Budget for **one mesh** — a whole unsplit model, or a single shell part. Almost every file is judged by this |
-| `TIMEOUT` | `3600` s | `--timeout` | — | Ceiling for **split files only**; a split file's cap is `min(TIMEOUT, TIMEOUT_PART × n_parts)` |
+| `TIMEOUT_PART` | `3600` s | `--timeout-part` | — | Budget for **one mesh** — a whole unsplit model, or a single shell part. Almost every file is judged by this |
+| `TIMEOUT` | `3600` s | `--timeout` | — | Whole-file ceiling for a **split model**; its cap is `min(TIMEOUT, TIMEOUT_PART × n_parts)`. `0` = no practical ceiling (24 h) |
 | `BLENDER_RESERVE_PCT` | `30` % | `--blender-reserve-pct` | — | Percent of `TIMEOUT_PART` held back from Blender for the steps after it |
 | `MAX_FACES` | `900 000` | `--max-faces` | — | Decimate threshold (0 = disabled) |
 | `RECURSIVE` | `True` | `--recursive` / `--no-recursive` | — | Walk subdirectories |
@@ -153,6 +153,26 @@ All settings have defaults in `stl_batch_fix.py` and can be overridden via `--fl
 Two independent caps, not a shared pool. A part that finishes in 1 s donates
 nothing to the next one — each part gets `TIMEOUT_PART`, and the file as a
 whole gets `min(TIMEOUT, TIMEOUT_PART × n_parts)`, whichever binds first.
+
+The two exist for different reasons:
+
+- **`TIMEOUT_PART` is measured.** 3600 s sits above every successful repair
+  seen so far: `Default_SubTool7.stl` (1.3 M tris, nm = 33 353) spent 3 080 s
+  in PyMeshFix and finished clean, so the previous 600 s would have written a
+  `.timeout.stl` for a file that repairs correctly. Face count deliberately
+  plays no part — decimation caps every mesh reaching PyMeshFix at `MAX_FACES`,
+  so size cannot explain a 10× spread between two 900 k-face meshes, and
+  defect count can.
+- **`TIMEOUT` is a curation rule.** A model that cannot be repaired within an
+  hour is one worth not keeping. That is a judgement about the collection, not
+  a measurement, so set it to taste. Because `TIMEOUT_PART` is now 3600, this
+  ceiling binds as soon as a file splits: a 2-part file wants 7200 s and gets
+  the hour.
+
+Set `TIMEOUT = 0` for **no practical ceiling** — it resolves to 24 h rather
+than to infinity, so a genuinely wedged file still stops. Read it through
+`_effective_timeout()`; reading the global directly would treat `0` as "no time
+at all" and kill every split file instantly.
 
 Within one mesh, Blender is given `TIMEOUT_PART − elapsed − reserve` rather
 than a fresh budget, and is skipped entirely when under 30 s remain. A flat

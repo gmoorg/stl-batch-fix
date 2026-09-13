@@ -15,9 +15,10 @@ MIN_LAYER = 0.6
 WORKERS = 0
 
 # Budget for one mesh: a whole unsplit model, or a single shell part
-TIMEOUT_PART = 600
+TIMEOUT_PART = 3600
 
-# Ceiling for split files only; cap is min(TIMEOUT, TIMEOUT_PART * n_parts)
+# Whole-file ceiling for a split model; cap is min(TIMEOUT, TIMEOUT_PART * n_parts)
+# 0 = no practical ceiling (resolves to 24h)
 TIMEOUT = 3600
 
 # Percent of TIMEOUT_PART held back from Blender for the steps after it
