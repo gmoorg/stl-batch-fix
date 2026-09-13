@@ -1921,6 +1921,31 @@ def _merge_paired_vertices(src, dst, pairs):
         f.write(buf)
 
 
+def _pmf_expectation(n_defects):
+    """A rough note on how long a PyMeshFix pass of this size tends to take.
+
+    Not a prediction — a reader's cue for whether silence is normal.  PyMeshFix
+    holds the GIL throughout, so there is no progress to report from inside the
+    call; this is the one chance to set expectations.
+
+    The observed points, all after decimation to <= MAX_FACES:
+
+        2,055 defects ->   289s
+        2,263 defects ->   292s
+       33,353 defects -> 3,080s
+
+    Three points is not a curve, so these are deliberately coarse bands rather
+    than an interpolation.  Runtime tracks defect count much more closely than
+    face count, which is why this keys on defects."""
+    if n_defects < 1_000:
+        return "usually seconds"
+    if n_defects < 5_000:
+        return "usually a few minutes"
+    if n_defects < 20_000:
+        return "expect many minutes"
+    return "expect tens of minutes — this is the slowest step and it cannot report progress"
+
+
 def run_pymeshfix(src, dst, edge_counts=None):
     """Run PyMeshFix on src and write result to dst.
     Surgically snaps only the paired open-boundary vertex pairs together before
@@ -2889,7 +2914,18 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
             _pmf_tmp = dst + '.pymeshfix.stl'
             temps.append(_pmf_tmp)
             _ensure_parent(_pmf_tmp)
-            L(f"step E: pymeshfix repair (nm={nm_src} open={open_src})")
+            # Say how big the job is before starting it.  PyMeshFix holds the
+            # GIL for the whole call, so nothing can report progress from
+            # inside it -- measured, a heartbeat thread got 2 ticks during a
+            # call against 6 in the 0.3s before it.  The only honest thing is
+            # to state up front what it is chewing on, so a long silence reads
+            # as expected rather than as a hang.  Runtime tracks defect count
+            # far more than face count: 33,353 nm took 3,080s where 2,055 nm
+            # took 289s on a mesh of similar size.
+            L(f"step E: pymeshfix repair — {working_tris:,} tris, "
+              f"nm={nm_src} open={open_src}"
+              + (f"; {_pmf_expectation(nm_src + open_src)}"
+                 if (nm_src + open_src) else ""))
             _bounds_before = stl_bounds(working)
             try:
                 _pmf_nm, _pmf_open = run_pymeshfix(working, _pmf_tmp)
