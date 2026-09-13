@@ -1960,13 +1960,31 @@ def _pmf_expectation(n_defects):
     return "expect tens of minutes — this is the slowest step and it cannot report progress"
 
 
-def run_pymeshfix(src, dst, edge_counts=None):
+def run_pymeshfix(src, dst, edge_counts=None, L=None):
     """Run PyMeshFix on src and write result to dst.
     Surgically snaps only the paired open-boundary vertex pairs together before
     repair — leaves all other geometry untouched to avoid fuzziness.
     edge_counts, if given, is a packed edge map for src from an earlier scan,
     reused to avoid re-reading the file.
-    Returns (nm, open_edges) from a pure-Python edge scan, or raises on error."""
+    Returns (nm, open_edges) from a pure-Python edge scan, or raises on error.
+
+    Runs repair() as its three constituent steps rather than the single call,
+    so each one can be timed and logged.  PyMeshFix holds the GIL throughout,
+    so this is the only way to see inside a pass that can run for 3,000s —
+    measured, a heartbeat thread got 2 ticks during a call against 6 in the
+    0.3s before it.
+
+    The sequence is exactly what MeshFix.repair() does with its defaults:
+
+        fill_small_boundaries(0, True)      -> fill_holes()
+        if joincomp:  join_closest_components()   <- joincomp defaults False
+        if remove_smallest_components: ...  -> remove_smallest_components()
+        clean()
+
+    join_closest_components is deliberately NOT called: repair() skips it
+    unless asked, and including it would change what the pipeline does.
+    Verified identical on eight meshes — seven that repair successfully and one
+    that collapses — comparing vertex AND face counts against repair()."""
     pairs = _find_paired_open_vertices(src, edge_counts=edge_counts)
     _merge_tmp = None
     try:
@@ -1980,7 +1998,20 @@ def run_pymeshfix(src, dst, edge_counts=None):
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            tin.repair()
+            if L is None:
+                tin.repair()
+            else:
+                import time as _time
+                _t_all = _time.monotonic()
+                for _name, _call in (
+                        ('fill holes',      lambda: tin.fill_holes()),
+                        ('drop fragments',  lambda: tin.remove_smallest_components()),
+                        ('clean',           lambda: tin.clean())):
+                    _t = _time.monotonic()
+                    _call()
+                    L(f"  pymeshfix/{_name}: {_time.monotonic() - _t:.1f}s  "
+                      f"{len(tin.faces):,} faces")
+                L(f"  pymeshfix: {_time.monotonic() - _t_all:.1f}s total")
             tin.save(dst)
     finally:
         # Always remove the intermediate, including when repair() raises.
@@ -2204,7 +2235,7 @@ def _try_pymeshfix_after_blender(src_for_fix, dst, open_copy, failed_copy,
     if temps is not None:
         temps.append(_pmf_tmp)
     try:
-        _pmf_nm, _pmf_open = run_pymeshfix(src_for_fix, _pmf_tmp)
+        _pmf_nm, _pmf_open = run_pymeshfix(src_for_fix, _pmf_tmp, L=L)
         L(f"pymeshfix {label}: nm={_pmf_nm}  open={_pmf_open}")
         if _pmf_nm == 0 and _pmf_open == 0:
             # Verify with an independent edge scan — pymeshfix self-report is not reliable.
@@ -2950,7 +2981,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                  if (nm_src + open_src) else ""))
             _bounds_before = stl_bounds(working)
             try:
-                _pmf_nm, _pmf_open = run_pymeshfix(working, _pmf_tmp)
+                _pmf_nm, _pmf_open = run_pymeshfix(working, _pmf_tmp, L=L)
                 L(f"pymeshfix: nm={_pmf_nm}  open={_pmf_open}")
 
                 # Did it repair the mesh, or delete part of it?
