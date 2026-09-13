@@ -2481,8 +2481,62 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                             all_ok = False
                     if not all_ok:
                         n_ok = sum(1 for r in part_results if r['status'] in ('ok', 'skip'))
+                        # Merge whatever DID repair rather than discarding it.
+                        #
+                        # All-or-nothing threw away a great deal: Millenium_Falcon
+                        # splits into a 90,712-tri body (nm=0 open=0 after repair,
+                        # carrying the model's whole 117x36x155mm bbox) plus four
+                        # specks of 36-160 tris.  One 160-tri fin failed, so the
+                        # file was written off as .failed.stl -- a copy of the
+                        # broken source -- and 99.2% of a repaired model was lost.
+                        #
+                        # The failed part is left OUT, not included from its
+                        # .original.stl: a non-manifold shell can make a slicer
+                        # misbehave over the whole object, so a clean model
+                        # missing a small fin beats a complete one that may not
+                        # slice.  The .original.stl stays in ~parts/ for anyone
+                        # who wants to re-add it by hand.
+                        _ok_parts = [p for p, r in zip(parts, part_results)
+                                     if r['status'] in ('ok', 'skip')
+                                     and os.path.exists(p)]
+                        _lost = [os.path.basename(p) for p, r in zip(parts, part_results)
+                                 if r['status'] not in ('ok', 'skip')]
+                        _partial = None
+                        if _ok_parts:
+                            try:
+                                ms_p = _pymeshlab.MeshSet()
+                                for p in _ok_parts:
+                                    ms_p.load_new_mesh(p)
+                                if hasattr(ms_p, 'generate_by_merging_visible_meshes'):
+                                    ms_p.generate_by_merging_visible_meshes()
+                                else:
+                                    ms_p.flatten_visible_layers(mergevisible=True)
+                                _ensure_parent(open_copy)
+                                ms_p.save_current_mesh(open_copy, binary=True)
+                                _partial = os.path.getsize(open_copy)
+                            except Exception as _pm_err:
+                                L(f"partial merge failed: {_pm_err}")
+                                _partial = None
+                        # The source copy stays either way: the partial output is
+                        # missing geometry, so the original must remain printable.
                         _ensure_parent(failed_copy)
                         shutil.copy2(src, failed_copy)
+                        if _partial is not None:
+                            L(f"split partial: {n_ok}/{len(parts)} parts ok — merged "
+                              f"them into {os.path.basename(open_copy)} "
+                              f"({_partial:,} bytes); dropped {', '.join(_lost)}; "
+                              f"source kept as {os.path.basename(failed_copy)}")
+                            stats['path'].append(f'split{len(parts)}+partial{n_ok}')
+                            # stdout/stderr must be present: the runner's 'open'
+                            # branch indexes them directly (the TUI uses .get(),
+                            # so only the bare-script path would have crashed).
+                            return {'rel': rel, 'status': 'open',
+                                    'dst': os.path.basename(open_copy),
+                                    'size': _partial, 'is_ascii': False,
+                                    'partial': f"{n_ok}/{len(parts)}",
+                                    'stdout': f"partial merge: {n_ok}/{len(parts)} "
+                                              f"parts ok, dropped {', '.join(_lost)}",
+                                    'stderr': ''}
                         L(f"split partial: {n_ok}/{len(parts)} parts ok — saved as {os.path.basename(failed_copy)}")
                         return {'rel': rel, 'status': 'failed', 'is_mesh_bad': False,
                                 'stdout': f"{n_ok}/{len(parts)} parts succeeded", 'stderr': ''}
