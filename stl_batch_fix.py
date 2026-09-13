@@ -198,6 +198,106 @@ COMPANION_EXTENSIONS = {
 # Removed after a successful merge; never walked when collecting inputs.
 PARTS_DIRNAME = '~parts'
 
+# Prefix marking a part that has NOT been repaired yet.  A part is written as
+# "~<name>" and renamed to "<name>" only once its repair succeeds, so the
+# filename itself is the state: a bare name means finished, a ~ name means
+# in progress or abandoned.  Previously the state lived in sibling signal files
+# (<part>.failed.stl), which survived across runs and made a part report 'skip'
+# -- counted as success by the merge -- while its geometry was never repaired.
+_PART_PENDING = '~'
+
+
+def _parts_dir_for(dst, max_faces=None):
+    """Scratch dir for one mesh's split parts: ~parts/<mesh>.<max_faces>/.
+
+    Keyed by MAX_FACES because part indices are assigned by face-count rank
+    AFTER decimation (see split_shells), so the same index means a different
+    shell at a different decimation target.  Keeping each setting's parts in
+    its own folder makes a stale part structurally unreachable rather than
+    something that has to be detected.
+
+    MAX_FACES is not the only input to that ranking -- _MIN_SHELL_FACES and
+    which decimator ran (fast_simplification / pymeshlab / blender) also shift
+    face counts.  It is the one that changes in practice; the ~ rename protocol
+    is what actually guarantees correctness, this just avoids needless work."""
+    if max_faces is None:
+        max_faces = MAX_FACES
+    base = os.path.splitext(os.path.basename(dst))[0]
+    return os.path.join(os.path.dirname(os.path.abspath(dst)),
+                        PARTS_DIRNAME, f"{base}.{int(max_faces)}")
+
+
+def _clear_stale_parts_dirs(dst, keep_dir):
+    """Delete this mesh's parts dirs from other MAX_FACES settings.
+
+    Safe to rmtree: the folder holds one mesh's parts and nothing else, which
+    is why the parts root is per-mesh rather than shared.  Returns how many
+    directories were removed."""
+    base = os.path.splitext(os.path.basename(dst))[0]
+    root = os.path.join(os.path.dirname(os.path.abspath(dst)), PARTS_DIRNAME)
+    keep = os.path.abspath(keep_dir)
+    removed = 0
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return 0
+    for name in entries:
+        path = os.path.join(root, name)
+        if not os.path.isdir(path) or os.path.abspath(path) == keep:
+            continue
+        # "<mesh>.<digits>" -- this mesh, a different setting.
+        stem, _, tail = name.rpartition('.')
+        if stem == base and tail.isdigit():
+            try:
+                shutil.rmtree(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def _pending_part_path(part_path):
+    """The "~<name>" form of a committed part path."""
+    d, n = os.path.split(part_path)
+    return os.path.join(d, _PART_PENDING + n) if not n.startswith(_PART_PENDING) \
+        else part_path
+
+
+def _repair_part(part_path, L=None, label='part'):
+    """Repair one split part under the pending/commit protocol.
+
+    split_shells writes each part as "~<name>"; a bare "<name>" means an
+    earlier run already repaired it.  So: reuse the committed file if it is
+    there, otherwise repair the pending one and rename it on success.  The
+    rename is what makes 'finished' durable -- without it the only record was
+    a sibling signal file, which outlived the part it described."""
+    if os.path.exists(part_path):
+        return {'rel': os.path.basename(part_path), 'status': 'skip',
+                'reason': 'already repaired in an earlier run'}
+    pending = _pending_part_path(part_path)
+    if not os.path.exists(pending):
+        return {'rel': os.path.basename(part_path), 'status': 'failed',
+                'is_mesh_bad': False,
+                'stdout': f'{label} file missing: {os.path.basename(pending)}',
+                'stderr': ''}
+    r = process_file(pending, is_part=True)
+    if r.get('status') in ('ok', 'skip'):
+        if _commit_part(part_path) and L is not None:
+            L(f"  {label} {os.path.basename(part_path)}: committed")
+    return r
+
+
+def _commit_part(part_path):
+    """Rename ~<name> -> <name>, marking this part repaired.  Idempotent."""
+    pending = _pending_part_path(part_path)
+    if pending == part_path or not os.path.exists(pending):
+        return False
+    try:
+        os.replace(pending, part_path)
+        return True
+    except OSError:
+        return False
+
 # Shells smaller than this (in faces) are treated as debris by split_shells()
 # and dropped rather than repaired as parts.
 #
@@ -462,6 +562,46 @@ def _blender_budget(elapsed=0.0):
     return left if left >= _BLENDER_MIN_RUN else 0.0
 
 
+def _arm_mesh_alarm(seconds, why=''):
+    """Cap this process's own wall time with SIGALRM.  No-op outside the child.
+
+    The parent spawns every whole file with TIMEOUT (the 3600s ceiling) because
+    at spawn time nobody knows whether the mesh will split, or into how many
+    parts.  Nothing narrowed that back down afterwards, so a mesh that stayed
+    whole kept the ceiling instead of TIMEOUT_PART: a 1.3M-tri single shell sat
+    in PyMeshFix for the full hour before the parent's communicate() killed it,
+    when its real budget was 600s.
+
+    A deadline check cannot fix that.  The pipeline spends its time inside
+    library calls that do not return to Python until they are done, so by the
+    time any `if monotonic() >= deadline` is reached the overrun has already
+    happened.  SIGALRM interrupts the blocking call itself, which is the whole
+    reason for using it here.
+
+    Raising TimeoutExpired (not exiting) lets the existing handler write the
+    .timeout.stl marker and report a normal timeout, so the outcome is the same
+    shape the pipeline already knows how to report."""
+    if _ONE_FILE is None or not hasattr(signal, 'SIGALRM'):
+        return
+    seconds = int(max(1, seconds))
+
+    def _fire(_sig, _frame):
+        global _blender_proc
+        if _blender_proc is not None:
+            try:
+                _blender_proc.kill()
+            except Exception:
+                pass
+        raise subprocess.TimeoutExpired(cmd='mesh', timeout=seconds)
+
+    try:
+        signal.signal(signal.SIGALRM, _fire)
+        signal.alarm(seconds)
+    except (ValueError, OSError):
+        # Not the main thread, or no SIGALRM: the parent watchdog still applies.
+        pass
+
+
 def _part_cap(n_parts):
     """Seconds allowed for a file that split into `n_parts` shells.
 
@@ -623,9 +763,18 @@ def split_shells(src, dst_dir, L=None):
         base_no_ext = os.path.splitext(os.path.basename(src))[0]
         results = []
         for idx, (_, mesh_idx) in enumerate(meshes):
-            ms.set_current_mesh(mesh_idx)
             out_path = os.path.join(dst_dir, f"{base_no_ext}.part.{idx}.stl")
-            ms.save_current_mesh(out_path, binary=True)
+            # A bare name from an earlier run means that part was repaired and
+            # committed.  The dir is keyed by MAX_FACES, so it belongs to this
+            # same split -- reuse it instead of redoing the work.
+            if os.path.exists(out_path):
+                if L is not None:
+                    L(f"part {idx}: already repaired — reusing")
+                results.append(out_path)
+                continue
+            ms.set_current_mesh(mesh_idx)
+            # Written pending; the repair renames it on success.
+            ms.save_current_mesh(_pending_part_path(out_path), binary=True)
             results.append(out_path)
         return results
     except Exception as _e:
@@ -832,7 +981,12 @@ _VOLUME_LOSS_LIMIT = 0.95
 # parts reading "volume 0 -> 0 (3%)" and similar, none of which had any
 # geometry to lose.  Only two of the fourteen were real, and both were well
 # over this.
-_VOLUME_MIN_MEANINGFUL = 1.0
+# Below this volume (mm^3) the before/after ratio is noise, not damage.  At 1.0
+# the check fired on fragments of 9 mm^3 losing 1 mm^3 ("volume 9 -> 8 (86%)"),
+# which is rounding between two welds rather than deleted geometry.  50 silences
+# those and still catches every real casualty seen: Stool_Base (16,970),
+# Class.stl (183), imp_stand (6,778 and 1,464).
+_VOLUME_MIN_MEANINGFUL = 50.0
 
 
 def _mesh_volume(path):
@@ -890,7 +1044,8 @@ def _repair_by_seam_split(src_mesh, dst, dst_base, temps, stats, L, rel,
         temps.append(bl_tmp)
         _ensure_parent(bl_tmp)
         ok, _open_only, _unrep, _out, _err = fix_stl(src_mesh, bl_tmp, MERGE_DIST,
-                                                     elapsed=elapsed)
+                                                     elapsed=elapsed,
+                                                     L=L, route='seam-split')
         if not ok or not os.path.exists(bl_tmp):
             L("seam split: Blender did not produce a mesh")
             return None
@@ -909,21 +1064,21 @@ def _repair_by_seam_split(src_mesh, dst, dst_base, temps, stats, L, rel,
             return None
         src_mesh = bl_tmp
 
-    seam_dir = os.path.join(os.path.dirname(os.path.abspath(dst)),
-                            PARTS_DIRNAME)
+    seam_dir = _parts_dir_for(dst)
     _ensure_parent(os.path.join(seam_dir, 'x'))
     base = os.path.splitext(os.path.basename(dst))[0]
     parts = []
     for i, (pv, pf) in enumerate(pieces):
         p = os.path.join(seam_dir, f"{base}{_SEAM_MARKER}{i}.stl")
-        _write_binary_stl(p, pv, pf)
+        _write_binary_stl(_pending_part_path(p), pv, pf)
+        temps.append(_pending_part_path(p))
         temps.append(p)
         parts.append(p)
     L("split: " + ", ".join(f"{len(pf):,} faces" for _, pf in pieces))
 
     n_ok = 0
     for p in parts:
-        r = process_file(p, is_part=True)
+        r = _repair_part(p, L=L, label='region')
         L(f"  region {os.path.basename(p)}: {r['status']}")
         if r['status'] in ('ok', 'skip'):
             n_ok += 1
@@ -1727,7 +1882,7 @@ def run_pymeshfix(src, dst, edge_counts=None):
     return nm, open_e
 
 
-def _run_blender_script(script, elapsed=0.0):
+def _run_blender_script(script, elapsed=0.0, L=None, route='blender'):
     """Run `script` in headless Blender.  Returns (rc, stdout, stderr, timed_out).
 
     `elapsed` is how long this mesh has already taken.  Blender is given the
@@ -1746,12 +1901,21 @@ def _run_blender_script(script, elapsed=0.0):
     On timeout the child is killed and reaped before returning; rc is None and
     timed_out is True.  Callers map the result onto their own return shape."""
     global _blender_proc
+    import time as _time
     _bud = _blender_budget(elapsed)
+    _t_start = _time.monotonic()
     if not _bud:
         # Not enough of the mesh's budget left to be worth starting.  Reported
         # as a timeout so callers take their existing timeout path; nothing was
         # run, so nothing has to be killed or cleaned up.
+        if L:
+            L(f"blender: skipped ({route}) — {elapsed:.0f}s of "
+              f"{TIMEOUT_PART or TIMEOUT}s spent, under "
+              f"{_BLENDER_MIN_RUN:.0f}s left after the "
+              f"{BLENDER_RESERVE_PCT}% reserve")
         return None, '', f'skipped: under {_BLENDER_MIN_RUN:.0f}s left', True
+    if L:
+        L(f"blender: start ({route})  budget {_bud:.0f}s")
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
         tmp.write(script)
         script_path = tmp.name
@@ -1767,9 +1931,16 @@ def _run_blender_script(script, elapsed=0.0):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
+            if L:
+                L(f"blender: KILLED ({route}) after "
+                  f"{_time.monotonic() - _t_start:.1f}s — exceeded its "
+                  f"{_bud:.0f}s budget")
             return None, '', '', True
         finally:
             _blender_proc = None
+        if L:
+            L(f"blender: done  ({route})  "
+              f"{_time.monotonic() - _t_start:.1f}s  rc={proc.returncode}")
         return proc.returncode, stdout, stderr, False
     finally:
         try:
@@ -1778,12 +1949,14 @@ def _run_blender_script(script, elapsed=0.0):
             pass
 
 
-def fix_stl(src, dst, merge_dist, is_ascii=False, is_obj=False, elapsed=0.0):
+def fix_stl(src, dst, merge_dist, is_ascii=False, is_obj=False, elapsed=0.0,
+            L=None, route='blender'):
     script = BLENDER_SCRIPT.format(src=src, dst=dst, merge_dist=merge_dist,
                                    is_ascii=repr(bool(is_ascii)),
                                    is_obj=repr(bool(is_obj)))
     _bud = _blender_budget(elapsed)
-    rc, stdout, stderr, timed_out = _run_blender_script(script, elapsed=elapsed)
+    rc, stdout, stderr, timed_out = _run_blender_script(script, elapsed=elapsed,
+                                                        L=L, route=route)
     if timed_out:
         return False, False, False, f'TIMEOUT after {_bud:.0f}s', ''
     success    = rc == 0 and 'BLENDER_OK' in stdout
@@ -1791,12 +1964,13 @@ def fix_stl(src, dst, merge_dist, is_ascii=False, is_obj=False, elapsed=0.0):
     unrepaired = 'BLENDER_UNREPAIRED' in stdout
     return success, open_only, unrepaired, stdout, stderr
 
-def blender_decimate(src, dst, max_faces, elapsed=0.0):
+def blender_decimate(src, dst, max_faces, elapsed=0.0, L=None, route='decimate'):
     """Run stl_batch_fix.decimate.blender on src, writing a decimated binary STL to dst.
     Returns (ok, n_faces_out, stdout, stderr).  n_faces_out is -1 on failure."""
     script = BLENDER_DECIMATE_SCRIPT.format(src=src, dst=dst, max_faces=max_faces)
     _bud = _blender_budget(elapsed)
-    rc, stdout, stderr, timed_out = _run_blender_script(script, elapsed=elapsed)
+    rc, stdout, stderr, timed_out = _run_blender_script(script, elapsed=elapsed,
+                                                        L=L, route=route)
     if timed_out:
         return False, -1, f'TIMEOUT after {_bud:.0f}s', ''
     ok = rc == 0 and 'BLENDER_DECIMATE_OK' in stdout
@@ -1871,8 +2045,11 @@ def _cleanup_parts(parts_dir, parts):
     removed = 0
     for part_path in parts:
         stem = os.path.splitext(part_path)[0]
-        for candidate in (part_path,
-                          *(stem + sfx for sfx in _SIGNAL_SUFFIXES)):
+        pending = _pending_part_path(part_path)
+        p_stem  = os.path.splitext(pending)[0]
+        for candidate in (part_path, pending,
+                          *(stem + sfx for sfx in _SIGNAL_SUFFIXES),
+                          *(p_stem + sfx for sfx in _SIGNAL_SUFFIXES)):
             try:
                 if os.path.exists(candidate):
                     os.unlink(candidate)
@@ -1881,6 +2058,9 @@ def _cleanup_parts(parts_dir, parts):
                 pass
     try:
         os.rmdir(parts_dir)   # only succeeds when nothing else is left in it
+        # The per-mesh dir lives under ~parts/; drop that too once the last
+        # mesh in this output folder is done with it.
+        os.rmdir(os.path.dirname(os.path.abspath(parts_dir)))
     except OSError:
         pass
     return removed
@@ -2059,17 +2239,23 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         prefix = f"[{step}] " if step else ""
         log_step(rel, f"+{elapsed:5.1f}s  dt={delta:5.1f}s  {prefix}{msg}")
 
-    if os.path.exists(broken_copy):
-        return {'rel': rel, 'status': 'skip', 'reason': 'previously broken — bad mesh data'}
-    if os.path.exists(failed_copy):
-        return {'rel': rel, 'status': 'skip',
-                'reason': f"previously failed — delete {os.path.basename(failed_copy)} from output folder to retry"}
-    if os.path.exists(unrepaired_copy):
-        return {'rel': rel, 'status': 'skip',
-                'reason': f"previously unrepaired — delete {os.path.basename(unrepaired_copy)} from output folder to retry"}
-    if os.path.exists(open_copy):
-        return {'rel': rel, 'status': 'skip',
-                'reason': f"previously open-edges — delete {os.path.basename(open_copy)} from output folder to retry"}
+    # Signal files mean "don't retry this input" -- but only for a real input.
+    # A part lives in ~parts/, which is scratch rebuilt on every split, and its
+    # state is carried by the ~ prefix instead.  Honouring them here made a part
+    # with a stale .failed.stl report 'skip', which every merge site counts as
+    # success: the merge then stitched in unrepaired geometry and called it done.
+    if not is_part:
+        if os.path.exists(broken_copy):
+            return {'rel': rel, 'status': 'skip', 'reason': 'previously broken — bad mesh data'}
+        if os.path.exists(failed_copy):
+            return {'rel': rel, 'status': 'skip',
+                    'reason': f"previously failed — delete {os.path.basename(failed_copy)} from output folder to retry"}
+        if os.path.exists(unrepaired_copy):
+            return {'rel': rel, 'status': 'skip',
+                    'reason': f"previously unrepaired — delete {os.path.basename(unrepaired_copy)} from output folder to retry"}
+        if os.path.exists(open_copy):
+            return {'rel': rel, 'status': 'skip',
+                    'reason': f"previously open-edges — delete {os.path.basename(open_copy)} from output folder to retry"}
     if not is_part and os.path.exists(dst):
         return {'rel': rel, 'status': 'skip',
                 'reason': f"already fixed: {os.path.relpath(dst, fixed_root)}"}
@@ -2205,10 +2391,11 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
             if os.path.exists(dst) or os.path.exists(dst_base + '.failed.stl'):
                 pass  # already handled — fall through to normal repair
             else:
-                dst_dir = os.path.join(
-                    os.path.dirname(os.path.abspath(dst)),
-                    PARTS_DIRNAME
-                )
+                dst_dir = _parts_dir_for(dst)
+                _stale = _clear_stale_parts_dirs(dst, dst_dir)
+                if _stale:
+                    L(f"parts: removed {_stale} stale dir(s) from a different "
+                      f"MAX_FACES")
                 L("step B: split multi-shell")
                 parts = split_shells(src, dst_dir, L=L)
                 if parts:
@@ -2228,6 +2415,10 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                     # file anyway and the worker's own kill is the backstop.
                     _cap = _part_cap(len(parts))
                     _deadline = _time.monotonic() + _cap
+                    # n is known now, so lift this process's own cap from the
+                    # whole-mesh TIMEOUT_PART it was armed with to what a split
+                    # of this size is actually allowed.
+                    _arm_mesh_alarm(_cap, 'split')
                     L(f"budget: {_cap:.0f}s for {len(parts)} part(s) "
                       f"({TIMEOUT_PART}s each, ceiling {TIMEOUT}s)")
                     part_results = []
@@ -2237,7 +2428,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                               f"/{len(parts)} part(s) — stopping")
                             break
                         L(f"  part: {os.path.basename(part_path)}")
-                        part_result = process_file(part_path, is_part=True)
+                        part_result = _repair_part(part_path, L=L)
                         part_results.append(part_result)
                         L(f"  part {os.path.basename(part_path)}: {part_result['status']}")
                     if len(part_results) < len(parts):
@@ -2330,7 +2521,8 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                 L(f"step C: decimate {working_tris:,} tris → target {MAX_FACES:,} (blender fallback)")
                 _bd_ok, _bd_faces, _bd_stdout, _bd_stderr = blender_decimate(
                     working, _dec_tmp, MAX_FACES,
-                    elapsed=_time.monotonic() - _t0)
+                    elapsed=_time.monotonic() - _t0,
+                    L=L, route='decimate')
                 if _bd_ok and os.path.exists(_dec_tmp):
                     working = _dec_tmp
                     # Blender's reported face count is advisory only — the scan
@@ -2390,8 +2582,11 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                 if os.path.exists(dst) or os.path.exists(dst_base + '.failed.stl'):
                     pass
                 else:
-                    dst_dir = os.path.join(
-                        os.path.dirname(os.path.abspath(dst)), PARTS_DIRNAME)
+                    dst_dir = _parts_dir_for(dst)
+                    _stale = _clear_stale_parts_dirs(dst, dst_dir)
+                    if _stale:
+                        L(f"parts: removed {_stale} stale dir(s) from a "
+                          f"different MAX_FACES")
                     L(f"step B2: split multi-shell (post-decimation, "
                       f"{working_tris:,} tris)")
                     parts = split_shells(working, dst_dir, L=L)
@@ -2400,6 +2595,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                           f"{', '.join(os.path.basename(p) for p in parts)}")
                         _cap = _part_cap(len(parts))
                         _deadline = _time.monotonic() + _cap
+                        _arm_mesh_alarm(_cap, 'split')
                         L(f"budget: {_cap:.0f}s for {len(parts)} part(s) "
                           f"({TIMEOUT_PART}s each, ceiling {TIMEOUT}s)")
                         part_results = []
@@ -2410,7 +2606,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                                   f"— stopping")
                                 break
                             L(f"  part: {os.path.basename(part_path)}")
-                            part_result = process_file(part_path, is_part=True)
+                            part_result = _repair_part(part_path, L=L)
                             part_results.append(part_result)
                             L(f"  part {os.path.basename(part_path)}: "
                               f"{part_result['status']}")
@@ -2505,21 +2701,23 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                     _pieces = split_at_seams(_sv, _sf, _seam)
                     del _sv, _sf
                     if len(_pieces) > 1:
-                        _seam_dir = os.path.join(
-                            os.path.dirname(os.path.abspath(dst)), PARTS_DIRNAME)
+                        _seam_dir = _parts_dir_for(dst)
                         _ensure_parent(os.path.join(_seam_dir, 'x'))
                         _base = os.path.splitext(os.path.basename(dst))[0]
                         _seam_parts = []
                         for _i, (_pv, _pf) in enumerate(_pieces):
                             _p = os.path.join(_seam_dir,
                                               f"{_base}{_SEAM_MARKER}{_i}.stl")
-                            _write_binary_stl(_p, _pv, _pf)
+                            # Same pending/commit protocol as shell parts.
+                            _write_binary_stl(_pending_part_path(_p), _pv, _pf)
+                            temps.append(_pending_part_path(_p))
                             temps.append(_p)
                             _seam_parts.append(_p)
                         L(f"split: {len(_seam_parts)} region(s) — "
                           + ", ".join(f"{len(pf):,} faces" for _, pf in _pieces))
                         _seam_cap = _part_cap(len(_seam_parts))
                         _seam_deadline = _time.monotonic() + _seam_cap
+                        _arm_mesh_alarm(_seam_cap, 'seam-split')
                         L(f"budget: {_seam_cap:.0f}s for "
                           f"{len(_seam_parts)} region(s)")
                         _n_ok = 0
@@ -2530,7 +2728,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                                   f"/{len(_seam_parts)} region(s) — stopping")
                                 break
                             _n_run += 1
-                            _r = process_file(_p, is_part=True)
+                            _r = _repair_part(_p, L=L, label='region')
                             L(f"  region {os.path.basename(_p)}: {_r['status']}")
                             if _r['status'] in ('ok', 'skip'):
                                 _n_ok += 1
@@ -2671,16 +2869,18 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
     # cannot even be counted afterwards.  The dt= on the following line is then
     # Blender's own wall time, isolated from the post-verify and file writes.
     _bl_t0 = _time.monotonic()
-    L("blender: start")
+    # start/done/skipped/KILLED are logged inside _run_blender_script, which
+    # every route funnels through, so they are not repeated here -- doing both
+    # double-counted each invocation in the log.
     # Captured before the call: blender_src is unlinked a few lines below.
     _bl_bounds_before = stl_bounds(blender_src)
     success, open_only, unrepaired, stdout, stderr = fix_stl(
         blender_src, dst, MERGE_DIST,
         is_ascii=is_ascii, is_obj=is_obj,
         elapsed=_time.monotonic() - _t0,
+        L=L, route=('obj' if is_obj else 'ascii' if is_ascii else 'fallback'),
     )
     _bl_secs = _time.monotonic() - _bl_t0
-    L(f"blender: done in {_bl_secs:.1f}s")
     stats['blender_secs'] = f"{_bl_secs:.1f}"
     stats['path'].append('blender')
     # Observe only, as in step E.  Blender merges doubles and can decimate, so
@@ -3122,6 +3322,23 @@ def process_file_safe(src, is_part=False):
             pass
     try:
         result = process_file(src, is_part=is_part)
+    except subprocess.TimeoutExpired as _texc:
+        # The mesh's own SIGALRM cap fired (see _arm_mesh_alarm).  This is a
+        # timeout, not a crash, and must be marked as one: .failed.stl and
+        # .timeout.stl mean different things to the next run, and a timeout
+        # recorded as a failure would be retried from scratch every time.
+        # Caught ahead of the generic handler below, which would otherwise
+        # swallow it — TimeoutExpired is an Exception subclass.
+        _secs = getattr(_texc, 'timeout', 0) or 0
+        log_step(rel, f"TIMEOUT after {_secs:.0f}s (own cap) — "
+                      f"stopped this mesh")
+        if not is_part:
+            _marker = mark_timeout(src, INPUT_FOLDER, OUTPUT_SUFFIX)
+            if _marker:
+                log_step(rel, f"wrote {os.path.basename(_marker)} — "
+                              f"delete it to retry this file")
+        result = {'rel': rel, 'status': 'interrupted', 'is_mesh_bad': False,
+                  'stdout': f'TIMEOUT after {_secs:.0f}s', 'stderr': ''}
     except Exception as _exc:
         msg = f"UNHANDLED EXCEPTION: {type(_exc).__name__}: {_exc}"
         log_step(rel, msg)
@@ -3188,6 +3405,14 @@ if __name__ == '__main__' and _ONE_FILE:
 
     signal.signal(signal.SIGINT, _one_file_signal)
     signal.signal(signal.SIGTERM, _one_file_signal)
+
+    # A mesh that stays whole is one mesh and gets TIMEOUT_PART, the same limit
+    # a single part gets.  The parent had to spawn us with the TIMEOUT ceiling
+    # because it could not know yet whether this file splits; this is where that
+    # is narrowed back down.  A file that does split raises the cap to
+    # _part_cap(n) once n is known, so only genuinely split files reach beyond
+    # TIMEOUT_PART.
+    _arm_mesh_alarm(TIMEOUT_PART or TIMEOUT, 'whole mesh')
 
     _r = process_file_safe(_ONE_FILE, is_part=_ONE_IS_PART)
     if _RESULT_FD is not None:

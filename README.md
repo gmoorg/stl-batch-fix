@@ -76,15 +76,30 @@ Split parts go directly to the output folder — the source file is never modifi
 
 ```text
 Fixing/
-  Arms.stl            ← never touched
+  Arms.stl                      ← never touched
 
 Fixed/
   ~parts/
-    Arms.part.0.stl   ← repaired shell 0
-    Arms.part.1.stl   ← repaired shell 1
-  Arms.stl            ← merged result (if all parts succeeded)
-  Arms.failed.stl     ← copy of source (if any part failed)
+    Arms.900000/                ← one dir per mesh, per MAX_FACES
+      ~Arms.part.0.stl          ← split, not yet repaired
+      Arms.part.1.stl           ← repaired (renamed on success)
+  Arms.stl                      ← merged result (if all parts succeeded)
+  Arms.failed.stl               ← copy of source (if any part failed)
 ```
+
+A part's **filename is its state**: `split_shells` writes every shell as
+`~<name>`, and a successful repair renames it to `<name>`. So a bare name means
+finished and a `~` name means in progress or abandoned — a rerun repairs only
+what is still pending, and a part can never be mistaken for repaired because a
+signal file happened to survive next to it.
+
+The directory is keyed by `MAX_FACES` because part indices are assigned by
+face-count rank **after** decimation: the same index is a different shell at a
+different decimation target. Dirs for this mesh at other settings are deleted
+before a split, so a stale part is unreachable rather than merely detectable.
+(`MAX_FACES` is not the only input to that ranking — `_MIN_SHELL_FACES` and
+which decimator ran also shift face counts — which is why the `~` protocol,
+not the directory name, is what guarantees correctness.)
 
 ---
 

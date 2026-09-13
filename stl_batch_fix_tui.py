@@ -11,6 +11,7 @@ Run via:  bash run.sh  (or directly: python stl_batch_fix_tui.py)
 import concurrent.futures
 import multiprocessing
 import os
+import shutil
 import signal
 import sys
 import time
@@ -357,6 +358,113 @@ def run_delete_signals_screen(cfg):
         return
 
 
+def _find_part_dirs(out_root):
+    """Return [(dir, [files], bytes, n_pending)] for every per-mesh parts dir.
+
+    Parts live in <out_root>/~parts/<mesh>.<MAX_FACES>/.  A file still carrying
+    the ~ prefix was split but never repaired; a bare one was committed."""
+    parts_root = os.path.join(out_root, _fix.PARTS_DIRNAME)
+    out = []
+    if not os.path.isdir(parts_root):
+        return out
+    for name in sorted(os.listdir(parts_root)):
+        d = os.path.join(parts_root, name)
+        if not os.path.isdir(d):
+            continue
+        files = []
+        for root, _dirs, names in os.walk(d):
+            files.extend(os.path.join(root, f) for f in names)
+        size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
+        pending = sum(1 for f in files
+                      if os.path.basename(f).startswith(_fix._PART_PENDING))
+        out.append((d, files, size, pending))
+    return out
+
+
+def run_delete_parts_screen(cfg):
+    """Delete leftover split-part folders.
+
+    Parts are scratch: a finished file has already been merged and its parts
+    removed, so anything left here is from a run that was interrupted or whose
+    merge never happened.  Deleting costs only the time to split again."""
+    out_root = os.path.join(
+        os.path.dirname(os.path.abspath(cfg.get('INPUT_FOLDER', '.'))), 'Fixed')
+    console.print()
+    console.rule('[bold yellow]Delete split-part files[/bold yellow]')
+    console.print(f"[dim]Output folder: {out_root}[/dim]")
+    console.print()
+    if not os.path.isdir(out_root):
+        console.print("[red]Output folder does not exist.[/red]")
+        console.print()
+        return
+
+    dirs = _find_part_dirs(out_root)
+    dirs = [d for d in dirs if d[1]]
+    if not dirs:
+        console.print("[green]No split parts left over — nothing to delete.[/green]")
+        console.print()
+        return
+
+    t = Table(box=box.SIMPLE, show_header=True, header_style='bold')
+    t.add_column('#', style='dim', width=3)
+    t.add_column('Mesh / MAX_FACES', style='cyan')
+    t.add_column('Files', style='yellow', justify='right', width=6)
+    t.add_column('Size', style='yellow', justify='right', width=10)
+    t.add_column('State', style='dim')
+    for i, (d, files, size, pending) in enumerate(dirs, 1):
+        state = (f'{pending} unrepaired' if pending else 'all repaired')
+        t.add_row(str(i), os.path.basename(d), str(len(files)),
+                  _human_bytes(size), state)
+    console.print(t)
+    _all = sum(len(f) for _, f, _, _ in dirs)
+    _allsize = sum(s for _, _, s, _ in dirs)
+    console.print(f"Enter a number to delete that folder, [yellow]a[/yellow] for all "
+                  f"({_all} files, {_human_bytes(_allsize)}), "
+                  f"[green]b[/green] to go back.")
+    console.print()
+
+    while True:
+        choice = Prompt.ask('Delete', default='b').strip().lower()
+        if choice in ('b', ''):
+            console.print()
+            return
+        if choice == 'a':
+            targets = [d for d, _, _, _ in dirs]
+            what = 'ALL split-part folders'
+        elif choice.isdigit() and 1 <= int(choice) <= len(dirs):
+            targets = [dirs[int(choice) - 1][0]]
+            what = os.path.basename(targets[0])
+        else:
+            console.print('[red]Not a valid choice.[/red]')
+            continue
+
+        size = sum(s for d, _, s, _ in dirs if d in targets)
+        console.print(f"[yellow]About to delete {len(targets)} folder(s), "
+                      f"{_human_bytes(size)} — {what}.[/yellow]")
+        console.print("[dim]Split parts are scratch, rebuilt on the next run. "
+                      "Neither your sources nor any merged output is touched.[/dim]")
+        if not Confirm.ask('Delete them?', default=False):
+            console.print('[dim]Nothing deleted.[/dim]')
+            console.print()
+            return
+        n = failed = 0
+        for d in targets:
+            try:
+                shutil.rmtree(d)
+                n += 1
+            except OSError:
+                failed += 1
+        # Drop the ~parts root too once the last folder is gone.
+        try:
+            os.rmdir(os.path.join(out_root, _fix.PARTS_DIRNAME))
+        except OSError:
+            pass
+        console.print(f"[green]Deleted {n} folder(s).[/green]"
+                      + (f" [red]{failed} could not be removed.[/red]" if failed else ""))
+        console.print()
+        return
+
+
 def run_config_screen(cfg):
     """Show current config, let user edit fields, return updated cfg dict."""
     console.rule('[bold cyan]STL Batch Fix — Configuration[/bold cyan]')
@@ -373,7 +481,8 @@ def run_config_screen(cfg):
     console.print(t)
 
     console.print("Enter a field number to edit, [green]s[/green] to start, "
-                  "[yellow]d[/yellow] to delete signal files, [red]q[/red] to quit.")
+                  "[yellow]d[/yellow] to delete signal files, "
+                  "[yellow]p[/yellow] to delete split parts, [red]q[/red] to quit.")
     console.print()
 
     while True:
@@ -385,6 +494,9 @@ def run_config_screen(cfg):
             break
         if choice == 'd':
             run_delete_signals_screen(cfg)
+            continue
+        if choice == 'p':
+            run_delete_parts_screen(cfg)
             continue
         if choice.isdigit():
             idx = int(choice) - 1
