@@ -270,11 +270,22 @@ Preparation moves it earlier and keeps the result.
 
 ### Ordering
 
-Once every file is binary STL with a real count, the queue can be sorted. Face
-count is free (header). **nm count would predict cost far better** — PyMeshFix
-runtime tracks defects much more closely than size (33,353 defects → 3,080 s;
-2,055 → 289 s) — but needs a `scan_mesh_errors` pass per file. Whether that pass
-pays for itself is measurable from the existing logs and has not been measured.
+Once every file is binary STL with a real count, the queue is sorted by **face
+count**, which is free from the header.
+
+**Decided, and the reason settles it:** the sort exists to feed memory
+admission, memory peak is driven by decimation, and decimation cost scales with
+face count. nm count predicts *runtime* — far better than size does (33,353
+defects → 3,080 s against 2,055 → 289 s) — but runtime is not what the ordering
+is for, and getting nm would cost a `scan_mesh_errors` pass over every file.
+
+Supporting measurement: across every log, **189 decimations, all handled by
+`fast_simplification`, zero fallbacks and zero failures** — including the
+14.1 M-triangle file. So decimation cost is not merely predictable from face
+count, it is predictable from face count *through one implementation*, with no
+branch to a differently-scaling decimator. (The pymeshlab and blender rungs of
+the ladder have therefore never executed. They are not proven dead — rung one
+simply never failed — but nothing is known about how they scale.)
 
 ### Worker shedding
 
