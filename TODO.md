@@ -11,154 +11,15 @@ not yet clear.
 > and still documented `TIMEOUT` at 1200 s, a debris rule that had been
 > replaced, and a pipeline order that no longer matched. Stale rationale is
 > worse than none, because it gets trusted.
+>
+> The same applies to this file. It went five commits stale on 2026-09-13 with
+> four of its seven items already shipped.
 
 ---
 
-## 1. Two runners with different timeout behaviour — partly fixed 2026-09-13
+## 1. Refactor into single-purpose modules — Code Design Guidelines
 
-**The 2026-09-12 version of this entry was wrong.** It claimed
-`process_file_subprocess` is "called from nowhere". It is called — the TUI does
-it, passing the function as a value:
-
-```python
-fut = _pool.submit(_fix.process_file_subprocess, src)   # stl_batch_fix_tui.py:915
-```
-
-An AST walker looking for call nodes and bare `Name` nodes missed it (the
-reference is an `ast.Attribute`), and plain grep found it. The same failure
-shape as the note at the bottom of this file.
-
-There are **two runners**:
-
-| path | submits | child per file | watchdog | SIGALRM |
-|---|---|---|---|---|
-| TUI (normal use) | `process_file_subprocess` | `--one-file` | yes | arms |
-| bare script | `process_file_safe` | none | no | no-ops |
-
-So `Default_SubTool7.stl` ran 3,106 s uncapped because the **bare script** was
-used to launch that run, not because the machinery is dead. Under the TUI it
-would have been capped.
-
-### Fixed in this session
-
-- **Arming widened the cap it was meant to enforce.** `_arm_mesh_alarm`
-  overwrote any pending alarm, so a split replaced the file budget with
-  `_part_cap(n)` — a larger number. Measured on Millenium_Falcon at
-  `TIMEOUT_PART=20`: `t=0.0s ARM 20s (whole mesh)` → `t=3.5s ARM 100s (split)`.
-  A file-level budget could never fire on any file that split, and more shells
-  meant more allowance. Now tightens only.
-- **Nothing cancelled the alarm.** No `signal.alarm(0)` existed anywhere.
-  Harmless under the TUI (each file has its own process) but the bare-script
-  pool reuses a worker across files with `max_tasks_per_child` deliberately
-  unset, so an alarm armed for file N fired during file N+1 and would mark an
-  innocent file `.timeout.stl`. Demonstrated, then closed with
-  `_cancel_mesh_alarm()` on the single exit path of `process_file_safe`.
-
-### Still open
-
-- **The bare-script path still has no cap at all** — it arms nothing, because
-  `_ONE_FILE` is None there. Deliberately left alone: arming it would have
-  killed SubTool7 at 600 s, and that file repairs correctly at 3,106 s.
-- **So: what is the timeout FOR?** 600 s has no measurement behind it.
-  PyMeshFix runtime tracks defect count more than face count (33,353 nm →
-  3,080 s; 2,055 nm → 289 s), so a flat per-mesh number is the wrong shape. A
-  timeout should stop a *hang*, and nothing observed so far was actually hung.
-
-**What would settle it:** cost-per-defect figures from several large meshes,
-then choose between a scaled budget, a much larger flat cap, or dropping the
-concept and relying on the user noticing a stuck run.
-
----
-
-## 2. PyMeshFix is invisible while it runs
-
-The most expensive step logs one line on entry and one on exit. Measured gaps
-on the 2026-09-12 run:
-
-```text
-3,079.8 s   Default_SubTool7.stl        step E -> pymeshfix: nm=0 open=0   (succeeded)
-  420.5 s   whole-costume01.stl         part: ...part.0.stl -> next line
-  289.3 s   ~whole-costume01...part.0   step E -> pymeshfix result
-```
-
-During a 51-minute silence a reader cannot tell working from hung — the exact
-judgement the timeout question above depends on. At minimum: a start line
-carrying mesh size and defect count so the wait is predictable. Better: a
-progress or heartbeat line.
-
----
-
-## 3. Skip reasons are computed and then discarded
-
-757 skip rows in the summary, **one** `skip` line in the whole step log, and
-the summary row carries no reason:
-
-```text
-NoirSpider_BUST_Stand.stl|skip|0.0||||||none||
-```
-
-`_process_file_impl` computes a precise reason (`already fixed: …`,
-`previously failed — delete X to retry`, and three more) and returns it in the
-result dict, but `log_summary` has no column for it. Add `reason` to
-`_SUMMARY_COLUMNS` — appended last, the same trick that kept `blender_runs`
-backward-compatible with older summary files.
-
----
-
-## 4. `_MIN_SHELL_FACES` admits and drops inconsistently
-
-`_MIN_SHELL_FACES = 100`, yet the 2026-09-12 Falcon split kept parts of **38**
-and **36** faces as real parts while the floor should have dropped them as
-debris. `part.2` at 160 is correctly admitted. Unexplained — the floor is
-applied inside `split_shells`, and the reason these survived has not been
-traced. Worth knowing before trusting the split to decide what is a part and
-what is debris.
-
----
-
-## 5. Millenium_Falcon — REOPENED and fixed, was wrongly closed
-
-The previous entry here said "Closed — the user prefers to repair such files by
-hand", and its part table was wrong. Corrected measurements (2026-09-12, after
-the split):
-
-```text
-part.0   90,712 tris   nm=0  open=0   117.45 x 35.60 x 155.00 mm   <- whole model
-part.1      156 tris   nm=0  open=0     5.67 x  5.76 x   3.15 mm
-part.2      160 tris   nm=60           7.25 x  1.01 x   6.46 mm   <- fails
-part.3       38 tris   nm=0  open=0     0.72 x  0.52 x   3.08 mm
-part.4       36 tris   nm=0  open=0     9.28 x  0.98 x   4.20 mm
-```
-
-`part.0` carries the entire model bbox and repairs cleanly. The old "nm=147,448,
-unsalvageable" framing described the *undecimated source*, before the split —
-after splitting, 99.2% of the geometry is fine and one 160-triangle fin was
-failing the file.
-
-`part.2` is **not** debris: zero degenerate triangles, no sub-micron edges,
-median edge 0.84 mm, 108 mm² of surface. A real fin, genuinely unrepairable.
-
-Fixed in `d1e6ccd`: a partial split now merges what repaired into
-`<name>.open.stl` (status `open`), drops the failed part, and still copies the
-source to `.failed.stl`. Verified: 90,942 tris, nm=0, open=0, bbox matching the
-source to 0.01 mm.
-
-**Still open:** the two real Falcons in the collection have not been
-regenerated — that means deleting their `.failed.stl` fallbacks, which is the
-user's call.
-
----
-
-## 6. Scale-aware bbox flag
-
-Unbuilt. The bbox-drift flag is absolute, so sub-layer movement on small models
-is reported alongside real damage. Reusing `MIN_LAYER` would have cut the
-2026-09-12 run's 5 flags to 3, dropping two `imp_stand` entries at 0.236 mm and
-0.181 mm.
-
----
-
-## 7. Refactor into single-purpose modules — Code Design Guidelines
+The one substantial item left.
 
 ### The destination
 
@@ -180,7 +41,7 @@ that learning how a file is read means opening `readFileAsStl`, and finding
 Grouping the 75 existing functions by what they touch:
 
 ```text
-runner       16 fns  1455 lines   ← the hard part
+runner       16 fns  1455 lines   <- the hard part
 split/merge  13 fns   447 lines
 (other)      18 fns   428 lines
 mesh_io      11 fns   331 lines
@@ -269,17 +130,6 @@ predicate is meaningful (`isRequiredKill(worker)` is nonsense). It is a state
 machine over processes; forcing handler shapes onto it would be worse than
 explicit imperative code with good names.
 
-### Still open in this design
-
-- **Where the shared budget arithmetic lives.** Decimation, repair and Blender
-  draw from one mesh budget, and Blender's share depends on what earlier steps
-  spent (`budget − elapsed − reserve`). That is cross-cutting: if each module
-  owns its own timeout policy the arithmetic has no home, or gets duplicated.
-- **Where the seam-recovery trigger sits.** It fires when PyMeshFix *succeeded
-  but deleted geometry* — a fact about the transition, not about the mesh before
-  or after. It is the decision this shape handles least naturally, and it is not
-  a corner case: it is the Mandy fix.
-
 ### Guidelines (from the user — guidelines, not hard rules; use judgment)
 
 **1. Self-sufficient functions**
@@ -303,24 +153,6 @@ explicit imperative code with good names.
 **Guiding principle:** keep related things together, separate distinct
 responsibilities, and make the code's intent clear through structure and naming.
 
-### How these apply here
-
-Depth-8 nesting means control-flow blocks holding substantial logic — squarely
-guideline 1. The step boundaries are already marked by comments
-(`# Step C — decimate…`), which is the code saying where the functions want to
-be. Suggested order, each its own commit with the tests run between:
-
-1. step B / B2 split-and-repair
-2. step C decimation
-3. step E0 seam recovery
-4. step F Blender fallback
-
-Guideline 2 pays off unevenly. `mesh_io` (read / weld / write / bounds) and
-`blender` (script running, budget, route labelling) are genuinely cohesive —
-data and the behaviour on it together. A `pipeline` module would just be the
-826-line function relocated, so it is worth nothing until guideline 1 has done
-its work.
-
 ### The caveat matters more than usual here
 
 "Avoid splitting code when doing so makes it harder to understand" is the
@@ -335,29 +167,97 @@ the codebase worse.
 Keep each extraction small enough that the 36 end-to-end tests are a meaningful
 gate, and run a real mesh through the pool between steps. The tests stayed green
 through an entire day during which the SIGALRM cap was armed in zero processes —
-they catch broken geometry, not broken integration. See the note below.
+they catch broken geometry, not broken integration. See the note at the bottom.
 
 `_process_file_impl` also carries shared mutable state across its 23 exit points
 (`working`, `nm_src`, `open_src`, `stats`, `temps`, `dst`). Deciding what each
 extracted step reads and writes is the actual work; getting it wrong produces a
 mesh that looks fine and is subtly wrong.
 
+### Still open in this design
+
+- **Where the shared budget arithmetic lives.** Decimation, repair and Blender
+  draw from one mesh budget, and Blender's share depends on what earlier steps
+  spent (`budget − elapsed − reserve`). That is cross-cutting: if each module
+  owns its own timeout policy the arithmetic has no home, or gets duplicated.
+- **Where the seam-recovery trigger sits.** It fires when PyMeshFix *succeeded
+  but deleted geometry* — a fact about the transition, not about the mesh before
+  or after. It is the decision this shape handles least naturally, and it is not
+  a corner case: it is the Mandy fix.
+
+---
+
+## 2. Loose ends, not investigations
+
+**The two real Falcons have not been regenerated.** `d1e6ccd` made a partial
+split merge what repaired into `<name>.open.stl` instead of discarding the file,
+so both would now produce a ~99.2% model instead of a broken source copy.
+Rerunning them means deleting their `.failed.stl` fallbacks — the user's call.
+
+**`_MIN_SHELL_FACES` behaved unexpectedly once.** The 2026-09-12 Falcon split
+kept parts of 38 and 36 faces against a floor of 100. Demoted from an
+investigation on 2026-09-13: every observation rests on one pathological file —
+393,198 triangles, nm=147,448, one real body plus four specks — and reasoning
+about "part versus debris" from a model with no real parts is backwards. What
+would make it a real question is a model with genuine small parts (magnet pegs,
+locating pins) where dropping a 38-face shell visibly loses something. Cheap to
+check: every `split: N shells →` line in the backup logs records what came out.
+
+**Test-log pollution.** ~376 lines in `/mnt/sda2/STL/Fixed/repair_log.tsv` are
+from `/tmp` test runs (fixture names, `~`-prefixed parts). The 70 real lines are
+the four path-prefixed collection files. The 2026-09-12 run is preserved in
+`_logbackup/`.
+
+---
+
+## Done (2026-09-13)
+
+Kept short — the reasoning lives in `STL_BATCH_FIX_DESIGN.md` and the commit
+messages.
+
+| was | outcome |
+|---|---|
+| Two runners with different timeout behaviour | `f7623ff` — `TIMEOUT_PART` back to 600 s, bare script now submits `process_file_subprocess` like the TUI, and `--one-file` children call `retarget_logs()` |
+| PyMeshFix invisible while it runs | `04d7666` + `1620e78` — a start line stating size, defects and expected duration, then `repair()` run as its three logged sub-steps |
+| Skip reasons computed and discarded | `442c9f7` — a `reason` column, appended last so old summaries still parse |
+| Bbox flag absolute in mm | `94ad2f4` — `BBOX_TOLERANCE_PCT` = 0.7 % of the bbox diagonal, floored at 0.1 mm, because the user rescales models after repair |
+
+**What is not proven about them:**
+
+- `TIMEOUT_PART = 600` diverts one known outlier (`Default_SubTool7`, 3,080 s).
+  Whether that is the only such file is unmeasured — the `.timeout.stl` markers
+  after the next full run are the answer.
+- The PyMeshFix sub-step timings read `0.0s` on every fixture, so which phase
+  dominates a slow mesh is still unknown. The only large mesh available
+  collapses in `fill_holes`.
+- Only the `already fixed` skip reason was exercised end to end; the other four
+  need a signal file on disk to trigger.
+
 ---
 
 ## Note on how the above was verified
 
-Five claims made on 2026-09-12 were wrong in the same way: a mechanism was
-verified in isolation and the integration asserted rather than checked.
+Claims that were wrong on 2026-09-12/13 shared one shape: a mechanism verified
+in isolation, the integration asserted rather than checked.
 
 - the SIGALRM cap (unit test passed; armed nowhere in a real run)
 - `result['stdout']` KeyError (isolated `process_file` passed; the runner's
   `open` branch indexes it directly and would have crashed)
-- `_time_mod`, a missing function signature, and `shutil` in the TUI — all
-  three passed `ast.parse` and failed at runtime
+- `_time_mod`, `_time_now`, a missing function signature, and `shutil` in the
+  TUI — all passed `ast.parse` and failed at runtime
+- `_BBOX_TOLERANCE_FLOOR` referenced by the CLI block before its definition —
+  import, parse and all 36 tests green, `NameError` on every real invocation
 - "Blender finished and the part was failed anyway" — the old log made a *kill*
   look like a completion, and the diagnosis repeated the lie
-- "the Falcons are unsalvageable" — repeated several times; 99.2% repairs
+- "the Falcons are unsalvageable" — repeated several times; 99.2 % repairs
+- a PyMeshFix sub-step order "verified" against a mesh that collapses to zero
+  faces either way, in an order `repair()` does not use
 
-Everything checked against the path actually run (the pool, a real result dict,
-a real mesh) held up. Everything checked in isolation had a hole. Treat a fix
-as unverified until it has been watched working on the pool path.
+Four consecutive verification probes also failed on their own mistakes — a grep
+for a string that never appears, a process snapshot of a run that had already
+finished, a launch from a drifted working directory, and a `sed` address that
+did not match. Each looked like evidence about the code.
+
+Everything checked against the path actually run — the pool, a real result dict,
+a real mesh, an argument-bearing invocation — held up. Everything checked in
+isolation had a hole.
