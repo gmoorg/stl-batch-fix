@@ -547,7 +547,20 @@ results from a 141-file run:
 | 1.077 mm | `Zelda NSFW/Chair_foot1` | end caps destroyed |
 | 89.190 mm | `Transhuman_Girl/Leg1` | stray artifact removed — a correct repair |
 
-`_BBOX_TOLERANCE` is 0.1 mm: in the empty gap between the noise and the real
+`BBOX_TOLERANCE_PCT` is **0.7 % of the model's bbox diagonal**, floored at
+`_BBOX_TOLERANCE_FLOOR` (0.1 mm). Relative rather than absolute because an mm
+threshold assumes the file prints at 1:1 — rescaling a 40 mm part to 120 mm
+turns a 0.3 mm drift into 0.9 mm — and a proportion is invariant under that.
+The floor exists because a shell part can have a sub-millimetre diagonal
+(`whole-costume01`'s parts measure 1.3 mm and 0.2 mm), where a pure proportion
+would flag floating-point noise.
+
+Measured against real diagonals, 0.7 % silences 4 of 20 flagged files —
+`imp_stand_42mm` (0.181 mm on 35.9 mm), `imp_stand_70mm` (0.236 mm on 59.8 mm)
+and two others — while `Stool_Base` (7.555 mm) and everything larger still
+flags.
+
+The previous `_BBOX_TOLERANCE` was 0.1 mm: in the empty gap between the noise and the real
 changes, and below one layer height.
 
 A face-count check would not substitute — `Chair_foot1` lost 0.14 % of its faces

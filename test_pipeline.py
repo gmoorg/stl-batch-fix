@@ -51,7 +51,10 @@ TEST_MAX_FACES = 2_000        # decimation target
 #   arms 792 · leg 904 · foot1 1,152 · foot2 1,512 · falcon 2,560 · body 3,216
 TEST_SCAN_LIMIT = 2_000
 
-BBOX_TOL = 0.1                # matches fix._BBOX_TOLERANCE
+BBOX_TOL = 0.1                # absolute mm; the pipeline's own flag is now
+                              # BBOX_TOLERANCE_PCT of the bbox diagonal, but
+                              # these fixtures are small enough that the
+                              # _BBOX_TOLERANCE_FLOOR (0.1mm) governs anyway
 
 
 def _components(verts, faces):

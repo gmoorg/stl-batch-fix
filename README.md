@@ -141,6 +141,7 @@ All settings have defaults in `stl_batch_fix.py` and can be overridden via `--fl
 | `OUTPUT_SUFFIX` | `""` | `--suffix` | — | Appended to output filename stem |
 | `MERGE_DIST` | `0.01` mm | `--merge-dist` | — | Vertex merge radius |
 | `MIN_LAYER` | `0.6` mm | `--min-layer` | — | Finest layer you print at; open boundaries smaller than this are accepted rather than repaired (0 = require zero open edges) |
+| `BBOX_TOLERANCE_PCT` | `0.7` % | `--bbox-tolerance-pct` | — | Flag bbox drift above this percent of the model's bbox **diagonal**, floored at 0.1 mm. Relative rather than mm so the flag survives rescaling the model in the slicer |
 | `WORKERS` | `0` (auto) | `--workers` | — | Parallel worker processes; 0 derives from cores and memory |
 | `TIMEOUT_PART` | `600` s | `--timeout-part` | — | Budget for **one mesh** — a whole unsplit model, or a single shell part. Almost every file is judged by this |
 | `TIMEOUT` | `3600` s | `--timeout` | — | Whole-file ceiling for a **split model**; its cap is `min(TIMEOUT, TIMEOUT_PART × n_parts)`. `0` = no practical ceiling (24 h) |

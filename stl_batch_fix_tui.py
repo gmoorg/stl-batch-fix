@@ -51,6 +51,7 @@ CFG_FIELDS = [
     ('OUTPUT_SUFFIX', 'Output suffix',     str,   'Appended to output filename stem (blank = none)'),
     ('MERGE_DIST',    'Merge distance mm', float, 'Vertex merge radius for T-junction fix'),
     ('MIN_LAYER',     'Min layer mm',      float, 'Finest print layer; open boundaries smaller than this are accepted (0 = require zero)'),
+    ('BBOX_TOLERANCE_PCT', 'Bbox flag %',  float, "Flag bbox drift above this percent of the model's diagonal (survives rescaling)"),
     ('WORKERS',       'Workers',           int,   'Parallel worker processes (0 = auto from RAM and cores)'),
     ('TIMEOUT_PART',  'Timeout/mesh (s)',  int,   'Budget for one mesh: a whole unsplit model, or a single shell part'),
     ('TIMEOUT',       'Split ceiling (s)', int,   'Whole-file ceiling for a split model; 0 = no practical ceiling (24h)'),
@@ -64,6 +65,7 @@ CFG_DEFAULTS = {
     'OUTPUT_SUFFIX': _fix.OUTPUT_SUFFIX,
     'MERGE_DIST':    str(_fix.MERGE_DIST),
     'MIN_LAYER':     str(_fix.MIN_LAYER),
+    'BBOX_TOLERANCE_PCT': str(_fix.BBOX_TOLERANCE_PCT),
     'WORKERS':       str(_fix.WORKERS),
     'TIMEOUT':       str(_fix.TIMEOUT),
     'TIMEOUT_PART':  str(_fix.TIMEOUT_PART),
@@ -633,6 +635,7 @@ def run_progress_screen(values, files, cfg, sized=None):
     _fix.OUTPUT_SUFFIX = values['OUTPUT_SUFFIX']
     _fix.MERGE_DIST    = values['MERGE_DIST']
     _fix.MIN_LAYER     = values['MIN_LAYER']
+    _fix.BBOX_TOLERANCE_PCT = values['BBOX_TOLERANCE_PCT']
     _fix.WORKERS       = values['WORKERS']
     _fix.TIMEOUT       = values['TIMEOUT']
     _fix.TIMEOUT_PART  = values['TIMEOUT_PART']

@@ -11,6 +11,10 @@ MERGE_DIST = 0.01
 # Finest print layer; open boundaries smaller than this are accepted (0 = require zero)
 MIN_LAYER = 0.6
 
+# Flag bbox drift above this percent of the model's bbox diagonal.
+# Relative rather than mm, so the flag survives rescaling the model in the slicer.
+BBOX_TOLERANCE_PCT = 0.7
+
 # Parallel worker processes (0 = auto from RAM and cores)
 WORKERS = 0
 

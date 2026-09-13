@@ -53,6 +53,31 @@ MERGE_DIST     = 0.01 # mm — merge vertices closer than this (T-junction fix)
 # see _open_loops_are_printable() for the measurements.  0 disables the
 # tolerance and restores the old "open edges must be exactly zero" rule.
 MIN_LAYER      = 0.6
+# Bbox drift is flagged above this percent of the model's own bbox diagonal.
+#
+# Relative, not absolute: an mm threshold assumes the file prints at 1:1, and a
+# model rescaled in the slicer breaks that — scale a 40 mm part to 120 mm and a
+# 0.3 mm drift becomes 0.9 mm, above a layer.  A proportion is invariant under
+# that rescaling; millimetres are not.
+#
+# Measured against real diagonals, 0.7% silences the sub-layer noise and keeps
+# everything worth inspecting:
+#
+#   drift      diagonal   0.7%      verdict
+#   89.190mm   169.4mm    1.186mm   flags   (Leg1: stray artifact removed)
+#    7.555mm   110.3mm    0.772mm   flags   (Stool_Base: real casualty)
+#    1.195mm    99.6mm    0.697mm   flags
+#    0.624mm    99.6mm    0.697mm   silenced
+#    0.236mm    59.8mm    0.419mm   silenced (imp_stand_70mm)
+#    0.181mm    35.9mm    0.251mm   silenced (imp_stand_42mm)
+#
+# Defined here rather than beside compare_bounds because the CLI block
+# interpolates both of these into help text and runs before that point.
+BBOX_TOLERANCE_PCT = 0.7
+# Floor, in mm.  A shell part can have a diagonal of a fraction of a millimetre
+# — whole-costume01's parts measure 1.3 mm and 0.2 mm — and a pure proportion
+# would give those a threshold near zero and flag them on floating-point noise.
+_BBOX_TOLERANCE_FLOOR = 0.1
 # run.sh and install.sh both document BLENDER_BIN as the way to point at a
 # non-PATH Blender, and install.sh probes it — but this module ignored it, so a
 # custom path passed the installer's check and then failed here as "not found".
@@ -151,6 +176,11 @@ if __name__ == '__main__' and len(sys.argv) > 1:
                         help=f"Finest print layer in mm; open boundaries smaller "
                              f"than this are accepted as-is (default: {MIN_LAYER}, "
                              f"0=require zero open edges)")
+    parser.add_argument('--bbox-tolerance-pct', type=float, default=None,
+                        help=f"Flag bbox drift above this percent of the "
+                             f"model's bbox diagonal, floored at "
+                             f"{_BBOX_TOLERANCE_FLOOR}mm "
+                             f"(default: {BBOX_TOLERANCE_PCT})")
     parser.add_argument('--recursive',    dest='recursive', action='store_true',  default=None,
                         help=f"Search input folder recursively (default: {RECURSIVE})")
     parser.add_argument('--no-recursive', dest='recursive', action='store_false',
@@ -181,6 +211,8 @@ if __name__ == '__main__' and len(sys.argv) > 1:
     if args.suffix     is not None: OUTPUT_SUFFIX = args.suffix
     if args.merge_dist is not None: MERGE_DIST    = args.merge_dist
     if args.min_layer  is not None: MIN_LAYER     = args.min_layer
+    if args.bbox_tolerance_pct is not None:
+        BBOX_TOLERANCE_PCT = args.bbox_tolerance_pct
     if args.blender_reserve_pct is not None:
         BLENDER_RESERVE_PCT = args.blender_reserve_pct
     if args.recursive  is not None: RECURSIVE     = args.recursive
@@ -420,11 +452,11 @@ def _read_stl_header(path):
 #   1.077  mm  Zelda NSFW/Chair_foot1    inspected: end caps destroyed
 #  89.190  mm  Transhuman_Girl/Leg1      inspected: stray artifact removed, fine
 #
-# 0.1 mm sits in the empty gap between the noise and the real changes, and is
-# below one layer height, so nothing printable hides under it.  Note the top of
-# that table: magnitude alone does not say whether a change is damage or
-# cleanup — only that it is worth a look.
-_BBOX_TOLERANCE = 0.1
+# The threshold itself is BBOX_TOLERANCE_PCT, defined with the other
+# configuration constants near the top — it has to precede the CLI block, which
+# interpolates it into --bbox-tolerance-pct's help text.  Magnitude alone still
+# does not say whether a change is damage or cleanup, only that it is worth a
+# look.
 
 
 def stl_bounds(path):
@@ -462,7 +494,25 @@ def stl_bounds(path):
         return None
 
 
-def compare_bounds(before, after, tol=_BBOX_TOLERANCE):
+def _bbox_tolerance_for(before):
+    """Tolerance in mm for a mesh with these bounds.
+
+    BBOX_TOLERANCE_PCT of the bbox diagonal, floored at
+    _BBOX_TOLERANCE_FLOOR.  Scale comes from the mesh being judged, which is
+    what the caller already measured — a part is therefore judged against its
+    own size, and the floor is what stops a sub-millimetre fragment getting a
+    threshold of effectively zero."""
+    if not before:
+        return _BBOX_TOLERANCE_FLOOR
+    lo, hi = before
+    try:
+        diag = sum((hi[i] - lo[i]) ** 2 for i in range(3)) ** 0.5
+    except (TypeError, IndexError):
+        return _BBOX_TOLERANCE_FLOOR
+    return max(diag * (BBOX_TOLERANCE_PCT / 100.0), _BBOX_TOLERANCE_FLOOR)
+
+
+def compare_bounds(before, after, tol=None):
     """Describe how a repair changed a mesh's extents, or None if unchanged.
 
     A repair — filling holes, resolving non-manifold edges — adds or adjusts
@@ -474,6 +524,8 @@ def compare_bounds(before, after, tol=_BBOX_TOLERANCE):
     Returns a short human-readable string naming the axes that moved."""
     if not before or not after:
         return None
+    if tol is None:
+        tol = _bbox_tolerance_for(before)
     (lo0, hi0), (lo1, hi1) = before, after
     parts = []
     for i, axis in enumerate('xyz'):
@@ -3407,6 +3459,7 @@ def process_file_subprocess(src, is_part=False, budget=None):
            '--suffix', OUTPUT_SUFFIX,
            '--merge-dist', str(MERGE_DIST),
            '--min-layer', str(MIN_LAYER),
+           '--bbox-tolerance-pct', str(BBOX_TOLERANCE_PCT),
            '--blender-reserve-pct', str(BLENDER_RESERVE_PCT),
            '--max-faces', str(MAX_FACES),
            '--timeout', str(_budget),
