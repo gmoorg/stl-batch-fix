@@ -134,6 +134,32 @@ section as the current interface and the sketch as the earlier draft.
 
 ---
 
+## D4b — Admission is a condition variable and a caller-supplied callback
+
+**Decided**, replacing an open question (O1) that turned out not to be one.
+
+`get_next` waits on a `threading.Condition` while `admit` refuses the head item,
+and a worker finishing signals it. Standard mechanism, already in the sketch. An
+earlier draft treated "a blocked thread does nothing" as a problem worth
+designing around — it is not. Doing nothing is exactly what a thread with
+nothing to do should do, and an idle stack is not a cost.
+
+The forever-block case is not a locking problem either, just a clause in the
+predicate: **if no other worker is running there is nothing to wait for**, so the
+item is handed over regardless. Either it runs alone or it never runs, and
+`mesh_is_too_large` already identifies the never-fits case before queueing.
+
+`admit` stays a **caller-supplied callback**, `admit(item, running)`. The pool
+never learns what a triangle is; the mesh-specific memory model
+(`estimate_peak_bytes`, `_run_memory_budget`, the 890 bytes/triangle constant)
+lives in the function passed in. Same injection pattern as `scan` elsewhere in
+the design. That resolves what looked like a dilemma — putting `admit` in the
+pool would make a generic pool know about meshes, putting it in the workers
+would scatter one decision across threads that cannot see each other — because
+the callback is neither.
+
+---
+
 ## D5 — No retry. If it failed, it failed
 
 **Decided**, replacing an earlier "the pool counts attempts, the caller decides
@@ -300,18 +326,6 @@ largest-first means they shed early and the tail runs wide.
 ---
 
 ## Open, not yet decided
-
-**O1 — `get_next` blocking on `admit`.** Narrowed by D4: the timeout is no
-longer an escape from this, so the rule has to stand on its own. `get_next`
-should block only while *another worker* holds the memory the head item needs —
-a condition that always resolves, because that worker finishes. If nothing is in
-flight, the item runs regardless: either it runs alone or it never runs, and
-`mesh_is_too_large` already identifies the never-fits case.
-
-Underneath it is a question not yet answered: **does `admit` belong in the pool
-at all**, or does the pool hand out work and the *worker* decide to wait before
-starting something large? The second keeps the pool dumber but scatters the
-memory model across workers that cannot see each other.
 
 **O2 — does the watchdog survive at all?** With threads, `communicate(timeout=)`
 in the worker *is* the timeout, and that already exists in
