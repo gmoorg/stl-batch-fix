@@ -64,14 +64,28 @@ WORKERS        = 0      # parallel workers; 0 = auto from cores and memory budge
 # A six-shell file used to do six repairs under one shared budget and was killed
 # for being multi-part rather than slow; each part now gets its own.
 #
-# 3600 rather than 600 because 600 had no measurement behind it and cost a good
-# output: Default_SubTool7.stl (1.3M tris, nm=33,353) spent 3,080s in PyMeshFix
-# and finished clean.  A 600s cap would have written it a .timeout.stl.  Every
-# successful repair measured so far fits inside 3,106s, so this is that worst
-# case plus headroom.  Face count is deliberately NOT part of this: decimation
-# caps every mesh reaching PyMeshFix at MAX_FACES, so size cannot explain a 10x
-# runtime spread between two 900k-face meshes — defect count can.
-TIMEOUT_PART   = 3_600
+# 600, because a timeout that is too GENEROUS costs more than one that is too
+# tight.  100% repair is not the goal: a file that times out gets a
+# .timeout.stl marker and goes to another tool, which is minutes of the user's
+# attention.  An hour spent on one pathological mesh is an hour of a worker not
+# spent on the other 760 files, to produce an output obtainable elsewhere.
+#
+# The distribution supports it.  Measured, after decimation to <= MAX_FACES:
+#
+#     2,055 defects ->   289s   succeeded
+#     2,263 defects ->   292s   succeeded
+#    33,353 defects -> 3,080s   succeeded   <- lone outlier, 10x everything else
+#
+# 600s catches 757 of 761 files with room to spare and diverts the outlier.
+# Raising this to 3600 was a mistake: it optimised for "never lose a repairable
+# file" without asking what losing one actually costs.
+#
+# Face count is deliberately NOT part of this: decimation caps every mesh
+# reaching PyMeshFix at MAX_FACES, so size cannot explain a 10x runtime spread
+# between two 900k-face meshes — defect count can.
+#
+# Set TIMEOUT = 0 (24h) for an occasional "let the leftovers run" pass.
+TIMEOUT_PART   = 600
 # percent of TIMEOUT_PART held back from Blender for the steps that follow it
 # (post-verify scan, a possible post-blender PyMeshFix pass, writing output).
 # Measured over 17 Blender invocations across two runs: 10 needed no post-work,
@@ -3580,6 +3594,17 @@ if __name__ == '__main__' and _ONE_FILE:
     #   python stl_batch_fix.py --one-file "Zelda NSFW/Chair_foot1.stl"
     import json as _json
 
+    # Point the logs at THIS run's output tree, before anything writes.
+    #
+    # Only the batch main() did this, so a child kept the module-default paths
+    # and wrote every one of its lines to /mnt/sda2/STL/Fixed/ no matter what
+    # --input it was given.  The parent retargeted and wrote its summary header
+    # locally while the children's step log went somewhere else entirely:
+    # measured on a run under /tmp, the local log had 0 lines and 285 lines
+    # landed in the collection.  The TUI only looked correct because its
+    # --input happens to be the collection folder.
+    retarget_logs()
+
     # Kill Blender before dying, on either signal.
     #
     # This process is the one that actually spawns Blender, and until this
@@ -3702,9 +3727,18 @@ if __name__ == '__main__':
     open_list = []
     corrupt = []
 
-    # Submit all work to the pool. Each file — including multi-shell originals —
-    # is processed entirely within a single worker (split + repair each part +
-    # merge all happen in process_file). No dynamic future submission needed.
+    # Submit all work to the pool.  Each worker spawns a --one-file child and
+    # waits, exactly as the TUI does.
+    #
+    # This used to call process_file_safe directly, which meant the protections
+    # you got depended on how you launched the run: the TUI path had child
+    # isolation, a communicate(timeout=) kill and the SIGALRM cap, and this one
+    # had none of them.  That asymmetry is why a 3,106s run went uncapped and
+    # was misdiagnosed as dead timeout machinery.  It also left this path
+    # exposed to the hazard the child isolation exists for — a dying pool worker
+    # fails EVERY pending future, taking innocent files with it.
+    #
+    # One extra fork per file, against a repair measured in minutes.
     total = len(files)
     import multiprocessing as _mp
     _mgr = _mp.Manager()
@@ -3712,7 +3746,7 @@ if __name__ == '__main__':
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers,
                                                 initializer=_worker_init,
                                                 initargs=(_shared, 10)) as pool:
-        future_to_src = {pool.submit(process_file_safe, src): (i, src)
+        future_to_src = {pool.submit(process_file_subprocess, src): (i, src)
                          for i, src in enumerate(files, 1)}
         pending = set(future_to_src)
 

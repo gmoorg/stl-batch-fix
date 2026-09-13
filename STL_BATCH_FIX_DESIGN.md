@@ -72,10 +72,24 @@ capped at `AUTO_WORKERS_CAP` (6) and never exceeding the number of files.
 Two caps with different jobs. They are **not** a shared pool: a part finishing
 in 1 s donates nothing to the next one.
 
-**`TIMEOUT_PART` is measured.** 3600 s sits above every successful repair
-observed. `Default_SubTool7.stl` (1.3 M tris, nm = 33,353) spent 3,080 s in
-PyMeshFix and finished clean — the previous 600 s would have written a
-`.timeout.stl` for a file that repairs correctly.
+**`TIMEOUT_PART` is set for throughput, not for a 100 % repair rate.** 100 %
+success is not the goal: a file that exceeds the budget gets a `.timeout.stl`
+marker and goes to another repair tool, which costs minutes of attention. An
+hour spent on one pathological mesh is an hour of a worker not spent on the
+other 760 files, to produce an output obtainable elsewhere — so an
+over-generous cap costs *more* than a tight one.
+
+Measured, after decimation to ≤ `MAX_FACES`:
+
+```text
+ 2,055 defects ->   289s   succeeded
+ 2,263 defects ->   292s   succeeded
+33,353 defects -> 3,080s   succeeded   <- lone outlier, 10x everything else
+```
+
+600 s catches 757 of 761 files with room to spare and diverts the outlier.
+Raising it to 3600 was a mistake, corrected the same day: it optimised for
+"never lose a repairable file" without asking what losing one costs.
 
 **Face count is deliberately not an input.** Decimation caps every mesh reaching
 PyMeshFix at `MAX_FACES`, so size cannot explain a 10× runtime spread between
@@ -401,35 +415,29 @@ recursive call passes `is_part=True`, so recursion is depth-1 by construction.
 
 ## Parallelism
 
-`ProcessPoolExecutor` runs `WORKERS` processes. **There are two runners, and
-they differ in a way that matters.**
-
-| entry point | pool submits | child per file | watchdog | SIGALRM cap |
-|---|---|---|---|---|
-| **TUI** (normal use) | `process_file_subprocess` | `--one-file` | yes | arms |
-| **bare script** | `process_file_safe` | none | no | no-ops |
-
-Under the TUI a pool worker does not do the mesh work itself — it spawns
-`stl_batch_fix.py --one-file <path>` and waits:
+`ProcessPoolExecutor` runs `WORKERS` processes. A pool worker does not do the
+mesh work itself — it spawns `stl_batch_fix.py --one-file <path>` and waits:
 
 ```text
-TUI main loop
+TUI / batch main loop
   └── pool worker  (survives everything)
         └── repair process  ← this is what gets killed on timeout or OOM
 ```
 
-The bare script calls `process_file_safe` directly in the worker, so it has no
-per-file child, no `communicate(timeout=)` kill, and `_arm_mesh_alarm()` no-ops
-there because `_ONE_FILE` is unset. A 3,106 s run that went uncapped was traced
-to this: the run had been launched with the bare script, not the TUI.
+**Both entry points now submit `process_file_subprocess`.** They did not always:
+the bare script called `process_file_safe` directly, so the protections you got
+depended on how you launched the run — the TUI had child isolation, a
+`communicate(timeout=)` kill and the SIGALRM cap, and the bare script had none
+of them. A 3,106 s run that went uncapped was traced to exactly that, and the
+dead-looking timeout machinery was in fact live on the path being used daily.
 
-This is deliberate for now — arming the bare-script path at `TIMEOUT_PART` would
-have killed `Default_SubTool7.stl`, which repairs correctly at 3,106 s. See
-`TODO.md` item 1.
+The asymmetry also left the bare path exposed to the hazard the child isolation
+exists for: a dying pool worker fails **every** pending future, taking the
+innocent files running beside it down too.
 
-A bare-script worker is also reused across many files (`max_tasks_per_child` is
-deliberately unset), which is why `_cancel_mesh_alarm()` must run at the end of
-every file.
+`_cancel_mesh_alarm()` still runs at the end of every file. With a child per
+file an alarm cannot outlive its file, but the cancellation is the guarantee
+rather than a side effect of the process model.
 
 `_terminate_broken` in CPython fails **every** pending work item when one worker
 dies, unconditionally. So killing a worker on timeout destroyed every file
