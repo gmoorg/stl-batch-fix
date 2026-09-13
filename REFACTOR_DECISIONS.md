@@ -191,6 +191,98 @@ the actual signal, and no sibling is affected.
 
 ---
 
+## D6 — A preparation stage that normalises everything to binary STL
+
+**Decided.** A first pool fills the queue for the main one.
+
+### Why it exists
+
+The main pool cannot order work it has not measured, and today it cannot
+measure two of the three formats:
+
+| format | `_read_stl_header` | admission check |
+|---|---|---|
+| binary STL | real count | runs |
+| ASCII STL | **-1** — "header claims 1,919,252,000 tris" | **skipped** |
+| OBJ | **-1** — "file shorter than STL header" | **skipped** |
+
+That `1,919,252,000` is the ASCII text `solid` read as a little-endian uint32 at
+offset 80. A size cross-check catches it and returns -1, so nothing breaks — but
+by accident of a sanity check, not by design. `mesh_is_too_large` is guarded by
+`if n_tris > 0`, so for ASCII and OBJ the admission check simply does not run and
+the real memory cost is, in `measure_files`' own words, "discovered on the way".
+
+ASCII STL is worse than OBJ here: OBJ at least gets an approximation for queue
+ordering (`filesize // 60`), while ASCII STL returns 0 and sorts **first**, as
+the cheapest thing in the queue. An ASCII STL is roughly 6-8x larger on disk
+than its binary equivalent.
+
+### The rule
+
+Exactly the skip logic the main pipeline already uses — existence is the cache,
+deleting the file is the invalidation:
+
+```text
+for each collected file:
+    binary STL                      -> queue it
+    ASCII/OBJ, export already there -> queue the export
+    ASCII/OBJ, no export            -> export it, then queue the export
+```
+
+Exports go to a `stl-exported/` folder **in the source tree**, and the collector
+must skip that folder.
+
+### Why writing to the source tree is acceptable here
+
+The "source is never modified" rule came from a specific worry: *our repair
+output* polluting the source folder, where a buggy script leaves files that are
+hard to tell from originals and hard to manage.
+
+A Blender format export is not that. It is a lossless container change — same
+triangles, same coordinates, binary instead of text — so even a buggy run leaves
+the source mesh in a different encoding. A dedicated `stl-exported/` folder is
+one directory to delete, obviously not originals, and the export is a standard
+Blender operation, not something implemented here.
+
+### The collector exclusion is not optional
+
+Without it the next run collects the exports as inputs, and every OBJ is
+processed twice — once as OBJ, once as its export — producing two outputs under
+different names for the same model. The same failure the `~parts` and
+`__MACOSX` exclusions exist for, and easy to miss because it only appears on the
+**second** run.
+
+### What it simplifies downstream
+
+Stage two stops having an `is_obj` / `is_ascii` branch. Today those files set
+`blender_src = src` and bypass the Python pipeline entirely — no pre-scan, so no
+nm count, no open-edge count, no print-scale gate. They go straight to Blender
+and take whatever comes back. After preparation they are ordinary binary STLs
+and get the full pipeline.
+
+The conversion is not extra work: Blender already does it in step F today.
+Preparation moves it earlier and keeps the result.
+
+### Ordering
+
+Once every file is binary STL with a real count, the queue can be sorted. Face
+count is free (header). **nm count would predict cost far better** — PyMeshFix
+runtime tracks defects much more closely than size (33,353 defects → 3,080 s;
+2,055 → 289 s) — but needs a `scan_mesh_errors` pass per file. Whether that pass
+pays for itself is measurable from the existing logs and has not been measured.
+
+### Worker shedding
+
+`get_next` returns `None` for worker N when there is no longer room for it, and
+that worker exits and frees its resources — rather than blocking and holding a
+stack and a status slot while doing nothing. Strictly better than the blocking
+admission in D4.
+
+Ordering and shedding interact: smallest-first means workers shed late,
+largest-first means they shed early and the tail runs wide.
+
+---
+
 ## Open, not yet decided
 
 **O1 — `get_next` blocking on `admit`.** Narrowed by D4: the timeout is no
@@ -221,6 +313,22 @@ reason a worker can wedge today. If the child reported its own status, or status
 travelled the existing result pipe, the restart machinery becomes genuinely
 vestigial rather than arguably so. (Partly answered by D3, which removes the
 proxy — but the question of *who* reports status is still open.)
+
+**O7 — is a stale export possible, and does it matter?** D6 makes existence the
+cache: if `stl-exported/<name>.stl` is there, it is used. That matches the main
+pipeline, where existence also means skip. The difference is that the
+pipeline's outputs are invalidated by the operator deleting a marker, while an
+export is a derived file whose source can change underneath it — re-export a
+model from a sculpting tool under the same name and the old export silently
+wins. An mtime comparison would close it. Not decided; consistency with the
+rest of the script is a real argument for leaving it on existence alone.
+
+**O8 — can a shed worker come back?** If worker N exits because the remaining
+files are large, and the queue later returns to small files, concurrency stays
+narrow for the rest of the run unless the pool can spawn a replacement. Sorting
+by monotonically increasing cost makes shedding always final and the question
+disappears — which is an argument for a specific ordering rather than a free
+choice.
 
 **O5 — where does the shared budget arithmetic live?** Carried over from
 `TODO.md` item 1. Decimation, repair and Blender draw on one mesh budget and
