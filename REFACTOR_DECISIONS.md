@@ -232,6 +232,11 @@ for each collected file:
 Exports go to a `stl-exported/` folder **in the source tree**, and the collector
 must skip that folder.
 
+**No mtime check.** An export could in principle go stale if its source were
+replaced under the same name, but that does not happen in this workflow —
+sources arrive and stay put. Existence alone decides, exactly as it does for the
+repaired output; deleting the export is the way to force a re-export.
+
 ### Why writing to the source tree is acceptable here
 
 The "source is never modified" rule came from a specific worry: *our repair
@@ -313,15 +318,6 @@ reason a worker can wedge today. If the child reported its own status, or status
 travelled the existing result pipe, the restart machinery becomes genuinely
 vestigial rather than arguably so. (Partly answered by D3, which removes the
 proxy — but the question of *who* reports status is still open.)
-
-**O7 — is a stale export possible, and does it matter?** D6 makes existence the
-cache: if `stl-exported/<name>.stl` is there, it is used. That matches the main
-pipeline, where existence also means skip. The difference is that the
-pipeline's outputs are invalidated by the operator deleting a marker, while an
-export is a derived file whose source can change underneath it — re-export a
-model from a sculpting tool under the same name and the old export silently
-wins. An mtime comparison would close it. Not decided; consistency with the
-rest of the script is a real argument for leaving it on existence alone.
 
 **O8 — can a shed worker come back?** If worker N exits because the remaining
 files are large, and the queue later returns to small files, concurrency stays
