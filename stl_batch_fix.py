@@ -1177,8 +1177,12 @@ def _write_binary_stl(path, verts, faces):
 
 SUMMARY_FILE = "/mnt/sda2/STL/Fixed/repair_summary.tsv"
 
+# blender_runs is appended at the END deliberately: read_summary pads short
+# rows, so a summary written before this column existed still parses, with the
+# new field coming back empty rather than shifting every value one place left.
 _SUMMARY_COLUMNS = ('file', 'status', 'secs', 'tris_in', 'tris_out',
-                    'nm_in', 'open_in', 'blender_secs', 'path', 'bbox_drift')
+                    'nm_in', 'open_in', 'blender_secs', 'path', 'bbox_drift',
+                    'blender_runs')
 
 
 def _reset_summary_file():
@@ -1931,6 +1935,9 @@ def _run_blender_script(script, elapsed=0.0, L=None, route='blender'):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
+            # A killed run still spent the time and still cost a launch.
+            _blender_cost[0] += 1
+            _blender_cost[1] += _time.monotonic() - _t_start
             if L:
                 L(f"blender: KILLED ({route}) after "
                   f"{_time.monotonic() - _t_start:.1f}s — exceeded its "
@@ -1938,6 +1945,8 @@ def _run_blender_script(script, elapsed=0.0, L=None, route='blender'):
             return None, '', '', True
         finally:
             _blender_proc = None
+        _blender_cost[0] += 1
+        _blender_cost[1] += _time.monotonic() - _t_start
         if L:
             L(f"blender: done  ({route})  "
               f"{_time.monotonic() - _t_start:.1f}s  rc={proc.returncode}")
@@ -2152,6 +2161,10 @@ def process_file(src, is_part=False):
     _rel_for_log = (os.path.basename(src) if is_part
                     else os.path.relpath(src, INPUT_FOLDER))
     if not is_part:
+        # Zero the Blender tally for this file.  Guarded on not is_part so the
+        # parts repaired inline below accumulate into their parent's total.
+        _blender_cost[0] = 0
+        _blender_cost[1] = 0.0
         log_summary_start(_rel_for_log, os.getpid())
     try:
         result = _process_file_impl(src, is_part=is_part, temps=temps, stats=stats)
@@ -2190,7 +2203,11 @@ def process_file(src, is_part=False):
                 'tris_out':     stats.get('tris_out', ''),
                 'nm_in':        stats.get('nm_in', ''),
                 'open_in':      stats.get('open_in', ''),
-                'blender_secs': stats.get('blender_secs', ''),
+                # From the accumulator, not stats: every route funnels through
+                # _run_blender_script, including the parts repaired inline.
+                'blender_secs': (f"{_blender_cost[1]:.1f}"
+                                 if _blender_cost[0] else ''),
+                'blender_runs': _blender_cost[0] or '',
                 'path':         '+'.join(stats['path']) or 'none',
                 'bbox_drift':   stats.get('bbox_drift', ''),
             })
@@ -2844,7 +2861,15 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
             os.replace(working, dst)
             size = os.path.getsize(dst)
             _clear_stale(failed_copy, unrepaired_copy, open_copy)
-            L(f"result: ok (no blender needed)"
+            # "no blender needed" means step F was not needed.  It used to be
+            # printed verbatim on files where an earlier route (seam-split,
+            # decimate fallback) had already run Blender, which reads as though
+            # Blender never ran at all.  _blender_cost knows which it was.
+            L("result: ok ("
+              + (f"blender ran earlier: {_blender_cost[0]} run(s), "
+                 f"{_blender_cost[1]:.1f}s; no fallback needed"
+                 if _blender_cost[0] else "no blender needed")
+              + ")"
               + ("" if _pv_ok else " — UNVERIFIED, scan could not run"))
             return {'rel': rel, 'status': 'ok', 'dst': os.path.basename(dst),
                     'size': size, 'is_ascii': False, 'bypassed': True,
@@ -2864,14 +2889,10 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
 
     _ensure_parent(dst)
 
-    # Mark the Blender call on both entry paths — the OBJ/ASCII branch above has
-    # no "fallback" line, so without this those files reach Blender unlogged and
-    # cannot even be counted afterwards.  The dt= on the following line is then
-    # Blender's own wall time, isolated from the post-verify and file writes.
-    _bl_t0 = _time.monotonic()
-    # start/done/skipped/KILLED are logged inside _run_blender_script, which
-    # every route funnels through, so they are not repeated here -- doing both
-    # double-counted each invocation in the log.
+    # start/done/skipped/KILLED are logged inside _run_blender_script, and the
+    # invocation count and wall time are accumulated there too (_blender_cost),
+    # because every route funnels through it.  Both used to be done here, which
+    # is why only this one site was ever counted.
     # Captured before the call: blender_src is unlinked a few lines below.
     _bl_bounds_before = stl_bounds(blender_src)
     success, open_only, unrepaired, stdout, stderr = fix_stl(
@@ -2880,8 +2901,6 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         elapsed=_time.monotonic() - _t0,
         L=L, route=('obj' if is_obj else 'ascii' if is_ascii else 'fallback'),
     )
-    _bl_secs = _time.monotonic() - _bl_t0
-    stats['blender_secs'] = f"{_bl_secs:.1f}"
     stats['path'].append('blender')
     # Observe only, as in step E.  Blender merges doubles and can decimate, so
     # small movement here is expected — the number is what makes it judgeable.
@@ -2970,6 +2989,16 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
 
 _worker_status = None   # set by _worker_init to the shared Manager dict
 _blender_proc  = None   # current Blender subprocess in this worker (or None)
+
+# Blender cost for the mesh currently being processed: [invocations, seconds].
+# Accumulated inside _run_blender_script, so every route counts -- the step F
+# site used to set stats['blender_secs'] by itself, which is why the column was
+# filled on 1 row out of 646: seam-split, decimate-fallback and OBJ/ASCII never
+# touched it.  Reset per FILE rather than per mesh, so a split file's total
+# includes the parts repaired inline inside it; resetting per mesh would have
+# each part zero its parent's running total.  A module global is safe here
+# because one --one-file child handles exactly one file, parts included.
+_blender_cost = [0, 0.0]
 
 
 def _unlimit_child_address_space():
