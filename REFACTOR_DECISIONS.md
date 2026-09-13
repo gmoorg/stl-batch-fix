@@ -103,9 +103,7 @@ two induced failures.
 ```python
 class Pool:
     def __init__(self, items, n_workers, admit=None)
-    def get_next(self, timeout=None)   # None = stop; blocks while admit() refuses
-    def requeue(self, item)            # BACK of the queue, never the front
-    def attempts(self, item)
+    def get_next(self, timeout=None)   # None = stop
     def status(self)                   # what each worker is on, for the display
     def stop(self)
     def start(self, work)              # threads, each running work(self)
@@ -115,34 +113,97 @@ The whole worker the caller writes:
 
 ```python
 def repair_one(pool):
-    while (src := pool.get_next(timeout=5)) is not None:
-        result = run_one_file(src)          # spawns --one-file, waits, reads rc
-        if result.failed and pool.attempts(src) < 2:
-            pool.requeue(src)
+    while (src := pool.get_next()) is not None:
+        report(run_one_file(src))       # spawns --one-file, waits, reads rc
 ```
 
-**Requeue goes to the back**, not the front: front would make the next worker
-retry the poisonous file immediately and burn the budget on it.
+No failure bookkeeping at all. A mesh that fails repair is just a result, the
+same as one that succeeds.
+
+**`timeout` is for a future caller with a queue that can grow**, not for this
+one. It defaults to `None` and passing it here means nothing useful: every wait
+in this workload is on another worker finishing a mesh, which always resolves.
+An earlier draft used it as an escape from `admit` blocking forever — that was
+papering over a self-inflicted problem, and it made `get_next` return a file it
+had been told to withhold, leaving the caller unable to tell approval from a
+clock running out.
+
+**The sketch in `design/pool_sketch.py` predates D5 and still has `requeue`,
+`attempts` and a `timeout=5` worker.** It has not been updated — treat this
+section as the current interface and the sketch as the earlier draft.
 
 ---
 
-## D5 — The pool counts, the caller decides
+## D5 — No retry. If it failed, it failed
 
-**Decided.** `requeue` and `attempts` are mechanism. "Retry once then set
-aside", and "a file the watchdog killed is known guilty and must not be
-retried", are judgements about meshes rather than about pools, so they live in
-the worker function.
+**Decided**, replacing an earlier "the pool counts attempts, the caller decides
+retry policy".
+
+**The rerun is the retry.** A file that fails gets its marker, and the operator
+reruns the script with different settings — a lower `MAX_FACES`, a longer
+`TIMEOUT_PART` — which is a deliberate choice about that file rather than the
+pool guessing on its own.
+
+This is consistent with everything else in the script: indicators already
+suppress reprocessing until deleted, and skip reasons name the marker to remove.
+Retry inside the pool was the one place that decided by itself to have another
+go.
+
+### What retry was actually for
+
+Worth recording, because it was never "the mesh might work next time". Its only
+trigger was `BrokenProcessPool`:
+
+> A worker killed by the OOM killer breaks the whole `ProcessPoolExecutor`, not
+> just its own task: every not-yet-completed future — including files still
+> sitting in the queue, unassigned to anyone — fails with `BrokenProcessPool`.
+> **One 7M-triangle mesh therefore cost 40 untouched files in the last run.**
+
+So retry meant "this file never ran at all", not "try the repair again". A mesh
+that genuinely failed repair was never retried; that path has no retry logic.
+
+### Why it does not come back
+
+Two independent reasons, and the policy one is the stronger:
+
+1. **Policy (D5):** failed is failed. This survives changes to the failure
+   modes — if some new spurious failure appears later, the answer is still
+   "rerun it", not "add retry back".
+2. **Mechanism (D3):** with threads there is no future, so a file has only
+   three states — queued, held by a worker, done. "Failed without running" stops
+   being expressible, so the forty-innocent-files problem is not handled better,
+   it cannot occur.
+
+`requeue` and `attempts` were in the first sketch because machinery was ported
+from the old model without asking whether the new one needed it — the same
+error as an earlier detour into pickling constraints that only existed because
+of `ProcessPoolExecutor`.
+
+### What is lost, and what replaces it
+
+`_attempts` distinguished "died once, probably innocent" from "died twice, is
+the culprit", producing the `killed a worker twice (likely out of memory)`
+diagnosis. That distinction goes.
+
+What replaces it is more precise: an OOM-killed `--one-file` child gives its
+thread a negative return code directly, so the file is reported as failed with
+the actual signal, and no sibling is affected.
 
 ---
 
 ## Open, not yet decided
 
-**O1 — `get_next` blocking on `admit`.** Blocking keeps the worker loop trivial,
-but a blocked thread does nothing, and a file too large to ever be admitted
-would block forever. The sketch has two escapes — a timeout, and "if nothing
-else is in flight, run it alone" — both of which are the author's judgement, not
-the user's decision yet. `mesh_is_too_large` already identifies the
-never-fits case.
+**O1 — `get_next` blocking on `admit`.** Narrowed by D4: the timeout is no
+longer an escape from this, so the rule has to stand on its own. `get_next`
+should block only while *another worker* holds the memory the head item needs —
+a condition that always resolves, because that worker finishes. If nothing is in
+flight, the item runs regardless: either it runs alone or it never runs, and
+`mesh_is_too_large` already identifies the never-fits case.
+
+Underneath it is a question not yet answered: **does `admit` belong in the pool
+at all**, or does the pool hand out work and the *worker* decide to wait before
+starting something large? The second keeps the pool dumber but scatters the
+memory model across workers that cannot see each other.
 
 **O2 — does the watchdog survive at all?** With threads, `communicate(timeout=)`
 in the worker *is* the timeout, and that already exists in
