@@ -158,19 +158,127 @@ is reported alongside real damage. Reusing `MIN_LAYER` would have cut the
 
 ---
 
-## 7. Break up `_process_file_impl` — Code Design Guidelines
+## 7. Refactor into single-purpose modules — Code Design Guidelines
 
-The file is 3,779 lines, but **73 of its 75 functions are already small**. One
-function is the problem:
+### The destination
+
+A pipeline that reads as prose, with the details hidden behind well-named
+functions. The user's sketch:
+
+```python
+stlFile = readFileAsStl(...)
+if stlFile.needDecimation():
+    stlFile = decimateFile(stlFile)
+```
+
+Single-purpose modules — `blender_handler`, `pymeshfix_handler`, and so on — so
+that learning how a file is read means opening `readFileAsStl`, and finding
+*that* is not a wall of text either.
+
+### Where the current code already fits that shape
+
+Grouping the 75 existing functions by what they touch:
+
+```text
+runner       16 fns  1455 lines   ← the hard part
+split/merge  13 fns   447 lines
+(other)      18 fns   428 lines
+mesh_io      11 fns   331 lines
+blender       4 fns   163 lines
+logging      10 fns   116 lines
+decimate      2 fns    41 lines
+pymeshfix     1 fn     33 lines
+```
+
+`blender`, `mesh_io`, `split/merge` and `logging` are already cohesive and could
+move almost as-is. Two honest caveats:
+
+- **A handler module per tool is not symmetric.** `pymeshfix` is one function of
+  33 lines; a `pymeshfix_handler` module would be a file with one function in
+  it. Worth grouping it with the other repair passes instead, or leaving it
+  until it grows.
+- **`runner` is 1,455 lines and will not decompose by grouping.** It holds the
+  pool, the child spawn, the alarms, the budgets and the watchdog — the genuine
+  complexity. It needs designing, not sorting.
+
+### Start with the one function, not the module split
 
 ```text
 _process_file_impl   826 lines, nesting depth 8, 91 if-statements, 23 returns
                      — 27% of the module in a single function
 ```
 
-So this is not a general refactor. A module split (`mesh_io.py`, `repair.py`,
-`pipeline.py`) would move code around and leave that function exactly as
-unreadable; it is the least valuable step, not the first.
+That function *is* the pipeline the sketch describes, written out longhand.
+Extracting its steps produces the readable version directly; moving files around
+first would relocate it unchanged. So: functions first, then modules.
+
+### The agreed design (2026-09-13)
+
+Worked out in discussion. A direction, not a specification — deviate where the
+code argues back.
+
+**`Stl` — a plain-data DTO.** Facts and paths: format, triangle count, defect
+counts, bounds, volume. **No geometry.** A 900k-face mesh is ~45 MB of
+triangles, and memory is already the binding constraint (`_BYTES_PER_TRIANGLE`,
+`auto_worker_count`, the OOM killer taking workers); an immutable value carrying
+arrays would double peak memory at every handoff. Vertex arrays are loaded and
+discarded inside each operation, as they are today.
+
+Values are overwritten as newer data arrives. Where a step genuinely needs the
+prior value, the DTO simply holds both — `volume` and `volume_before`, `bounds`
+and `bounds_before`. Three decisions need that: volume loss after repair (the
+Mandy seam recovery), bbox drift, and whether Blender actually ran. No
+append-only history mechanism; the cases are few and known.
+
+Keep it serialisable. Results cross worker→parent as plain dicts over a JSON
+pipe, so either the DTO is plain data by construction or it gains an explicit
+`to_dict()` at the boundary.
+
+**Tool modules** — `blender_handler`, `pymeshfix_handler`, `pymeshlab_handler`.
+One tool each, no policy. This is where the invisible-Blender bug came from:
+four call routes, timing recorded at one of them.
+
+**Operation modules** — `decimator`, `repairer`, `splitter`, `scanner`. Each
+owns its fallback ladder *and* its `isRequired…` predicate, so `Stl` never
+learns `MAX_FACES` or which tool does what. `decimator` owns
+fast_simplification → pymeshlab → blender; `repairer` owns pymeshfix → blender
+plus seam recovery.
+
+- **A predicate must be cheap and side-effect-free.** If it is not, it is a
+  process and gets named as one: `scanner.scan(stl)` returns an `Stl` carrying
+  defect counts, after which `repairer.isRequiredRepair(stl)` is free because it
+  reads facts already held. Two current functions are processes wearing
+  predicate clothing — `_open_loops_are_printable` re-scans, `_will_decimate`
+  recomputes a condition decided elsewhere.
+- **Inject capabilities, not control flow.** Where a module needs a fact it
+  cannot cheaply obtain, pass the processor in (`isRequiredRepair(stl,
+  scan=scanner.scan)`) rather than duplicating the logic or re-scanning. Give
+  the parameters defaults so the common path stays prose. Injected callables
+  answer questions or perform named operations; they never make decisions the
+  module owns.
+
+**Pipeline** — reads as prose, orders the steps, and documents why the order is
+load-bearing. The steps look independent and are not: the split is deferred
+until after decimation, Blender runs before the seam split, the print-scale gate
+precedes the Blender fallback. State those constraints in the module docstrings
+or someone will tidy the sequence and silently regress it.
+
+**Runner — exempt.** 1,455 lines of pool management, child spawning, SIGALRM,
+watchdogs, OOM attribution and pool restart. No `Stl` flows through it and no
+predicate is meaningful (`isRequiredKill(worker)` is nonsense). It is a state
+machine over processes; forcing handler shapes onto it would be worse than
+explicit imperative code with good names.
+
+### Still open in this design
+
+- **Where the shared budget arithmetic lives.** Decimation, repair and Blender
+  draw from one mesh budget, and Blender's share depends on what earlier steps
+  spent (`budget − elapsed − reserve`). That is cross-cutting: if each module
+  owns its own timeout policy the arithmetic has no home, or gets duplicated.
+- **Where the seam-recovery trigger sits.** It fires when PyMeshFix *succeeded
+  but deleted geometry* — a fact about the transition, not about the mesh before
+  or after. It is the decision this shape handles least naturally, and it is not
+  a corner case: it is the Mandy fix.
 
 ### Guidelines (from the user — guidelines, not hard rules; use judgment)
 
