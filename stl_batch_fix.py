@@ -1252,7 +1252,7 @@ SUMMARY_FILE = "/mnt/sda2/STL/Fixed/repair_summary.tsv"
 # new field coming back empty rather than shifting every value one place left.
 _SUMMARY_COLUMNS = ('file', 'status', 'secs', 'tris_in', 'tris_out',
                     'nm_in', 'open_in', 'blender_secs', 'path', 'bbox_drift',
-                    'blender_runs')
+                    'blender_runs', 'reason')
 
 
 def _reset_summary_file():
@@ -2303,6 +2303,14 @@ def process_file(src, is_part=False):
                 'blender_secs': (f"{_blender_cost[1]:.1f}"
                                  if _blender_cost[0] else ''),
                 'blender_runs': _blender_cost[0] or '',
+                # Why this file ended as it did.  The pipeline computes a
+                # precise reason for every skip ('already fixed: ...',
+                # 'previously failed — delete X to retry', and three more) and
+                # for corrupt and too-large files, then dropped it on the floor
+                # because the summary had no column: a 761-file run recorded 757
+                # skips and one skip line in the whole step log.  Not
+                # skip-specific -- any result carrying a reason keeps it.
+                'reason':       (result or {}).get('reason', ''),
                 'path':         '+'.join(stats['path']) or 'none',
                 'bbox_drift':   stats.get('bbox_drift', ''),
             })
