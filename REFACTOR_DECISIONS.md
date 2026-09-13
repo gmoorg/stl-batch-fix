@@ -160,6 +160,74 @@ the callback is neither.
 
 ---
 
+## D7 — The watchdog does not survive
+
+**Decided**, replacing O2.
+
+### What it does today
+
+```text
+every 0.25s, for each worker pid in worker_status:
+    limit = _effective_timeout()            # 3600, or 86400 when TIMEOUT=0
+    skip if limit <= 0, or (pid, started) already fired
+    skip if now - started < limit * grace   # grace=3.0 at the only call site
+    -> fire
+```
+
+The real threshold is **10,800 s**, not 3600, and it measures how long a worker
+has held one file — not how long any operation took. On firing it: records
+`(pid, started)`; logs the kill; **writes `.timeout.stl` from the parent**,
+because the worker is about to be SIGKILLed and will never reach its own
+marker-writing code; SIGKILLs the worker's children via `/proc` so a Blender
+grandchild cannot reparent to init and keep its memory; then SIGKILLs the
+worker.
+
+It exists for one thing: **a worker wedged inside a GIL-holding C++ call.**
+`fast_simplification`, `pymeshfix` and `pymeshlab` all ran in-process, no
+Python-level timer could interrupt them, and pymeshfix is ~80 % of runtime. The
+parent was the only process positioned to act.
+
+### Why nothing is left for it
+
+With threads the whole sequence is local to one thread:
+
+```text
+thread: spawn --one-file child
+        communicate(timeout=budget)
+        -> expires
+        kill grandchildren (/proc walk), kill the child
+        write .timeout.stl          <- it knows the file; it sent it
+        record the result, get_next()
+```
+
+There is no worker *process* to kill, and nothing outside that thread needs to
+observe the timeout. `communicate(timeout=)` is not a partial answer leaving a
+gap for a watchdog to cover — it *is* the mechanism, and the thread is already
+the right place to act because it holds both the `Popen` and the filename.
+
+An earlier draft asked whether a worker thread could wedge *outside* the
+subprocess call, and kept D7 open on that. The question was an artifact of the
+old shape, where the timeout enforcer and the file's owner were different
+processes and the parent had to reach across. Once they are the same thread it
+stops existing. (Third time machinery was carried over from the design being
+replaced, after the pickling detour and `requeue`.)
+
+### What moves rather than disappears
+
+- **Marker writing** stops being special: the killer and the marker-writer are
+  the same thread, so `.timeout.stl` is written on the ordinary path.
+- **`_child_pids` before the kill** stays — a `--one-file` child must still have
+  its Blender grandchild reaped. Process-tree logic, already noted in D3.
+
+### Stale justifications retired with it
+
+The docstring claimed the kill is safe because "the file is retried once, then
+set aside" — D5 removed retry. It also carried the `_status_snapshot`
+workaround and the `Manager()` deadlock commentary, both of which D3 deletes
+along with the proxy.
+
+---
+
 ## D5 — No retry. If it failed, it failed
 
 **Decided**, replacing an earlier "the pool counts attempts, the caller decides
@@ -326,13 +394,6 @@ largest-first means they shed early and the tail runs wide.
 ---
 
 ## Open, not yet decided
-
-**O2 — does the watchdog survive at all?** With threads, `communicate(timeout=)`
-in the worker *is* the timeout, and that already exists in
-`process_file_subprocess`. The separate watchdog uniquely catches a worker
-wedged *outside* the subprocess call, which with threads is a much smaller
-surface. It has never fired in any run, so there is no evidence about what it
-would have caught.
 
 **O3 — status reporting.** `_worker_status` becomes a plain dict, but the TUI
 reads it every 0.25 s from the render loop while workers write. Needs a lock;
