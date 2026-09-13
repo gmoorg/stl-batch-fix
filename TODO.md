@@ -158,6 +158,84 @@ is reported alongside real damage. Reusing `MIN_LAYER` would have cut the
 
 ---
 
+## 7. Break up `_process_file_impl` — Code Design Guidelines
+
+The file is 3,779 lines, but **73 of its 75 functions are already small**. One
+function is the problem:
+
+```text
+_process_file_impl   826 lines, nesting depth 8, 91 if-statements, 23 returns
+                     — 27% of the module in a single function
+```
+
+So this is not a general refactor. A module split (`mesh_io.py`, `repair.py`,
+`pipeline.py`) would move code around and leave that function exactly as
+unreadable; it is the least valuable step, not the first.
+
+### Guidelines (from the user — guidelines, not hard rules; use judgment)
+
+**1. Self-sufficient functions**
+
+- If functionality can be logically separated and has a single purpose,
+  consider extracting it into a function.
+- Function names should clearly describe what the function does.
+- If an `if`, loop, or similar control-flow block contains multiple lines of
+  meaningful logic, consider moving that logic into a function.
+- Avoid splitting code when doing so makes it harder to understand.
+
+**2. Cohesive modules**
+
+- Functions related to the same logical entity or concept are candidates to be
+  grouped into a module.
+- Keep related data and the behavior operating on that data in the same logical
+  place.
+- The goal is encapsulation of knowledge and responsibility, not simply
+  restricting access.
+
+**Guiding principle:** keep related things together, separate distinct
+responsibilities, and make the code's intent clear through structure and naming.
+
+### How these apply here
+
+Depth-8 nesting means control-flow blocks holding substantial logic — squarely
+guideline 1. The step boundaries are already marked by comments
+(`# Step C — decimate…`), which is the code saying where the functions want to
+be. Suggested order, each its own commit with the tests run between:
+
+1. step B / B2 split-and-repair
+2. step C decimation
+3. step E0 seam recovery
+4. step F Blender fallback
+
+Guideline 2 pays off unevenly. `mesh_io` (read / weld / write / bounds) and
+`blender` (script running, budget, route labelling) are genuinely cohesive —
+data and the behaviour on it together. A `pipeline` module would just be the
+826-line function relocated, so it is worth nothing until guideline 1 has done
+its work.
+
+### The caveat matters more than usual here
+
+"Avoid splitting code when doing so makes it harder to understand" is the
+binding constraint in this file: **32% of it is comments and docstrings**
+carrying measured rationale — why step D was removed, the `RLIMIT_AS` history,
+the seam measurements, the decimation cost figures. An extraction that separates
+a 20-line explanation from the 5 lines it explains makes the file shorter and
+the codebase worse.
+
+### Sizing the steps
+
+Keep each extraction small enough that the 36 end-to-end tests are a meaningful
+gate, and run a real mesh through the pool between steps. The tests stayed green
+through an entire day during which the SIGALRM cap was armed in zero processes —
+they catch broken geometry, not broken integration. See the note below.
+
+`_process_file_impl` also carries shared mutable state across its 23 exit points
+(`working`, `nm_src`, `open_src`, `stats`, `temps`, `dst`). Deciding what each
+extracted step reads and writes is the actual work; getting it wrong produces a
+mesh that looks fine and is subtly wrong.
+
+---
+
 ## Note on how the above was verified
 
 Five claims made on 2026-09-12 were wrong in the same way: a mechanism was
