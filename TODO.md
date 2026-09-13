@@ -4,6 +4,14 @@ Things worth investigating, with the evidence that prompted them. Nothing here
 is a known bug — those get fixed. These are questions where the right answer is
 not yet clear.
 
+> **When a change lands in the script, update `STL_BATCH_FIX_DESIGN.md` in the
+> same commit.** That file carries the reasoning — measured parameter values,
+> why the steps run in the order they do, what was tried and failed — and none
+> of it is recoverable from the source. It fell 13 commits behind by 2026-09-13
+> and still documented `TIMEOUT` at 1200 s, a debris rule that had been
+> replaced, and a pipeline order that no longer matched. Stale rationale is
+> worse than none, because it gets trusted.
+
 ---
 
 ## 1. Two runners with different timeout behaviour — partly fixed 2026-09-13

@@ -1,5 +1,16 @@
 # stl_batch_fix.py — Design and Implementation Reference
 
+> **Keep this in sync with the code.** This file carries the *reasoning* —
+> parameter values that took measurement to establish, why the steps run in the
+> order they do, and what was tried and failed. None of that is recoverable from
+> the source. When a change lands in `stl_batch_fix.py` or
+> `stl_batch_fix_tui.py`, update this document in the same commit.
+>
+> It has drifted before: on 2026-09-13 it was 13 code commits behind and still
+> documented `TIMEOUT` at 1200 s as a "per-file limit", a debris rule that had
+> been replaced, and a pipeline order that no longer matched. Stale rationale is
+> worse than none, because it is trusted.
+
 ## Purpose
 
 Non-destructive batch repair of STL files for 3D printing. Goal: every output
@@ -47,14 +58,58 @@ needs repairing all over again.
 | `BLENDER`       | `blender`                  | `BLENDER_BIN` env                | Blender executable name / path           |
 | `RECURSIVE`     | `True`                     | `--recursive` / `--no-recursive` | Walk subdirectories                      |
 | `WORKERS`       | `0`                        | `--workers`                      | Parallel workers; **0 = auto**           |
-| `TIMEOUT`       | `1200`                     | `--timeout`                      | Per-file limit; the repair process is killed |
+| `MIN_LAYER`     | `0.6` mm                   | `--min-layer`                    | Finest layer you print at; open boundaries smaller than this are accepted (0 = require zero) |
+| `TIMEOUT_PART`  | `3600`                     | `--timeout-part`                 | Budget for **one mesh** — an unsplit model, or a single shell part |
+| `TIMEOUT`       | `3600`                     | `--timeout`                      | Whole-file ceiling for a **split** model; `0` = no practical ceiling (24 h) |
+| `BLENDER_RESERVE_PCT` | `30` %               | `--blender-reserve-pct`          | Percent of `TIMEOUT_PART` withheld from Blender for the steps after it |
 | `MAX_FACES`     | `900 000`                  | `--max-faces`                    | Decimate if face count exceeds this      |
 
 `WORKERS = 0` derives the count from RAM and cores via `auto_worker_count()`,
 capped at `AUTO_WORKERS_CAP` (6) and never exceeding the number of files.
 
-`TIMEOUT` applies to the whole per-file repair, not only to Blender. It is
-enforced by the worker against its own child process — see **Parallelism**.
+### Timeouts
+
+Two caps with different jobs. They are **not** a shared pool: a part finishing
+in 1 s donates nothing to the next one.
+
+**`TIMEOUT_PART` is measured.** 3600 s sits above every successful repair
+observed. `Default_SubTool7.stl` (1.3 M tris, nm = 33,353) spent 3,080 s in
+PyMeshFix and finished clean — the previous 600 s would have written a
+`.timeout.stl` for a file that repairs correctly.
+
+**Face count is deliberately not an input.** Decimation caps every mesh reaching
+PyMeshFix at `MAX_FACES`, so size cannot explain a 10× runtime spread between
+two 900 k-face meshes; defect count can. Decimation itself is cheap and linear —
+**4.6 µs per input triangle** (median over 187 events), 1,457 s for the entire
+collection against 3,080 s for that one PyMeshFix pass. Decimation is ~2 % of a
+large file's runtime and should not feature in a budget.
+
+**`TIMEOUT` is a curation rule, not a measurement.** A split model that cannot
+be repaired within an hour is one worth not keeping. Set it to taste. Because
+`TIMEOUT_PART` is 3600, this ceiling binds as soon as a file splits: a 2-part
+file wants 7,200 s and gets the hour.
+
+`_part_cap(n) = min(_effective_timeout(), TIMEOUT_PART × n)`.
+
+**`TIMEOUT = 0` means no practical ceiling** and resolves to `_NO_CEILING`
+(86,400 s) rather than infinity, so a genuine runaway still stops. Always read
+it through `_effective_timeout()` — reading the global directly treats `0` as
+*no time at all* and kills every split file instantly. Three readers had that
+bug when the sentinel was introduced, including the TUI watchdog guard
+`if _fix.TIMEOUT <= 0: return`, which would have silently disabled the only
+backstop against a worker wedged inside C++.
+
+Within one mesh, Blender gets `TIMEOUT_PART − elapsed − reserve` rather than a
+fresh budget, and is skipped entirely below `_BLENDER_MIN_RUN` (30 s). A flat
+budget did not cap: a mesh 450 s into a 600 s budget handed Blender another
+600 s and reached 1,050 s.
+
+**Arming tightens only.** `_arm_mesh_alarm()` replaces a pending alarm only with
+a *shorter* one, and `_cancel_mesh_alarm()` clears it when the file ends. Both
+were bugs: arming used to overwrite unconditionally, so a split *widened* the
+cap it was meant to enforce (`t=0.0s ARM 20s` → `t=3.5s ARM 100s`), and nothing
+cleared it, so in the bare-script path an alarm armed for file N fired during
+file N+1 and marked an innocent file `.timeout.stl`.
 
 Logs are written to the output tree, derived from `INPUT_FOLDER` at run start
 by `retarget_logs()`, so a run on a different folder keeps its diagnostics
@@ -115,7 +170,7 @@ folder preserving relative paths. Existing copies are skipped.
 scan errors  (triangle count from the header, NM and open edge counts)
   ↓
 Step B — split multi-shell  (PyMeshLab connected components)
-          parts written to <output>/~parts/<name>.part.N.stl
+          parts written to <output>/~parts/<mesh>.<MAX_FACES>/~<name>.part.N.stl
           each part is repaired INLINE, in the same worker
           deferred to B2 when the mesh is over the scan limit
   ↓
@@ -125,10 +180,15 @@ Step C — decimate if > MAX_FACES
 Step B2 — the deferred split, now that decimation has brought the mesh
           under the scan limit
   ↓
-Step E0 — split at winding seams  (closed seam loops only)
-          regions repaired separately, merged back as one file
+Step E — repair with PyMeshFix  (runs when nm > 0 OR open > 0 OR a seam exists)
   ↓
-Step E — repair with PyMeshFix  (runs when nm > 0 OR open > 0)
+Step E0 — volume-loss recovery, only when E deleted geometry:
+          run Blender first (its repair makes the seam boundary explicit),
+          then split at closed winding-seam loops, repair each region,
+          merge back
+  ↓
+print-scale gate — open boundaries smaller than MIN_LAYER are accepted
+                   as-is rather than sent to Blender
   ↓
 Step F — Blender fallback  (only if defects remain, or PyMeshFix failed)
   ↓
@@ -149,8 +209,21 @@ E; it is gone. See **Why step D was removed**.
   deferred**.
 - **Decimate per shell**: quadric edge collapse gets the correct face budget for
   each part independently.
-- **Blender last**: launching a subprocess costs more than the Python passes,
-  and most files never need it.
+- **Blender before the seam split, not after**: straight from decimation the
+  Mandy mesh has 5 seam edges in 0 closed loops and cannot be separated; after
+  Blender's repair it has 40 in 7 loops and splits cleanly. Blender rebuilds the
+  surface where the regions meet, turning an ambiguous join into an explicit
+  boundary. Established in `2c524d8` — it, not `MAX_FACES`, is what fixed that
+  model.
+- **Blender is not only the last step.** It also runs inside the E0 recovery
+  route and as a decimation fallback. Assuming otherwise is what made half of
+  all Blender invocations invisible in the log until the timing and counting
+  moved inside `_run_blender_script()`, where every route funnels through.
+- **The print-scale gate sits before step F**: an open boundary smaller than one
+  layer produces no toolpath, so sending it to Blender costs a subprocess and
+  risks making things worse. Measured on `1st-body.stl`: Blender turned 4
+  coincident 0.04 mm open edges into 28 holes of 0.02–0.31 mm, and the file went
+  from 44.96 % to 99.99 % of its volume once the gate accepted them instead.
 
 ---
 
@@ -205,10 +278,19 @@ afterwards. Measured: decimation preserves components (444 shells in, 445 out,
 smallest still 3 vertices), and splitting 900k costs less than splitting the 2M
 original would have.
 
-`split_shells()` drops shells under `max(100, largest // 1000)` faces, so a mesh
+`split_shells()` drops shells under `_MIN_SHELL_FACES` (100) faces, so a mesh
 that is one real body plus hundreds of specks still returns no parts and takes
-the normal path — 443 of `whole-costume01`'s 444 shells are 3-to-100 vertex
-debris, and PyMeshFix discarding those is not a loss.
+the normal path — 443 of `whole-costume01`'s 444 shells are under that floor,
+and PyMeshFix discarding those is not a loss.
+
+The floor is **flat, not a fraction of the largest shell**. The old rule,
+`max(100, largest // 1000)`, scaled with the biggest shell and so discarded more
+as the model grew: on a 2 M-face figure it set the floor at 1,315 faces, and 562
+after decimation — large enough to silently drop a magnet peg or a locating pin,
+which are parts, not debris.
+
+*Known inconsistency:* the 2026-09-12 Falcon split kept parts of 38 and 36 faces
+despite the floor of 100. Not yet traced — see `TODO.md` item 4.
 
 ---
 
@@ -276,13 +358,41 @@ count_after = len(ms)
 # Only range(count_before, count_after) — the rest is the original
 ```
 
-**Debris filter**: shells with fewer than `max(100, largest_shell // 1000)`
-faces are discarded as printing artifacts or zero-thickness surfaces.
+**Debris filter**: shells with fewer than `_MIN_SHELL_FACES` (100) faces are
+discarded as printing artifacts or zero-thickness surfaces.
 
-**Parts** are written to `<output>/~parts/<name>.part.N.stl`, repaired inline by
-the same worker via `process_file(part, is_part=True)`, then merged back by
-`_merge_parts()` and deleted. The `~parts` folder is never walked by the
-collector.
+**Parts** are written to `<output>/~parts/<mesh>.<MAX_FACES>/`, repaired inline
+by the same worker via `_repair_part()`, then merged back by `_merge_parts()`
+and deleted. The `~parts` folder is never walked by the collector, and nesting
+the per-mesh directory inside it means the existing `d != PARTS_DIRNAME` walk
+guard still excludes everything beneath.
+
+**A part's filename is its state.** `split_shells()` writes each shell as
+`~<name>`, and a successful repair renames it to `<name>`. Bare means finished,
+`~` means pending or abandoned, so a rerun repairs only what is still pending.
+Previously the state lived in sibling signal files, which outlived the part they
+described: a stale `.failed.stl` made a part report `skip`, every merge site
+counts `skip` as success, and the merge stitched in unrepaired geometry and
+called it done. Parts therefore also ignore the four signal-file checks, which
+exist for real inputs.
+
+**The directory is keyed by `MAX_FACES`** because part indices are assigned by
+face-count rank *after* decimation, so the same index is a different shell at a
+different decimation target. Directories for this mesh at other settings are
+deleted before a split, which makes a stale part unreachable rather than merely
+detectable. `MAX_FACES` is not the only input to that ranking —
+`_MIN_SHELL_FACES` and which decimator ran also shift face counts — so the `~`
+protocol, not the directory name, is what guarantees correctness.
+
+**Partial merges.** If some parts repair and others do not, what succeeded is
+merged into `<name>.open.stl` (status `open`) and the source is still copied to
+`.failed.stl`. All-or-nothing discarded a great deal: `Millenium_Falcon` splits
+into a 90,712-tri body — nm=0 open=0 after repair, carrying the model's entire
+117 × 36 × 155 mm bbox — plus four specks of 36–160 tris. One 160-tri fin failed
+and the whole file was written off, losing 99.2 % of a repaired model. The
+failed part is left **out** rather than pulled in from its `.original.stl`: a
+non-manifold shell can make a slicer misbehave over the whole object, so a clean
+model missing a small fin beats a complete one that may not slice.
 
 **Anti-recursion**: the whole split block is guarded by `not is_part`, and every
 recursive call passes `is_part=True`, so recursion is depth-1 by construction.
@@ -291,14 +401,35 @@ recursive call passes `is_part=True`, so recursion is depth-1 by construction.
 
 ## Parallelism
 
-`ProcessPoolExecutor` runs `WORKERS` processes, but a pool worker does not do
-the mesh work itself — it spawns `stl_batch_fix.py --one-file <path>` and waits.
+`ProcessPoolExecutor` runs `WORKERS` processes. **There are two runners, and
+they differ in a way that matters.**
+
+| entry point | pool submits | child per file | watchdog | SIGALRM cap |
+|---|---|---|---|---|
+| **TUI** (normal use) | `process_file_subprocess` | `--one-file` | yes | arms |
+| **bare script** | `process_file_safe` | none | no | no-ops |
+
+Under the TUI a pool worker does not do the mesh work itself — it spawns
+`stl_batch_fix.py --one-file <path>` and waits:
 
 ```text
-TUI / batch main loop
+TUI main loop
   └── pool worker  (survives everything)
         └── repair process  ← this is what gets killed on timeout or OOM
 ```
+
+The bare script calls `process_file_safe` directly in the worker, so it has no
+per-file child, no `communicate(timeout=)` kill, and `_arm_mesh_alarm()` no-ops
+there because `_ONE_FILE` is unset. A 3,106 s run that went uncapped was traced
+to this: the run had been launched with the bare script, not the TUI.
+
+This is deliberate for now — arming the bare-script path at `TIMEOUT_PART` would
+have killed `Default_SubTool7.stl`, which repairs correctly at 3,106 s. See
+`TODO.md` item 1.
+
+A bare-script worker is also reused across many files (`max_tasks_per_child` is
+deliberately unset), which is why `_cancel_mesh_alarm()` must run at the end of
+every file.
 
 `_terminate_broken` in CPython fails **every** pending work item when one worker
 dies, unconditionally. So killing a worker on timeout destroyed every file
@@ -379,7 +510,7 @@ mesh, just a large one, and printing it slowly beats not printing it.
 | `<stem>.failed.stl`     | copy of source    | Transient error (crash, or the repair died)    | Delete to retry |
 | `<stem>.timeout.stl`    | copy of source    | Exceeded `TIMEOUT`; written by the parent, since a killed worker never reaches its own cleanup | Delete to retry |
 | `<stem>.unrepaired.stl` | copy of source    | Repair ran, non-manifold edges remain          | Delete to retry |
-| `<stem>.open.stl`       | repaired output   | nm=0 but open edges remain (slicers cope)      | Delete to retry |
+| `<stem>.open.stl`       | repaired output   | nm=0 but open edges remain (slicers cope), **or** a partial split merge — what repaired, with the failed parts left out | Delete to retry |
 | `<stem>.original.stl`   | copy of source    | Kept beside a real output whose repair moved the bounding box | Not a retry marker |
 
 `.original.stl` is deliberately **not** a retry marker — the real output next to
@@ -441,7 +572,7 @@ carrying `verified=False` display as `OK UNVERIFIED`.
 
 ## Tests
 
-`test_pipeline.py` — 34 end-to-end tests, ~0.7 s:
+`test_pipeline.py` — 36 end-to-end tests, ~3.8 s:
 
 ```bash
 .venv/bin/python test_pipeline.py            # all of it
@@ -478,8 +609,9 @@ triggers. For that, run the collection and read the bbox flags.
   (7.0 → 9,167 NM edges; 3.0 → 11,276).
 - **Sub-mm irreducible gaps**: boundary loops under ~0.01 mm that cannot be
   safely merged or filled. Reported as residual open edges; slicers ignore them.
-- **Debris shells** under `max(100, largest // 1000)` faces are silently dropped
-  from split output.
+- **Debris shells** under `_MIN_SHELL_FACES` (100) faces are silently dropped
+  from split output. The floor does not always hold: the 2026-09-12 Falcon split
+  kept parts of 38 and 36 faces. Untraced — `TODO.md` item 4.
 - **`is_ascii_stl` reads only 256 bytes**, so an ASCII STL whose solid name runs
   past ~240 characters is misread as binary. It then fails the header size
   cross-check and is reported corrupt rather than silently mangled.
