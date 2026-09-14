@@ -73,8 +73,8 @@ plus seam recovery.
   module owns. Applied to admission in D5 and to budgets in D10.
 
 **Pipeline** — reads as prose, orders the steps, and documents why the order is
-load-bearing. The steps look independent and are not: the split is deferred
-until after decimation, Blender runs before the seam split, the print-scale gate
+load-bearing. The steps look independent and are not: the split runs after
+decimation (D13), Blender runs before the seam split, the print-scale gate
 precedes the Blender fallback. State those constraints in the module docstrings
 or someone will tidy the sequence and silently regress it.
 
@@ -748,6 +748,50 @@ So "no fallback" must mean **the run refuses to start** without a decimator —
 not that it silently produces undecimated output. PyMeshFix being absent degrades
 a repair but still yields a file; a missing decimator yields a file that will
 fail in the slicer.
+
+### D13 — decimate first, then split: one order, no deferral
+
+**Decided:** the pipeline is `if > MAX_FACES: decimate` then `split`. There is
+no pre-decimation split and no deferral step.
+
+**This is not a behaviour change.** The current code already does it, by a
+route that hides the fact:
+
+```python
+_will_decimate = MAX_FACES > 0 and n_tris > MAX_FACES
+_split_deferred = (... and (n_tris > _LARGE_MESH_TRI_LIMIT or _will_decimate))
+```
+
+Any file that will be decimated defers. So step B only ever runs on files
+already under `MAX_FACES` — files with no decimation to come, where the
+ordering question is vacuous. For every file where the order *means* something,
+the split already happens after decimation.
+
+**Why the order is right, not merely current.** Splitting first gives each part
+its own `MAX_FACES` budget, so N parts can claim N × 900k faces. A figurine
+whose fingernail is a separate shell would decimate that fingernail to the same
+budget as the torso. The merge then exceeds the very limit decimation exists to
+enforce — measured: every merged output in the logs lands just under 900k
+(`Mandy_Clothed_SeamlessHipLegs` exactly *on* it) precisely because the budget
+was spent before anything was divided.
+
+Any fix for that would have to divide the budget proportionally by face count,
+which is what decimate-first already is. The reorder cannot be made to work
+without reimplementing the thing it replaces.
+
+**What changes is structure, not behaviour.** B and B2 are one operation reached
+two ways. Under the single order they collapse into one call site and
+`_split_deferred` disappears. The `n_tris > _LARGE_MESH_TRI_LIMIT` trigger stays
+as a memory guard on the scan, but it no longer needs to move the split.
+
+**Origin.** Raised as "is the pre-decimation split too fancy?", and settled by
+two arguments from the user rather than by measurement: the fingernail case
+above, and that merging independently-decimated parts breaks the face ceiling.
+An A/B run on `Lufy/simpl/Assembly.stl` was started and abandoned — that file is
+several unrelated models merged for testing, so it could not represent the real
+case, which is a single model whose shells belong together. Its one useful
+result: part 0 repaired correctly at 200,546 faces, visually confirmed, which
+is evidence *for* decimate-then-split producing sound geometry.
 
 ---
 

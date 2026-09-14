@@ -25,11 +25,9 @@ Geometry is preserved as closely as possible — flat surfaces stay flat, detail
 ```text
 scan errors  (nm + open edge counts)
   ↓
-split multi-shell → <name>.part.N.stl  (each part continues below)
-  ↓   …but deferred past decimation whenever decimation will run
 decimate if > MAX_FACES  (fast_simplification, PyMeshLab, or Blender)
   ↓
-split multi-shell, retried now that the mesh is small enough
+split multi-shell → <name>.part.N.stl  (each part continues below)
   ↓
 PyMeshFix  (repairs non-manifold AND open edges in one pass)
   ↓
@@ -41,14 +39,19 @@ print-scale gate — open boundaries under MIN_LAYER are accepted as-is
 Blender fallback  (only if nm edges, or over-MIN_LAYER open edges, remain)
 ```
 
-**Split ordering is a trade-off, not a rule.** Splitting first lets PyMeshFix
-work per-shell, which matters because `MAX_FACES` is a *per-file* budget — a
-240-face speck would otherwise survive untouched while a 1.3 M-face body
-absorbed the whole reduction. But the shell scan needs the mesh in memory, so
-above `_LARGE_MESH_TRI_LIMIT` (2 M triangles) the split is deferred until after
-decimation.
+**Decimation always comes first.** `MAX_FACES` is a *per-file* budget, and
+decimating the whole mesh before splitting is what keeps it one: the parts are
+slices of an already-reduced mesh, so reassembling them lands under the limit.
+Every merged output in the logs comes in just under 900k for that reason.
 
-That deferral has a cost. Decimating before the split can fuse surfaces that
+Splitting first would hand each part its own `MAX_FACES` budget, so N parts
+could claim N × 900k — a figurine whose fingernail is a separate shell would
+decimate that fingernail to the same budget as the torso, and the merge would
+break the ceiling decimation exists to enforce. The per-file budget does mean a
+small shell keeps its proportion of the reduction rather than being spared it,
+which is the intended behaviour for a single model whose shells belong together.
+
+This order has a cost. Decimating before the split can fuse surfaces that
 were separate components, and PyMeshFix then has to reconstruct one watertight
 boundary from both and discards one. A 2.06 M-triangle figure — 3 % over the
 limit — lost 15 % of its volume and its head that way. The volume check above

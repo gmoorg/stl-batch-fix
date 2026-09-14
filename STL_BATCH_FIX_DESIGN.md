@@ -183,18 +183,14 @@ folder preserving relative paths. Existing copies are skipped.
 ```text
 scan errors  (triangle count from the header, NM and open edge counts)
   ↓
-Step B — split multi-shell  (PyMeshLab connected components)
-          parts written to <output>/~parts/<mesh>.<MAX_FACES>/~<name>.part.N.stl
-          each part is repaired INLINE, in the same worker
-          deferred to B2 when the mesh is over the scan limit
-  ↓
 Step C — decimate if > MAX_FACES
           fast_simplification → pymeshlab → blender, first that works
           (the two fallback rungs have never executed in any run —
            D12 in REFACTOR_DECISIONS.md proposes dropping them)
   ↓
-Step B2 — the deferred split, now that decimation has brought the mesh
-          under the scan limit
+Step B — split multi-shell  (PyMeshLab connected components)
+          parts written to <output>/~parts/<mesh>.<MAX_FACES>/~<name>.part.N.stl
+          each part is repaired INLINE, in the same worker
   ↓
 Step E — repair with PyMeshFix  (runs when nm > 0 OR open > 0 OR a seam exists)
   ↓
@@ -221,12 +217,20 @@ E; it is gone. See **Why step D was removed**.
 - **Split before repair**: PyMeshFix rebuilds one manifold surface and discards
   every other component, so a multi-shell mesh reaching it unsplit comes back as
   its largest shell alone.
-- **Split deferred, never skipped**: a mesh over `_LARGE_MESH_TRI_LIMIT` cannot
-  be scanned or split at full size, but after decimation it can. Skipping the
-  split outright is what deleted a model's head — see **Why the split is
-  deferred**.
-- **Decimate per shell**: quadric edge collapse gets the correct face budget for
-  each part independently.
+- **Decimate before splitting, always**: the whole mesh is brought under
+  `MAX_FACES` first, and the parts are slices of an already-decimated mesh. The
+  face budget is therefore spent once, before anything is divided, and the merge
+  lands under the limit — measured: every merged output in the logs comes in just
+  under 900k, `Mandy_Clothed_SeamlessHipLegs` exactly on it.
+  Splitting first would give each part its own `MAX_FACES` budget, so N parts
+  could claim N × 900k: a figurine whose fingernail is a separate shell would
+  decimate that fingernail to the same budget as the torso, and the merge would
+  break the ceiling decimation exists to enforce. See D13 in
+  `REFACTOR_DECISIONS.md`.
+- **Never skipped, only ordered**: a mesh over `_LARGE_MESH_TRI_LIMIT` cannot be
+  scanned or split at full size, but after decimation it can. Skipping the split
+  outright is what deleted a model's head — see **Why the split comes after
+  decimation**.
 - **Blender before the seam split, not after**: straight from decimation the
   Mandy mesh has 5 seam edges in 0 closed loops and cannot be separated; after
   Blender's repair it has 40 in 7 loops and splits cleanly. Blender rebuilds the
@@ -279,7 +283,7 @@ Also ruled out while investigating:
 
 ---
 
-## Why the split is deferred
+## Why the split comes after decimation
 
 `_LARGE_MESH_TRI_LIMIT` (2,000,000) is the point above which the in-process
 Python work — edge scan, PyMeshLab split, decimation — costs too much memory to
@@ -291,10 +295,16 @@ one shell of 394,432 faces with the head — a 121,537-face component — delete
 reported `ok`.
 
 The information was not unavailable, only early: after decimation the mesh is
-900k, well under the limit. Step B now defers, and step B2 runs the same split
-afterwards. Measured: decimation preserves components (444 shells in, 445 out,
+900k, well under the limit. So the split simply runs after decimation, for every
+file. Measured: decimation preserves components (444 shells in, 445 out,
 smallest still 3 vertices), and splitting 900k costs less than splitting the 2M
 original would have.
+
+*Implementation note:* the source reaches that order by a detour — step B tests
+`_split_deferred` and skips itself, and step B2 runs the split later. B and B2
+are the same operation reached two ways, an artifact of the order having been
+changed rather than designed. D13 collapses them into one call site; the
+behaviour is already what the single order describes.
 
 `split_shells()` drops shells under `_MIN_SHELL_FACES` (100) faces, so a mesh
 that is one real body plus hundreds of specks still returns no parts and takes
