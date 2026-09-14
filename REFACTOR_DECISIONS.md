@@ -430,6 +430,60 @@ was accurate.
 
 ---
 
+#### Open proposal — the preparation stage could detect and correct authoring scale
+
+**Not decided. Raised 2026-09-14, recorded before it is lost.**
+
+The Princess Leia set is authored in some unit that is not millimetres: its
+parts measure 1.7–19.4 mm, a head is 2.5 × 3.2 × 2.6 mm, and `Sizer.stl` — a
+part whose whole purpose is to be printed as a size test — is 19.4 mm. Nobody
+intended a 2.5 mm head.
+
+Earlier in the same conversation auto-scaling was dismissed, correctly, on the
+grounds that the script cannot know an assembly's combined geometry: it sees
+`Hand_L.stl` and `Lower_Body.stl` as unrelated files and has no idea what the
+finished figure should measure. **The preparation stage dissolves that
+objection** — it already reads every header in the folder to fill the queue, so
+it sees the set, not the file. A folder whose every member is a few millimetres
+is evidence in a way that any single file is not.
+
+**Why this is worth more than a standalone rescaling script.** Scaling *after*
+repair cannot undo what repair already did — Leia's fused hip seam is baked in,
+because decimation ran at authoring scale. Scaling *before* repair means
+`MIN_LAYER`, `MERGE_DIST` and `_VOLUME_MIN_MEANINGFUL` finally mean what they
+were set to mean. That is most of the constants-at-scale problem solved as a
+side effect, without changing a single constant.
+
+**Open questions, none of them answered yet:**
+
+1. **What triggers it?** Probably not a threshold on size. The real tell is not
+   that Leia's parts are 2.5 mm but that they are 2.5 mm carrying ~800,000
+   triangles per millimetre — a combination nobody authors deliberately.
+   `tris_per_mm` is now logged and may be the better signal than dimensions.
+   A legitimately tiny, legitimately simple part must not trip it.
+2. **What factor, and derived how?** A fixed 25.4 does not survive inspection:
+   it puts Leia's head at 64 × 81 × 66 mm and a hand at 94 × 76 mm — a hand
+   larger than the head — and `Sizer.stl` at 493 × 521 × 267 mm, past any
+   Bambu plate. 12.7 (half-inch) gives a 32 × 41 × 33 mm head, right for a
+   1/6-scale figure. Deriving the factor from the largest part reaching a
+   plausible figure height is more defensible than either constant, but
+   "plausible" needs defining.
+3. **One factor per folder, necessarily.** All 19 Leia parts share a coordinate
+   system; a per-file factor would break the assembly. So the decision is the
+   folder's, not the file's — which is exactly why it belongs in the
+   preparation stage and nowhere else.
+4. **How is it made visible and reversible?** A silent 12.7x on a folder that
+   was meant to be small is worse than today's behaviour. Scaled copies want
+   their own folder, plus a log line stating the factor and what triggered it.
+   This interacts with D7's `stl-exported/` convention.
+5. **Does it belong in the same folder as the format conversion?** D7 already
+   writes normalised binary STL to `stl-exported/`. Scaled output is the same
+   kind of artifact — a derived source — and probably shares that mechanism.
+
+**Not in scope:** knowing the correct real-world size of a model. The pipeline
+can detect *"these numbers are not millimetres"* far more safely than it can
+guess *"this should be 180 mm tall"*, and only the first is needed.
+
 ### D8 — The watchdog does not survive
 
 **Decided.**
