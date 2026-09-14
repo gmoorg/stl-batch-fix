@@ -287,6 +287,57 @@ still looks plausible where a missing file does not.
 
 ---
 
+## D9 — The budget arithmetic stays in `--one-file`
+
+**Decided**, replacing O5. Same logic as now, unchanged.
+
+### It was never cross-cutting
+
+O5 claimed the arithmetic had no home because decimation, repair and Blender all
+draw on one mesh budget and Blender's share depends on what earlier steps spent.
+Traced against the code, every budget computation **already runs inside the
+child process**:
+
+| site | function | process |
+|---|---|---|
+| 2633, 2867, 2989 | `_process_file_impl` → `_part_cap` + `_arm_mesh_alarm` | child |
+| 2101, 2158, 2172 | `_run_blender_script` / `fix_stl` / `blender_decimate` → `_blender_budget` | child |
+| 3726 | `--one-file` entry → `_arm_mesh_alarm(TIMEOUT_PART or _effective_timeout())` | child |
+
+So the arithmetic is not scattered across modules needing a shared owner. It is
+one process tracking its own elapsed time, which is exactly what "decimation,
+repair and Blender share one budget" means in practice. `elapsed` is the child's
+own clock.
+
+Fifth time in this discussion a difficulty came from importing the old design's
+framing rather than from the new design — after the pickling detour, `requeue`,
+the watchdog gap, and volume-as-a-transition-fact.
+
+### The one parent-side budget decision
+
+`stl_batch_fix.py:3436`, in `process_file_subprocess`:
+
+```python
+_budget = int(budget) if budget else _effective_timeout()
+```
+
+That is the parent deciding **how long to wait for a child before killing it**.
+Under D3 and D7 it becomes the worker thread's `communicate(timeout=)`.
+
+The split is clean rather than complicated:
+
+- the **parent** owns *when to give up on a child*
+- the **child** owns *how to spend its own time*
+
+### What it means for the operation modules
+
+`decimator`, `repairer` and `blender_handler` do not each own a timeout policy.
+They receive the remaining time, or ask the child's clock for it — so the
+injected-capability pattern from D4b covers this too, and no budget owner is
+needed.
+
+---
+
 ## D5 — No retry. If it failed, it failed
 
 **Decided**, replacing an earlier "the pool counts attempts, the caller decides
@@ -470,11 +521,6 @@ narrow for the rest of the run unless the pool can spawn a replacement. Sorting
 by monotonically increasing cost makes shedding always final and the question
 disappears — which is an argument for a specific ordering rather than a free
 choice.
-
-**O5 — where does the shared budget arithmetic live?** Carried over from
-`TODO.md` item 1. Decimation, repair and Blender draw on one mesh budget and
-Blender's share depends on what earlier steps spent. Cross-cutting: if each
-module owns its own timeout policy the arithmetic has no home.
 
 ---
 
