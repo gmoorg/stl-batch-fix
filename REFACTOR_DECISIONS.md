@@ -981,17 +981,38 @@ bounding box cannot.
 The recursion stays: each part gets the full pipeline, and depth is capped by
 construction because the whole block is guarded by `not is_part`.
 
-#### 6. Repair — PyMeshFix
+#### 6. Repair — PyMeshFix — **[NEW: the availability branch is dead]**
 
 ```text
 needs_repair = nm > 0 or open > 0 or seam_loops > 0
 
-if not pymeshfix available:   skip "unavailable"
-elif not needs_repair:        skip "nothing-to-repair"
+if not needs_repair:          skip "nothing-to-repair"
 else:
         fill_holes -> remove_smallest_components -> clean
         working = <repaired temp>;  nm, open = new counts
 ```
+
+`require_mesh_libraries()` exits at startup when PyMeshFix or PyMeshLab is
+missing, so every `_PYMESHFIX_AVAILABLE` / `_PYMESHLAB_AVAILABLE` test inside
+the pipeline is now testing a condition that cannot be false. The run confirms
+it: **23 `pymeshfix skip` rows, all `nothing-to-repair`, zero `unavailable`.**
+
+Ten sites, and they do not all go:
+
+```text
+957, 959    inside require_mesh_libraries() itself        KEEP — the check
+872         split_shells' own early return                KEEP — library boundary
+2932, 2941  split guards (also part of the B/B2 collapse) dead
+3117        the pymeshlab decimation rung (see D12)       dead
+3269        step E "skip: pymeshfix unavailable"          dead
+3366        step E's own guard                            dead
+3625        post-Blender PyMeshFix guard                  dead
+3656        "pymeshfix unavailable" reason string         dead
+```
+
+The distinction worth keeping: a module-level guard inside `split_shells` is a
+library boundary and stays honest on its own terms; a guard in the *pipeline*
+is now dead weight that implies a fallback path which no longer exists.
 
 #### 7. Seam recovery (E0)
 
