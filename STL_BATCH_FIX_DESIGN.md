@@ -190,6 +190,8 @@ Step B — split multi-shell  (PyMeshLab connected components)
   ↓
 Step C — decimate if > MAX_FACES
           fast_simplification → pymeshlab → blender, first that works
+          (the two fallback rungs have never executed in any run —
+           D12 in REFACTOR_DECISIONS.md proposes dropping them)
   ↓
 Step B2 — the deferred split, now that decimation has brought the mesh
           under the scan limit
@@ -200,6 +202,8 @@ Step E0 — volume-loss recovery, only when E deleted geometry:
           run Blender first (its repair makes the seam boundary explicit),
           then split at closed winding-seam loops, repair each region,
           merge back
+          NOTE: a pre-emptive seam split before step E also exists in the
+          source but is disabled (`if False and …`) — see Winding seams
   ↓
 print-scale gate — open boundaries smaller than MIN_LAYER are accepted
                    as-is rather than sent to Blender
@@ -325,8 +329,28 @@ merged    561,368 faces  nm=0 open=0 seams=0   volume 13,730
 **Nothing else in the pipeline can see this.** The deleted region sits inside
 the model's own bounding box, so the bbox check stays quiet, and
 `scan_mesh_errors` counts non-manifold and open edges only — the file reports
-`nm=0 open=0` and takes the clean-copy shortcut past every repair stage. That
-is why the seam check runs *before* that shortcut rather than inside step E.
+`nm=0 open=0` and takes the clean-copy shortcut past every repair stage.
+
+### The pre-emptive seam split is disabled — read this before re-enabling it
+
+There was once a step E0 that split at closed seam loops *before* step E. It is
+still in the source, behind `if False and _seam_loops > 0 …`, kept for the
+measurements in its comments. **It never runs.**
+
+Seam loops alone do not justify splitting. On a sphere with its cap reversed —
+40 seam edges in 1 closed loop — PyMeshFix re-winds it correctly and returns the
+same 760 faces, where splitting first gives 880 faces and introduces 2
+non-manifold edges. The Mandy mesh that *needed* the split had **exactly 40 seam
+edges too**. Nothing measurable before step E distinguishes "PyMeshFix will fix
+this" from "PyMeshFix will delete this".
+
+So the decision moved to *after* step E, where the damage is a measured fact
+rather than a guess: the volume check compares enclosed volume before and after,
+and only then calls `_repair_by_seam_split()`. That is the live path, and it is
+what the pipeline diagram calls step E0 — recovery, not a pre-pass.
+
+Re-enabling the old branch would split meshes PyMeshFix would have repaired
+correctly, at a cost of extra faces and new non-manifold edges.
 
 The two regions meet along **seam edges**, where both faces traverse the shared
 edge the same way instead of in opposite directions. Only **closed loops** of
