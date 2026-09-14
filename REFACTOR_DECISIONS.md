@@ -1030,6 +1030,31 @@ the bbox unchanged, because the head sat inside the silhouette. Measured
 (27–34% retained), twelve retained 85–94%, and the threshold cannot simply be
 tightened because Mandy itself sits at 85%.
 
+**[NEW] Both volume constants should be configurable.** Several constants lack
+a CLI flag (`_BBOX_TOLERANCE_FLOOR`, `REVIEW_RATIO`, `LOG_KEEP`,
+`_BLENDER_MIN_RUN`), so that alone is not the argument. What distinguishes
+these two is that **the run data actively disputes their values**:
+
+```text
+_VOLUME_LOSS_LIMIT     = 0.95   20 triggers: ~6 real destruction (27-34%
+                                retained), 12 ordinary repair drift (85-94%),
+                                and Mandy — the case the route exists for — at
+                                85%, in the middle of the noise.
+_VOLUME_MIN_MEANINGFUL = 50.0   silently disables the check entirely on Leia's
+                                small parts (Neck_Cuff 12mm3, Head_Without
+                                21mm3), which are the meshes least able to
+                                survive an undetected deletion.
+```
+
+No fixed value for 0.95 both catches Mandy and excludes a dozen legitimate
+repairs — the populations overlap. That makes it a parameter to sweep across a
+rerun, not a number to pick better: the point of a flag here is finding out
+whether a good value exists at all, which cannot be settled by argument.
+
+`MERGE_DIST`, `MIN_LAYER`, `MAX_FACES`, `TIMEOUT`, `TIMEOUT_PART`,
+`BBOX_TOLERANCE_PCT`, `BLENDER_RESERVE_PCT` and `WORKERS` all already have
+flags, so the mechanism exists and this is two `add_argument` lines.
+
 #### 8. Post-verify
 
 ```text
