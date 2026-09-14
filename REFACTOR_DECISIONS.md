@@ -948,6 +948,59 @@ against it are **post-decimation** counts. Those 134 non-manifold edges may be
 decimation artifacts rather than source defects, and nothing in the current
 pipeline can tell the difference.
 
+### `MAX_FACES = 900_000` is a slicer constraint, not a memory ceiling
+
+Recorded because the source does not say so and the wrong reading is easy to
+reach: Bambu Studio warns that a model is too complex above roughly this
+triangle count, **regardless of the model's physical size**. That is the entire
+reason for the number.
+
+Two consequences follow, and both kill an otherwise attractive idea:
+
+- **A resolution-derived target does not work.** Deriving the decimation target
+  from `min_feature` vs `MIN_LAYER` — decimate only until features reach
+  printable size — was proposed and rejected. The user scales models to
+  printable size *after* repair, so any target computed at authoring scale is
+  wrong by the scale factor. The constraint is on triangle count as such, which
+  scaling does not change.
+- **The fused seam is therefore a trade-off, not a bug.** Reaching 900 k from
+  5.1 M means something must go, and QEC gives up creases first because a crease
+  between two touching surfaces barely affects the silhouette. The only lever
+  that does not require knowing the final scale is weighting creases more
+  heavily *within the same budget* — a decimator quality setting, not a
+  different target. Whether `fast_simplification` exposes such a weighting is
+  unknown and worth checking before assuming it.
+
+### Proposed — log what each absolute constant meant on this mesh
+
+Not a change to any constant. The values are right; what is missing is any
+record of what they implied for a given model, which is what made the Leia
+distortion take a full trace to diagnose.
+
+Each step that consults an absolute constant should record its relative value:
+
+```text
+printscale     applied at 14.6% of model extent  (MIN_LAYER 0.6mm, diag 4.1mm)
+merge_dist     0.24% of diagonal
+volume check   SKIPPED — 12mm³ below the 50mm³ floor
+```
+
+The third line matters most. A guard that silently does not run is the same
+failure mode as every logging gap found on 2026-09-13/14: *never ran* and
+*ran and found nothing* must not look identical afterwards.
+
+### Proposed — derive `_BBOX_TOLERANCE_FLOOR` from the percentage
+
+The one item here that is straightforwardly a bug rather than a design tension.
+`_BBOX_TOLERANCE_FLOOR = 0.1` exists to stop `BBOX_TOLERANCE_PCT = 0.7%`
+flagging sub-micron noise on small models, but on a 4.1 mm part it *is* 2.43% —
+three times looser than the percentage it is meant to floor. It should be
+derived from that percentage rather than competing with it.
+
+**Explicitly not proposed:** making `MIN_LAYER` or `MERGE_DIST` relative. They
+are physical properties of the printer; a 4 mm part and a 200 mm part are
+printed by the same machine. The defect is the missing record, not the values.
+
 ### The instrument has known holes
 
 Stated so the tables above are not over-trusted:

@@ -62,7 +62,7 @@ needs repairing all over again.
 | `TIMEOUT_PART`  | `3600`                     | `--timeout-part`                 | Budget for **one mesh** — an unsplit model, or a single shell part |
 | `TIMEOUT`       | `3600`                     | `--timeout`                      | Whole-file ceiling for a **split** model; `0` = no practical ceiling (24 h) |
 | `BLENDER_RESERVE_PCT` | `30` %               | `--blender-reserve-pct`          | Percent of `TIMEOUT_PART` withheld from Blender for the steps after it |
-| `MAX_FACES`     | `900 000`                  | `--max-faces`                    | Decimate if face count exceeds this      |
+| `MAX_FACES`     | `900 000`                  | `--max-faces`                    | Decimate above this — Bambu's complexity warning, not a memory limit |
 
 `WORKERS = 0` derives the count from RAM and cores via `auto_worker_count()`,
 capped at `AUTO_WORKERS_CAP` (6) and never exceeding the number of files.
