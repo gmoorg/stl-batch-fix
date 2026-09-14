@@ -5,9 +5,12 @@ designed. Written because the reasoning is expensive to reconstruct and easy to
 lose — the design doc went 13 commits stale in a day, and `TODO.md` went four
 items behind.
 
-`TODO.md` item 1 holds the *target* (the `Stl` DTO, tool modules, operation
-modules, the guidelines). This file holds the decisions made since, and the
-arguments that produced them.
+**This file holds what was decided and why.** `TODO.md` holds what is left to do
+and how to go about it — the guidelines, how small to make each step, what the
+tests do not catch.
+
+Decisions are grouped by topic. Numbers are global and stable across topics, so
+a commit message citing D7 keeps meaning D7 when a new topic is added.
 
 Status: **design only. No code has moved.**
 
@@ -20,7 +23,71 @@ Status: **design only. No code has moved.**
 
 ---
 
-## D1 — The runner is not exempt
+## Target — the module design
+
+Worked out in discussion before the numbered decisions began; they refine it.
+A direction, not a specification — deviate where the code argues back.
+
+**`Stl` — a plain-data DTO.** Facts and paths: format, triangle count, defect
+counts, bounds, volume. **No geometry.** A 900k-face mesh is ~45 MB of
+triangles, and memory is already the binding constraint (`_BYTES_PER_TRIANGLE`,
+`auto_worker_count`, the OOM killer taking workers); an immutable value carrying
+arrays would double peak memory at every handoff. Vertex arrays are loaded and
+discarded inside each operation, as they are today.
+
+Values are overwritten as newer data arrives. Where a step genuinely needs the
+prior value, the DTO simply holds both — `volume` and `volume_before`, `bounds`
+and `bounds_before`. Three decisions need that: volume loss after repair (the
+Mandy seam recovery), bbox drift, and whether Blender actually ran. No
+append-only history mechanism; the cases are few and known. See D9.
+
+Keep it serialisable. Results cross worker→parent as plain dicts over a JSON
+pipe, so either the DTO is plain data by construction or it gains an explicit
+`to_dict()` at the boundary.
+
+**Tool modules** — `blender_handler`, `pymeshfix_handler`, `pymeshlab_handler`.
+One tool each, no policy. This is where the invisible-Blender bug came from:
+four call routes, timing recorded at one of them.
+
+**Operation modules** — `decimator`, `repairer`, `splitter`, `scanner`. Each
+owns its fallback ladder *and* its `isRequired…` predicate, so `Stl` never
+learns `MAX_FACES` or which tool does what. `decimator` owns
+fast_simplification → pymeshlab → blender; `repairer` owns pymeshfix → blender
+plus seam recovery.
+
+- **A predicate must be cheap and side-effect-free.** If it is not, it is a
+  process and gets named as one: `scanner.scan(stl)` returns an `Stl` carrying
+  defect counts, after which `repairer.isRequiredRepair(stl)` is free because it
+  reads facts already held. Two current functions are processes wearing
+  predicate clothing — `_open_loops_are_printable` re-scans, `_will_decimate`
+  recomputes a condition decided elsewhere.
+- **Inject capabilities, not control flow.** Where a module needs a fact it
+  cannot cheaply obtain, pass the processor in (`isRequiredRepair(stl,
+  scan=scanner.scan)`) rather than duplicating the logic or re-scanning. Give
+  the parameters defaults so the common path stays prose. Injected callables
+  answer questions or perform named operations; they never make decisions the
+  module owns. Applied to admission in D5 and to budgets in D10.
+
+**Pipeline** — reads as prose, orders the steps, and documents why the order is
+load-bearing. The steps look independent and are not: the split is deferred
+until after decimation, Blender runs before the seam split, the print-scale gate
+precedes the Blender fallback. State those constraints in the module docstrings
+or someone will tidy the sequence and silently regress it.
+
+**The runner.** An earlier version of this section said the runner was *exempt*
+— 1,455 lines of pool management that should stay explicit imperative code.
+**That was wrong; see D1.** It is not one hard thing, it is the same concern
+implemented twice in two files and already drifted apart, and D2–D11 specify
+what replaces it.
+
+---
+
+## Worker pool
+
+Eleven decisions, no open questions. `design/pool_sketch.py` is a runnable
+sketch of D4, predating D6.
+
+### D1 — The runner is not exempt
 
 **Superseded:** an earlier claim that the pool should be left as explicit
 imperative code.
@@ -43,7 +110,7 @@ is duplicated rather than merely long.
 
 ---
 
-## D2 — Worker-pull, not parent-push
+### D2 — Worker-pull, not parent-push
 
 **Decided.** The pool owns a queue; each worker loops `get_next()` → do it →
 `get_next()` until drained.
@@ -64,7 +131,7 @@ back on the queue.)
 
 ---
 
-## D3 — Threads, not a process pool
+### D3 — Threads, not a process pool
 
 **Decided**, and this is the one that deletes the most.
 
@@ -91,7 +158,7 @@ not apply to this design. Measured, for the record: a lambda cannot be pickled,
 a closure cannot, a bound method can. None of it is relevant once the pool is
 threads.
 
-### Survives unchanged
+#### Survives unchanged
 
 - **`_child_pids_of`** — killing a `--one-file` child must still walk `/proc`
   for Blender one level deeper. That is the process tree, not the pool.
@@ -101,7 +168,7 @@ threads.
 
 ---
 
-## D4 — The Pool interface
+### D4 — The Pool interface
 
 **Sketched, runnable**: `design/pool_sketch.py` — 130 lines;
 `python design/pool_sketch.py` runs a demo with three workers, eight files and
@@ -141,7 +208,7 @@ and the sketch as the earlier draft.
 
 ---
 
-## D5 — Admission is a condition variable and a caller-supplied callback
+### D5 — Admission is a condition variable and a caller-supplied callback
 
 **Decided**, replacing an open question that turned out not to be one.
 
@@ -167,7 +234,7 @@ the callback is neither.
 
 ---
 
-## D6 — No retry. If it failed, it failed
+### D6 — No retry. If it failed, it failed
 
 **Decided**, replacing an earlier "the pool counts attempts, the caller decides
 retry policy".
@@ -182,7 +249,7 @@ suppress reprocessing until deleted, and skip reasons name the marker to remove.
 Retry inside the pool was the one place that decided by itself to have another
 go.
 
-### What retry was actually for
+#### What retry was actually for
 
 Worth recording, because it was never "the mesh might work next time". Its only
 trigger was `BrokenProcessPool`:
@@ -195,7 +262,7 @@ trigger was `BrokenProcessPool`:
 So retry meant "this file never ran at all", not "try the repair again". A mesh
 that genuinely failed repair was never retried; that path has no retry logic.
 
-### Why it does not come back
+#### Why it does not come back
 
 Two independent reasons, and the policy one is the stronger:
 
@@ -212,7 +279,7 @@ from the old model without asking whether the new one needed it — the same
 error as an earlier detour into pickling constraints that only existed because
 of `ProcessPoolExecutor`.
 
-### What is lost, and what replaces it
+#### What is lost, and what replaces it
 
 `_attempts` distinguished "died once, probably innocent" from "died twice, is
 the culprit", producing the `killed a worker twice (likely out of memory)`
@@ -224,11 +291,11 @@ the actual signal, and no sibling is affected.
 
 ---
 
-## D7 — A preparation stage that normalises everything to binary STL
+### D7 — A preparation stage that normalises everything to binary STL
 
 **Decided.** A first pool fills the queue for the main one.
 
-### Why it exists
+#### Why it exists
 
 The main pool cannot order work it has not measured, and today it cannot
 measure two of the three formats:
@@ -250,7 +317,7 @@ ordering (`filesize // 60`), while ASCII STL returns 0 and sorts **first**, as
 the cheapest thing in the queue. An ASCII STL is roughly 6-8x larger on disk
 than its binary equivalent.
 
-### The rule
+#### The rule
 
 Exactly the skip logic the main pipeline already uses — existence is the cache,
 deleting the file is the invalidation:
@@ -270,7 +337,7 @@ replaced under the same name, but that does not happen in this workflow —
 sources arrive and stay put. Existence alone decides, exactly as it does for the
 repaired output; deleting the export is the way to force a re-export.
 
-### Why writing to the source tree is acceptable here
+#### Why writing to the source tree is acceptable here
 
 The "source is never modified" rule came from a specific worry: *our repair
 output* polluting the source folder, where a buggy script leaves files that are
@@ -282,7 +349,7 @@ the source mesh in a different encoding. A dedicated `stl-exported/` folder is
 one directory to delete, obviously not originals, and the export is a standard
 Blender operation, not something implemented here.
 
-### The collector exclusion is not optional
+#### The collector exclusion is not optional
 
 Without it the next run collects the exports as inputs, and every OBJ is
 processed twice — once as OBJ, once as its export — producing two outputs under
@@ -290,7 +357,7 @@ different names for the same model. The same failure the `~parts` and
 `__MACOSX` exclusions exist for, and easy to miss because it only appears on the
 **second** run.
 
-### What it simplifies downstream
+#### What it simplifies downstream
 
 Stage two stops having an `is_obj` / `is_ascii` branch. Today those files set
 `blender_src = src` and bypass the Python pipeline entirely — no pre-scan, so no
@@ -301,7 +368,7 @@ and get the full pipeline.
 The conversion is not extra work: Blender already does it in step F today.
 Preparation moves it earlier and keeps the result.
 
-### Ordering
+#### Ordering
 
 Once every file is binary STL with a real count, the queue is sorted by **face
 count**, which is free from the header.
@@ -320,7 +387,7 @@ branch to a differently-scaling decimator. (The pymeshlab and blender rungs of
 the ladder have therefore never executed. They are not proven dead — rung one
 simply never failed — but nothing is known about how they scale.)
 
-### Worker shedding
+#### Worker shedding
 
 `get_next` returns `None` for worker N when there is no longer room for it, and
 that worker exits and frees its resources — rather than blocking and holding a
@@ -344,11 +411,11 @@ was accurate.
 
 ---
 
-## D8 — The watchdog does not survive
+### D8 — The watchdog does not survive
 
 **Decided.**
 
-### What it does today
+#### What it does today
 
 ```text
 every 0.25s, for each worker pid in worker_status:
@@ -371,7 +438,7 @@ It exists for one thing: **a worker wedged inside a GIL-holding C++ call.**
 Python-level timer could interrupt them, and pymeshfix is ~80 % of runtime. The
 parent was the only process positioned to act.
 
-### Why nothing is left for it
+#### Why nothing is left for it
 
 With threads the whole sequence is local to one thread:
 
@@ -396,14 +463,14 @@ processes and the parent had to reach across. Once they are the same thread it
 stops existing. (Third time machinery was carried over from the design being
 replaced, after the pickling detour and `requeue`.)
 
-### What moves rather than disappears
+#### What moves rather than disappears
 
 - **Marker writing** stops being special: the killer and the marker-writer are
   the same thread, so `.timeout.stl` is written on the ordinary path.
 - **`_child_pids` before the kill** stays — a `--one-file` child must still have
   its Blender grandchild reaped. Process-tree logic, already noted in D3.
 
-### Stale justifications retired with it
+#### Stale justifications retired with it
 
 The docstring claimed the kill is safe because "the file is retried once, then
 set aside" — D6 removed retry. It also carried the `_status_snapshot`
@@ -412,11 +479,11 @@ along with the proxy.
 
 ---
 
-## D9 — Volume is measured at open, like any other fact
+### D9 — Volume is measured at open, like any other fact
 
 **Decided.**
 
-### The problem as it was framed
+#### The problem as it was framed
 
 Seam recovery fires when PyMeshFix reports success — nm=0, open=0, every defect
 count clean — and has quietly deleted part of the model:
@@ -437,7 +504,7 @@ asks about *a mesh* (`isRequiredDecimation` reads a face count) while this one
 asks about *a transition*: 11,676 mm³ is not suspicious on its own, only beside
 13,730.
 
-### Why it is not a special case
+#### Why it is not a special case
 
 **Volume is a property of the mesh, measured at open, like triangle count and
 defect counts.** The DTO carries it because that is what the DTO is for — not
@@ -450,7 +517,7 @@ concluding it belonged to it. Every operation that transforms a mesh produces a
 new `Stl` with fresh measurements; comparing against the previous one is
 available to anyone, stored for no one.
 
-### Heavier state
+#### Heavier state
 
 Scalars live on the DTO. Vertex maps and edge counts are megabytes and do not —
 but they are already computed and discarded repeatedly:
@@ -471,11 +538,11 @@ still looks plausible where a missing file does not.
 
 ---
 
-## D10 — The budget arithmetic stays in `--one-file`
+### D10 — The budget arithmetic stays in `--one-file`
 
 **Decided.** Same logic as now, unchanged.
 
-### It was never cross-cutting
+#### It was never cross-cutting
 
 The question claimed the arithmetic had no home because decimation, repair and
 Blender all draw on one mesh budget and Blender's share depends on what earlier
@@ -497,7 +564,7 @@ Fifth time in this discussion a difficulty came from importing the old design's
 framing rather than from the new design — after the pickling detour, `requeue`,
 the watchdog gap, and volume-as-a-transition-fact.
 
-### The one parent-side budget decision
+#### The one parent-side budget decision
 
 `stl_batch_fix.py:3436`, in `process_file_subprocess`:
 
@@ -513,7 +580,7 @@ The split is clean rather than complicated:
 - the **parent** owns *when to give up on a child*
 - the **child** owns *how to spend its own time*
 
-### What it means for the operation modules
+#### What it means for the operation modules
 
 `decimator`, `repairer` and `blender_handler` do not each own a timeout policy.
 They receive the remaining time, or ask the child's clock for it — so the
@@ -522,11 +589,11 @@ needed.
 
 ---
 
-## D11 — Status is a plain dict under a lock, written by the owning thread
+### D11 — Status is a plain dict under a lock, written by the owning thread
 
 **Decided.**
 
-### What the state actually is
+#### What the state actually is
 
 Four fields per worker, written once when a file is picked up and removed when
 it finishes:
@@ -544,7 +611,7 @@ but nothing about progress within it.
 Three consumers: the worker panel at 4 Hz (all four fields), the watchdog
 (`started` only — dies with D8), and a stale-row sweep.
 
-### Why it needs so much machinery today
+#### Why it needs so much machinery today
 
 All of it follows from the dict living in another process with killable writers:
 
@@ -558,7 +625,7 @@ All of it follows from the dict living in another process with killable writers:
 - **`_pid_is_live`** reads `/proc/<pid>/stat` because `os.kill(pid, 0)` succeeds
   for a zombie.
 
-### What replaces it
+#### What replaces it
 
 A plain `dict` guarded by a `threading.Lock`. Writers are threads in the same
 process; a thread is never SIGKILLed mid-write, and a thread that finishes
@@ -579,7 +646,7 @@ The question of whether status could leave the `Manager` proxy was already
 answered by D3 — removing the process pool removes the proxy. What was left of
 it, *who reports status*, is answered here: the thread that owns the file.
 
-### What becomes possible
+#### What becomes possible
 
 Status can now be updated **mid-file**, because the writer is not a process that
 must survive being killed. The step E start line already knows a mesh is about
@@ -588,16 +655,20 @@ only in the log.
 
 ---
 
-## Open, not yet decided
+### Open — worker pool
 
-**Nothing on the pool side.** Every question raised during the pool design is
-closed: five became decisions (D5, D8, D9, D10, D11), two were folded into D7,
-and one turned out to have been answered already by D3.
+**Nothing.** Every question raised during the pool design is closed: five became
+decisions (D5, D8, D9, D10, D11), two were folded into D7, and one turned out to
+have been answered already by D3.
 
-What remains open belongs to the **mesh pipeline**, not the pool, and is
-recorded in `TODO.md` item 1: extracting the steps of `_process_file_impl`
+---
+
+## Mesh pipeline
+
+Not yet discussed. The work is extracting the steps of `_process_file_impl`
 (826 lines, nesting depth 8, 91 if-statements, 23 return points) into the
-operation modules this design describes.
+operation modules the Target section describes. `TODO.md` item 1 holds the
+approach — how small to make each step, and what the 36 tests do not catch.
 
 ---
 

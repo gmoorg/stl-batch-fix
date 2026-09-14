@@ -73,62 +73,16 @@ That function *is* the pipeline the sketch describes, written out longhand.
 Extracting its steps produces the readable version directly; moving files around
 first would relocate it unchanged. So: functions first, then modules.
 
-### The agreed design (2026-09-13)
+### The design lives in `REFACTOR_DECISIONS.md`
 
-Worked out in discussion. A direction, not a specification — deviate where the
-code argues back.
+The target shape — the `Stl` DTO, tool modules, operation modules, the predicate
+and injection rules — and the eleven decisions that refine it are recorded
+there, not here. **This file holds what is left to do and how to go about it;
+that one holds what was decided and why.**
 
-**`Stl` — a plain-data DTO.** Facts and paths: format, triangle count, defect
-counts, bounds, volume. **No geometry.** A 900k-face mesh is ~45 MB of
-triangles, and memory is already the binding constraint (`_BYTES_PER_TRIANGLE`,
-`auto_worker_count`, the OOM killer taking workers); an immutable value carrying
-arrays would double peak memory at every handoff. Vertex arrays are loaded and
-discarded inside each operation, as they are today.
-
-Values are overwritten as newer data arrives. Where a step genuinely needs the
-prior value, the DTO simply holds both — `volume` and `volume_before`, `bounds`
-and `bounds_before`. Three decisions need that: volume loss after repair (the
-Mandy seam recovery), bbox drift, and whether Blender actually ran. No
-append-only history mechanism; the cases are few and known.
-
-Keep it serialisable. Results cross worker→parent as plain dicts over a JSON
-pipe, so either the DTO is plain data by construction or it gains an explicit
-`to_dict()` at the boundary.
-
-**Tool modules** — `blender_handler`, `pymeshfix_handler`, `pymeshlab_handler`.
-One tool each, no policy. This is where the invisible-Blender bug came from:
-four call routes, timing recorded at one of them.
-
-**Operation modules** — `decimator`, `repairer`, `splitter`, `scanner`. Each
-owns its fallback ladder *and* its `isRequired…` predicate, so `Stl` never
-learns `MAX_FACES` or which tool does what. `decimator` owns
-fast_simplification → pymeshlab → blender; `repairer` owns pymeshfix → blender
-plus seam recovery.
-
-- **A predicate must be cheap and side-effect-free.** If it is not, it is a
-  process and gets named as one: `scanner.scan(stl)` returns an `Stl` carrying
-  defect counts, after which `repairer.isRequiredRepair(stl)` is free because it
-  reads facts already held. Two current functions are processes wearing
-  predicate clothing — `_open_loops_are_printable` re-scans, `_will_decimate`
-  recomputes a condition decided elsewhere.
-- **Inject capabilities, not control flow.** Where a module needs a fact it
-  cannot cheaply obtain, pass the processor in (`isRequiredRepair(stl,
-  scan=scanner.scan)`) rather than duplicating the logic or re-scanning. Give
-  the parameters defaults so the common path stays prose. Injected callables
-  answer questions or perform named operations; they never make decisions the
-  module owns.
-
-**Pipeline** — reads as prose, orders the steps, and documents why the order is
-load-bearing. The steps look independent and are not: the split is deferred
-until after decimation, Blender runs before the seam split, the print-scale gate
-precedes the Blender fallback. State those constraints in the module docstrings
-or someone will tidy the sequence and silently regress it.
-
-**Runner — exempt.** 1,455 lines of pool management, child spawning, SIGALRM,
-watchdogs, OOM attribution and pool restart. No `Stl` flows through it and no
-predicate is meaningful (`isRequiredKill(worker)` is nonsense). It is a state
-machine over processes; forcing handler shapes onto it would be worse than
-explicit imperative code with good names.
+A copy of the design used to sit here and went stale within a day: it still said
+the runner was exempt (D1 says the opposite) and listed two questions as open
+that D9 and D10 had closed.
 
 ### Guidelines (from the user — guidelines, not hard rules; use judgment)
 
@@ -173,17 +127,6 @@ they catch broken geometry, not broken integration. See the note at the bottom.
 (`working`, `nm_src`, `open_src`, `stats`, `temps`, `dst`). Deciding what each
 extracted step reads and writes is the actual work; getting it wrong produces a
 mesh that looks fine and is subtly wrong.
-
-### Still open in this design
-
-- **Where the shared budget arithmetic lives.** Decimation, repair and Blender
-  draw from one mesh budget, and Blender's share depends on what earlier steps
-  spent (`budget − elapsed − reserve`). That is cross-cutting: if each module
-  owns its own timeout policy the arithmetic has no home, or gets duplicated.
-- **Where the seam-recovery trigger sits.** It fires when PyMeshFix *succeeded
-  but deleted geometry* — a fact about the transition, not about the mesh before
-  or after. It is the decision this shape handles least naturally, and it is not
-  a corner case: it is the Mandy fix.
 
 ---
 
