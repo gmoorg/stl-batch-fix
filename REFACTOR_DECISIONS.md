@@ -501,6 +501,19 @@ admission in D4.
 Ordering and shedding interact: smallest-first means workers shed late,
 largest-first means they shed early and the tail runs wide.
 
+**A shed worker never needs to come back** (closes O8). Sorting by face count
+means cost only rises as the queue drains, so a worker that exits because the
+head item is too large will never meet a smaller one afterwards. There is
+nothing to come back to — not an unlikely scenario, an impossible one — so the
+pool needs no mechanism for respawning a shed worker.
+
+The caveat, recorded rather than hidden: the sort is by *predicted* cost, and
+`estimate_peak_bytes` is a linear extrapolation from a single 7M-triangle
+calibration, so a later file could turn out cheaper than an earlier one. That
+does not revive the question, because shedding follows sort position rather than
+measured memory — the queue order is what it is whether or not the prediction
+was accurate.
+
 ---
 
 ## Open, not yet decided
@@ -514,13 +527,6 @@ reason a worker can wedge today. If the child reported its own status, or status
 travelled the existing result pipe, the restart machinery becomes genuinely
 vestigial rather than arguably so. (Partly answered by D3, which removes the
 proxy — but the question of *who* reports status is still open.)
-
-**O8 — can a shed worker come back?** If worker N exits because the remaining
-files are large, and the queue later returns to small files, concurrency stays
-narrow for the rest of the run unless the pool can spawn a replacement. Sorting
-by monotonically increasing cost makes shedding always final and the question
-disappears — which is an argument for a specific ordering rather than a free
-choice.
 
 ---
 
