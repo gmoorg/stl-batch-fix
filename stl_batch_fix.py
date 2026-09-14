@@ -12,6 +12,7 @@ Requires: blender (tested with 4.0)
 
 import argparse
 import concurrent.futures
+import math
 import os
 import shutil
 import signal
@@ -1420,7 +1421,7 @@ def read_steps(path=None):
 _SUMMARY_COLUMNS = ('file', 'status', 'secs', 'tris_in', 'tris_out',
                     'nm_in', 'open_in', 'blender_secs', 'path', 'bbox_drift',
                     'blender_runs', 'reason', 'steps_ran', 'steps_failed',
-                    'fmt', 'dims_mm')
+                    'fmt', 'dims_mm', 'tris_per_mm', 'min_feature')
 
 
 # Step outcomes recorded per mesh, so success rates can be counted instead of
@@ -2694,6 +2695,8 @@ def process_file(src, is_part=False):
                 # cannot be asked without them.
                 'fmt':          stats.get('fmt', ''),
                 'dims_mm':      stats.get('dims_mm', ''),
+                'tris_per_mm':  stats.get('tris_per_mm', ''),
+                'min_feature':  stats.get('min_feature', ''),
             })
 
 
@@ -2816,8 +2819,26 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         _src_bounds = stl_bounds(src)
         if _src_bounds:
             _lo, _hi = _src_bounds
-            stats['dims_mm'] = 'x'.join(f'{_hi[_i] - _lo[_i]:.1f}'
-                                        for _i in range(3))
+            _ext = [_hi[_i] - _lo[_i] for _i in range(3)]
+            stats['dims_mm'] = 'x'.join(f'{_e:.1f}' for _e in _ext)
+            # Density, not size.  A Princess Leia part carries 5,576,353
+            # triangles inside a 5.6mm box -- roughly a million per millimetre
+            # of extent, detail far below anything a printer can express.
+            # Neither the triangle count nor the file size says that on its
+            # own: a 5M-triangle body at 200mm and a 5M-triangle thumbnail at
+            # 5mm are the same number and completely different meshes.  This is
+            # what predicts both a slow open and a heavy decimation.
+            _largest = max(_ext)
+            if _largest > 0:
+                stats['tris_per_mm'] = f'{n_tris / _largest:.0f}'
+            # Rough average edge length: the bbox diagonal spread over the
+            # triangles.  When it falls below MIN_LAYER the mesh holds features
+            # no layer can render, so decimation is discarding nothing real --
+            # which is what makes "was this decimation lossy?" answerable
+            # later instead of guessed at.
+            _diag = math.sqrt(sum(_e * _e for _e in _ext))
+            if n_tris > 0 and _diag > 0:
+                stats['min_feature'] = f'{_diag / math.sqrt(n_tris):.4f}'
 
         # Perfect mesh within limit — just copy, nothing to do.
         # Winding seams are a defect scan_mesh_errors cannot see — it counts
@@ -3500,6 +3521,16 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
     # is why only this one site was ever counted.
     # Captured before the call: blender_src is unlinked a few lines below.
     _bl_bounds_before = stl_bounds(blender_src)
+    # MERGE_DIST relative to the model, computed from the extents already
+    # recorded at scan time.  Empty when the bbox is unknown (OBJ/ASCII never
+    # reach the scan), which is why the detail string appends it conditionally.
+    _merge_pct = ''
+    if _bl_bounds_before and MERGE_DIST:
+        _bl_lo, _bl_hi = _bl_bounds_before
+        _bl_diag = math.sqrt(sum((_bl_hi[_i] - _bl_lo[_i]) ** 2
+                                 for _i in range(3)))
+        if _bl_diag > 0:
+            _merge_pct = f'{100 * MERGE_DIST / _bl_diag:.3f}%'
     success, open_only, unrepaired, stdout, stderr = fix_stl(
         blender_src, dst, MERGE_DIST,
         is_ascii=is_ascii, is_obj=is_obj,
@@ -3518,7 +3549,13 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
           nm_in=('' if (is_ascii or is_obj) else nm_src),
           open_in=('' if (is_ascii or is_obj) else open_src),
           secs=(f"{_blender_cost[1]:.1f}" if _blender_cost[0] else ''),
-          detail=('obj' if is_obj else 'ascii' if is_ascii else 'fallback'))
+          # MERGE_DIST as a fraction of the model, not in absolute mm.  The
+          # same 0.01mm constant is 0.005% of a 200mm body and 0.4% of a
+          # 2.5mm head -- one is a rounding error, the other welds real
+          # detail shut.  Recorded on the step that consumes it, because it
+          # is a property of the operation rather than of the file.
+          detail=('obj' if is_obj else 'ascii' if is_ascii else 'fallback')
+                 + (f' merge{_merge_pct}' if _merge_pct else ''))
     # Observe only, as in step E.  Blender merges doubles and can decimate, so
     # small movement here is expected — the number is what makes it judgeable.
     if os.path.exists(dst):

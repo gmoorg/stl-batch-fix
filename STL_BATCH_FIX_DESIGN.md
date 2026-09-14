@@ -677,6 +677,28 @@ folds them in via `_absorb_part_steps()` under a `part/` or `region/` prefix —
 prefixed so a 39-shell file does not report 39 PyMeshFix runs as though the
 whole mesh had been repaired 39 times.
 
+### Density, not size — `tris_per_mm` and `min_feature`
+
+A triangle count says nothing on its own: 5M triangles at 200 mm and 5M at
+5 mm are the same number and completely different meshes. The Princess Leia
+set makes the point — `Branches.stl` carries 5,576,353 triangles inside a
+**5.6 mm** box, roughly a million per millimetre of extent, and that is what
+predicts both a slow open in the slicer and a very heavy decimation.
+
+- **`tris_per_mm`** — triangles ÷ largest extent. Separates "big model" from
+  "absurdly dense model". Fixture range: `falcon` 1, `foot2` 76; Leia's
+  `Branches` ≈ 995,000.
+- **`min_feature`** — bbox diagonal ÷ √triangles, a rough average edge length.
+  Below `MIN_LAYER` the mesh holds detail no layer can render, so decimation is
+  discarding nothing real. This is what makes *was this decimation lossy?* an
+  answerable question rather than a guess.
+- **`merge_dist_pct`** — recorded in the Blender step's `detail` as
+  `merge0.078%`, because it is a property of the operation, not the file. The
+  same `MERGE_DIST = 0.01 mm` is 0.005% of a 200 mm body and 0.4% of a 2.5 mm
+  head: a rounding error in one case, a weld that closes real detail in the
+  other. If repair quality turns out to correlate with scale, this is the
+  column that shows it.
+
 `fmt` and `dims_mm` record the source format and model extents. Both were
 already computed and thrown away: `is_ascii`/`is_obj` rode on the result dict,
 and `stl_bounds()` is called twice per file for drift detection. Without them,
