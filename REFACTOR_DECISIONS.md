@@ -793,6 +793,99 @@ case, which is a single model whose shells belong together. Its one useful
 result: part 0 repaired correctly at 200,546 faces, visually confirmed, which
 is evidence *for* decimate-then-split producing sound geometry.
 
+### Float drift was tested and ruled out (2026-09-14)
+
+**Do not re-propose quantised vertex welding.** Reading
+`_weld_binary_stl`'s bit-sort comments naturally suggests it — sort on
+coordinates rounded to 4 decimals and cast to int64, rather than on raw float
+bits. It would appear to fix float drift, fold `-0.0` for free, save memory via
+a packed key, and flatten coplanar faces. Measured on `Millenium_Falcon.stl`
+(393 k tris) and `whole-costume01.stl` (2.0 M tris), all four claims fail:
+
+```text
+Falcon           exact 48,745 verts, 0 degenerate
+                 4/5/6 decimals: +0 merges, +0 degenerate
+
+whole-costume01  exact 999,976 verts, 1 degenerate
+                 4 decimals: +29 merges, +37 degenerate
+                 5 decimals:  +1 merge,   +2 degenerate
+                 6 decimals:  +0 merges,  +0 degenerate
+```
+
+- **Drift merging**: 29 extra merges in 6 M vertex slots — 0.0029% — on the
+  messiest model in the collection, and none at all on the Falcon. The 24.2x
+  duplication in the Falcon is the STL format writing identical bits
+  repeatedly, not drift.
+- **Flatness**: degenerate faces went *up*, not down. Geometry never moved in
+  this test (sort-key-only variant); collapsing two vertices 0.1 µm apart onto
+  one index turns a sliver into a zero-area triangle.
+- **Memory**: the packed-int64 win needs all three axes in 63 bits. The Falcon
+  spans 155 mm and needs 22 bits/axis — 66 > 63, so it does not pack, leaving
+  three int64 columns at 2x the current key size.
+- **`-0.0`**: genuinely free, but already handled in one line.
+
+The probe is `design/quantweld.py` (read-only, self-contained; run it against
+any mesh to re-check). Float drift is not a problem this collection has.
+
+### Step evidence from the 2026-09-14 full run
+
+902 files, 897 ok, 2 open, 2 failed, zero exceptions. 916 step rows.
+
+```text
+step                ran   ok  fail  skip   rate   med     p95     max
+pymeshfix           570  554    16    23    97%  23.4s  148.9s  950.1s
+decimate            237  237     0     0   100%     -       -       -
+split                34   32     2     0    94%     -       -       -
+blender              21   14     7     0    67%  12.8s  105.1s  105.1s
+seamsplit            20    2    18     0    10%     -       -       -
+printscale            9    6     3     0    67%     -       -       -
+pymeshfix2            2    2     0     0   100%   9.2s    9.5s    9.5s
+```
+
+**`decimate` is 237-for-237**, including Leia's ~1 M-triangles-per-mm parts.
+D12's premise holds on fresh data; the fallback rungs have still never run.
+
+**`seamsplit` is the weakest step in the pipeline, 2-for-20.** Both successes
+are `Mandy_Body_Dinamuuu3D.stl` part 0 — the model the route was built for —
+appearing twice because it is duplicated in the collection. So: one real save
+for 20 Blender invocations. Every attempt found seam edges but no closed loop
+to cut on, which is why the Blender-first fallback runs at all; it produced a
+usable loop twice, left 15 still unseparable, and returned no mesh 3 times.
+
+The trigger fires on the wrong population. Of 20 volume-loss triggers, only
+~6 were real destruction (27–34% volume retained); twelve retained 85–94%,
+which is what filling holes and dropping fragments legitimately costs. But the
+95% threshold cannot simply be tightened — **Mandy itself sits at 85%**, near
+the bottom of the mild cluster. Several triggers were on meshes of a few mm³
+(`66 -> 62`, `183 -> 165`), which `_VOLUME_MIN_MEANINGFUL` is meant to filter
+and evidently does not.
+
+**`blender` mixes two jobs.** Of 21 runs: 19 repair-fallback (12 ok, 7 fail =
+63%) and 2 ASCII conversion (2 ok). Conversion cannot meaningfully "fail to
+repair", so one success rate over both muddies each. D7's preparation stage
+already proposes moving conversion out of the repair path, which would separate
+them.
+
+### The instrument has known holes
+
+Stated so the tables above are not over-trusted:
+
+- **Three steps carry no timing at all** — `decimate`, `split`, `seamsplit`.
+  "How long does decimation take" is still unanswerable, and `seamsplit` cannot
+  be priced against the one save it produced.
+- **`pymeshfix2` still logged no baseline.** `nm_in`/`open_in` came out empty
+  on both rows, because they read `_pv_nm`, which is only assigned when Blender
+  *reports success* — and the two rows that fired are precisely the case where
+  it did not (`BLENDER_OPEN`). The numbers were recoverable from the step log
+  (`open=12 -> 0`) but the column added for this question stayed blank.
+- **The archived 13-for-13 for `pymeshfix2` was survivorship.** Before
+  2026-09-13 the failure path wrote nothing, so "never helps" and "never ran"
+  were the same observation.
+- **`bbox_drift` is last-writer-wins and does not cross the part boundary.**
+  28 `bbox changed` events in the run produced 9 summary rows. Both Falcons
+  show empty drift because part 2 drifted under PyMeshFix and back under
+  Blender, to three decimals — the excursion exists only in the step log.
+
 ### Review of `stl_batch_fix.blender` (2026-09-14)
 
 Findings, not decisions — the script is frozen until the refactor, so none of
