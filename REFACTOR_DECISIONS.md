@@ -11,6 +11,13 @@ arguments that produced them.
 
 Status: **design only. No code has moved.**
 
+> **Renumbered 2026-09-13.** Entries were previously numbered in the order they
+> were written, and each new one was inserted before D5 — so the file read
+> D1–D4, D4b, D7, D8, D9, D10, D5, D6. They are now in decision order. Three
+> contradictions were fixed at the same time: D2 and D3 still described `requeue`
+> and a surviving watchdog, both of which later entries had abolished. Earlier
+> commit messages refer to the old numbers.
+
 ---
 
 ## D1 — The runner is not exempt
@@ -46,14 +53,14 @@ re-implements pull semantics *on top of* push, because it needs memory-aware
 admission — `_fill` holds files back and submits more only as the running set
 drops. It is already straining toward pull and getting there awkwardly.
 
-Two things pull buys concretely:
+What pull buys concretely: **`plan_worker_count` becomes natural.** A worker
+asking for work is exactly the moment to decide whether it should get any. Push
+has to guess ahead and re-check on completion.
 
-- **`plan_worker_count` becomes natural.** A worker asking for work is exactly
-  the moment to decide whether it should get any. Push has to guess ahead and
-  re-check on completion.
-- **Retry stops being special.** A failed file goes back on the queue.
-  `_to_retry` + `_attempts` + requeue-at-back-not-front is machinery for
-  putting things back into a model that did not expect them.
+It also removes the reason retry existed at all — see D6, which abolishes it.
+(An earlier version of this entry said "retry stops being special: a failed file
+goes back on the queue". That was written before D6 and is wrong: nothing goes
+back on the queue.)
 
 ---
 
@@ -69,11 +76,11 @@ already made unnecessary. With worker threads driving subprocesses:
 |---|---|
 | `BrokenProcessPool` fails every pending future | a thread raising affects only itself |
 | `_abandon_pool` — SIGKILL the pool, shutdown on a daemon thread, never join | nothing to abandon |
-| `_worker_status` is a `Manager()` proxy; a worker SIGKILLed mid-read deadlocks the parent in `futex_do_wait` | plain dict under a lock |
+| `_worker_status` is a `Manager()` proxy; a worker SIGKILLed mid-read deadlocks the parent in `futex_do_wait` | plain dict under a lock (D11) |
 | `_status_snapshot` daemon-thread workaround for that deadlock | unnecessary |
 | `max_tasks_per_child` forces `spawn`, incompatible with the fork design | irrelevant |
-| watchdog kills a *worker* it cannot otherwise reach | the thread holds the `Popen`; `kill()` is direct |
-| pool restart, `_to_retry`, `_attempts`, requeue-at-back | `pool.requeue(item)` |
+| the watchdog, which kills a *worker* the parent cannot otherwise reach | gone entirely — the thread owns the `Popen`, so `communicate(timeout=)` is the mechanism (D8) |
+| pool restart, `_to_retry`, `_attempts`, requeue-at-back | gone entirely — the failure they handled cannot occur (D6) |
 
 **The GIL does not matter**: every worker thread is blocked in `communicate()`
 waiting on a subprocess, not computing.
@@ -128,15 +135,15 @@ papering over a self-inflicted problem, and it made `get_next` return a file it
 had been told to withhold, leaving the caller unable to tell approval from a
 clock running out.
 
-**The sketch in `design/pool_sketch.py` predates D5 and still has `requeue`,
-`attempts` and a `timeout=5` worker.** It has not been updated — treat this
-section as the current interface and the sketch as the earlier draft.
+**The sketch predates D6 and still has `requeue`, `attempts` and a `timeout=5`
+worker.** It has not been updated — treat this section as the current interface
+and the sketch as the earlier draft.
 
 ---
 
-## D4b — Admission is a condition variable and a caller-supplied callback
+## D5 — Admission is a condition variable and a caller-supplied callback
 
-**Decided**, replacing an open question (O1) that turned out not to be one.
+**Decided**, replacing an open question that turned out not to be one.
 
 `get_next` waits on a `threading.Condition` while `admit` refuses the head item,
 and a worker finishing signals it. Standard mechanism, already in the sketch. An
@@ -160,251 +167,7 @@ the callback is neither.
 
 ---
 
-## D7 — The watchdog does not survive
-
-**Decided**, replacing O2.
-
-### What it does today
-
-```text
-every 0.25s, for each worker pid in worker_status:
-    limit = _effective_timeout()            # 3600, or 86400 when TIMEOUT=0
-    skip if limit <= 0, or (pid, started) already fired
-    skip if now - started < limit * grace   # grace=3.0 at the only call site
-    -> fire
-```
-
-The real threshold is **10,800 s**, not 3600, and it measures how long a worker
-has held one file — not how long any operation took. On firing it: records
-`(pid, started)`; logs the kill; **writes `.timeout.stl` from the parent**,
-because the worker is about to be SIGKILLed and will never reach its own
-marker-writing code; SIGKILLs the worker's children via `/proc` so a Blender
-grandchild cannot reparent to init and keep its memory; then SIGKILLs the
-worker.
-
-It exists for one thing: **a worker wedged inside a GIL-holding C++ call.**
-`fast_simplification`, `pymeshfix` and `pymeshlab` all ran in-process, no
-Python-level timer could interrupt them, and pymeshfix is ~80 % of runtime. The
-parent was the only process positioned to act.
-
-### Why nothing is left for it
-
-With threads the whole sequence is local to one thread:
-
-```text
-thread: spawn --one-file child
-        communicate(timeout=budget)
-        -> expires
-        kill grandchildren (/proc walk), kill the child
-        write .timeout.stl          <- it knows the file; it sent it
-        record the result, get_next()
-```
-
-There is no worker *process* to kill, and nothing outside that thread needs to
-observe the timeout. `communicate(timeout=)` is not a partial answer leaving a
-gap for a watchdog to cover — it *is* the mechanism, and the thread is already
-the right place to act because it holds both the `Popen` and the filename.
-
-An earlier draft asked whether a worker thread could wedge *outside* the
-subprocess call, and kept D7 open on that. The question was an artifact of the
-old shape, where the timeout enforcer and the file's owner were different
-processes and the parent had to reach across. Once they are the same thread it
-stops existing. (Third time machinery was carried over from the design being
-replaced, after the pickling detour and `requeue`.)
-
-### What moves rather than disappears
-
-- **Marker writing** stops being special: the killer and the marker-writer are
-  the same thread, so `.timeout.stl` is written on the ordinary path.
-- **`_child_pids` before the kill** stays — a `--one-file` child must still have
-  its Blender grandchild reaped. Process-tree logic, already noted in D3.
-
-### Stale justifications retired with it
-
-The docstring claimed the kill is safe because "the file is retried once, then
-set aside" — D5 removed retry. It also carried the `_status_snapshot`
-workaround and the `Manager()` deadlock commentary, both of which D3 deletes
-along with the proxy.
-
----
-
-## D8 — Volume is measured at open, like any other fact
-
-**Decided**, replacing O6.
-
-### The problem as it was framed
-
-Seam recovery fires when PyMeshFix reports success — nm=0, open=0, every defect
-count clean — and has quietly deleted part of the model:
-
-```python
-_vol_before = _mesh_volume(working)      # before PyMeshFix
-_vol_after  = _mesh_volume(_pmf_tmp)     # after
-if _vol_after < _vol_before * _VOLUME_LOSS_LIMIT and not _is_seam_piece:
-    -> _repair_by_seam_split(...)
-```
-
-Mandy's head: 13,730 mm³ → 11,676, a 121,537-face component gone, reported `ok`.
-Invisible to everything else — the deleted region sits inside the model's own
-bounding box, so the bbox check stays quiet too.
-
-That looked like a problem for the module design, because every other predicate
-asks about *a mesh* (`isRequiredDecimation` reads a face count) while this one
-asks about *a transition*: 11,676 mm³ is not suspicious on its own, only beside
-13,730.
-
-### Why it is not a special case
-
-**Volume is a property of the mesh, measured at open, like triangle count and
-defect counts.** The DTO carries it because that is what the DTO is for — not
-because seam recovery asked for it. `repairer` then compares what it measures
-now against what the DTO already holds, and there is no transition fact needing
-a home.
-
-The awkwardness came from meeting volume first *inside* the recovery logic and
-concluding it belonged to it. Every operation that transforms a mesh produces a
-new `Stl` with fresh measurements; comparing against the previous one is
-available to anyone, stored for no one.
-
-### Heavier state
-
-Scalars live on the DTO. Vertex maps and edge counts are megabytes and do not —
-but they are already computed and discarded repeatedly:
-`scan_mesh_errors(return_edges=True)` builds a packed edge map that
-`_open_loops_are_printable` recomputes a few lines later.
-
-Those can be kept on disk beside the working file and reloaded, so a step can be
-skipped or re-entered without redoing the scan. The mechanism already exists:
-`--one-file` writes `.decimate.stl` and `.pymeshfix.stl` intermediates and
-deletes them in a `finally`. Treating them as resumable checkpoints is a change
-of intent, not of machinery.
-
-**Caution, from a bug already hit once.** A cache keyed only by filename goes
-stale when the file is rewritten. The parts protocol solved that with
-`~`-prefixed pending names, so the convention exists — but a scan cache is
-easier to get subtly wrong than a whole-file rename, because a stale *number*
-still looks plausible where a missing file does not.
-
----
-
-## D9 — The budget arithmetic stays in `--one-file`
-
-**Decided**, replacing O5. Same logic as now, unchanged.
-
-### It was never cross-cutting
-
-O5 claimed the arithmetic had no home because decimation, repair and Blender all
-draw on one mesh budget and Blender's share depends on what earlier steps spent.
-Traced against the code, every budget computation **already runs inside the
-child process**:
-
-| site | function | process |
-|---|---|---|
-| 2633, 2867, 2989 | `_process_file_impl` → `_part_cap` + `_arm_mesh_alarm` | child |
-| 2101, 2158, 2172 | `_run_blender_script` / `fix_stl` / `blender_decimate` → `_blender_budget` | child |
-| 3726 | `--one-file` entry → `_arm_mesh_alarm(TIMEOUT_PART or _effective_timeout())` | child |
-
-So the arithmetic is not scattered across modules needing a shared owner. It is
-one process tracking its own elapsed time, which is exactly what "decimation,
-repair and Blender share one budget" means in practice. `elapsed` is the child's
-own clock.
-
-Fifth time in this discussion a difficulty came from importing the old design's
-framing rather than from the new design — after the pickling detour, `requeue`,
-the watchdog gap, and volume-as-a-transition-fact.
-
-### The one parent-side budget decision
-
-`stl_batch_fix.py:3436`, in `process_file_subprocess`:
-
-```python
-_budget = int(budget) if budget else _effective_timeout()
-```
-
-That is the parent deciding **how long to wait for a child before killing it**.
-Under D3 and D7 it becomes the worker thread's `communicate(timeout=)`.
-
-The split is clean rather than complicated:
-
-- the **parent** owns *when to give up on a child*
-- the **child** owns *how to spend its own time*
-
-### What it means for the operation modules
-
-`decimator`, `repairer` and `blender_handler` do not each own a timeout policy.
-They receive the remaining time, or ask the child's clock for it — so the
-injected-capability pattern from D4b covers this too, and no budget owner is
-needed.
-
----
-
-## D10 — Status is a plain dict under a lock, written by the owning thread
-
-**Decided**, closing O3 and O4 together.
-
-### What the state actually is
-
-Four fields per worker, written once when a file is picked up and removed when
-it finishes:
-
-```python
-_worker_status[pid] = {'rel':     rel,            # which file
-                       'started': _t.monotonic(), # when it was picked up
-                       'bytes':   _bytes,         # size on disk
-                       'tris':    _tris}          # triangle count from the header
-```
-
-Never updated mid-file, which is why the panel can say "on this file for 41m"
-but nothing about progress within it.
-
-Three consumers: the worker panel at 4 Hz (all four fields), the watchdog
-(`started` only — dies with D7), and a stale-row sweep.
-
-### Why it needs so much machinery today
-
-All of it follows from the dict living in another process with killable writers:
-
-- **`_status_snapshot`** reads the proxy on a throwaway daemon thread it never
-  joins, because a `Manager` proxy call has no timeout and a worker SIGKILLed
-  mid-read blocks the parent forever — observed as `futex_do_wait`, 0 % CPU,
-  the TUI still redrawing stale rows.
-- **The stale-row sweep** exists because a SIGKILLed worker never reaches the
-  line that pops its own entry, so its row would count up forever against a file
-  nobody is working on.
-- **`_pid_is_live`** reads `/proc/<pid>/stat` because `os.kill(pid, 0)` succeeds
-  for a zombie.
-
-### What replaces it
-
-A plain `dict` guarded by a `threading.Lock`. Writers are threads in the same
-process; a thread is never SIGKILLed mid-write, and a thread that finishes
-always runs its own cleanup. So:
-
-| today | with threads |
-|---|---|
-| `_status_snapshot` daemon-thread read | `with lock: return dict(status)` |
-| stale-row sweep | deleted — entries cannot be orphaned |
-| `_pid_is_live` on this path | deleted |
-
-The owning thread writes its entry on pickup and removes it on completion, both
-under the lock; the TUI copies the dict under the same lock at 4 Hz. Four
-fields, a sub-microsecond critical section, no contention worth designing
-around.
-
-**O4 was already answered by D3** — removing the process pool removes the proxy.
-What was left of it, *who reports status*, is answered here: the thread that
-owns the file.
-
-### What becomes possible
-
-Status can now be updated **mid-file**, because the writer is not a process that
-must survive being killed. The step E start line already knows a mesh is about
-to spend minutes inside PyMeshFix; that could appear in the panel rather than
-only in the log.
-
----
-
-## D5 — No retry. If it failed, it failed
+## D6 — No retry. If it failed, it failed
 
 **Decided**, replacing an earlier "the pool counts attempts, the caller decides
 retry policy".
@@ -436,9 +199,9 @@ that genuinely failed repair was never retried; that path has no retry logic.
 
 Two independent reasons, and the policy one is the stronger:
 
-1. **Policy (D5):** failed is failed. This survives changes to the failure
-   modes — if some new spurious failure appears later, the answer is still
-   "rerun it", not "add retry back".
+1. **Policy:** failed is failed. This survives changes to the failure modes — if
+   some new spurious failure appears later, the answer is still "rerun it", not
+   "add retry back".
 2. **Mechanism (D3):** with threads there is no future, so a file has only
    three states — queued, held by a worker, done. "Failed without running" stops
    being expressible, so the forty-innocent-files problem is not handled better,
@@ -461,7 +224,7 @@ the actual signal, and no sibling is affected.
 
 ---
 
-## D6 — A preparation stage that normalises everything to binary STL
+## D7 — A preparation stage that normalises everything to binary STL
 
 **Decided.** A first pool fills the queue for the main one.
 
@@ -561,17 +324,16 @@ simply never failed — but nothing is known about how they scale.)
 
 `get_next` returns `None` for worker N when there is no longer room for it, and
 that worker exits and frees its resources — rather than blocking and holding a
-stack and a status slot while doing nothing. Strictly better than the blocking
-admission in D4.
+stack and a status slot while doing nothing.
 
 Ordering and shedding interact: smallest-first means workers shed late,
 largest-first means they shed early and the tail runs wide.
 
-**A shed worker never needs to come back** (closes O8). Sorting by face count
-means cost only rises as the queue drains, so a worker that exits because the
-head item is too large will never meet a smaller one afterwards. There is
-nothing to come back to — not an unlikely scenario, an impossible one — so the
-pool needs no mechanism for respawning a shed worker.
+**A shed worker never needs to come back.** Sorting by face count means cost only
+rises as the queue drains, so a worker that exits because the head item is too
+large will never meet a smaller one afterwards. There is nothing to come back to
+— not an unlikely scenario, an impossible one — so the pool needs no mechanism
+for respawning a shed worker.
 
 The caveat, recorded rather than hidden: the sort is by *predicted* cost, and
 `estimate_peak_bytes` is a linear extrapolation from a single 7M-triangle
@@ -582,11 +344,255 @@ was accurate.
 
 ---
 
+## D8 — The watchdog does not survive
+
+**Decided.**
+
+### What it does today
+
+```text
+every 0.25s, for each worker pid in worker_status:
+    limit = _effective_timeout()            # 3600, or 86400 when TIMEOUT=0
+    skip if limit <= 0, or (pid, started) already fired
+    skip if now - started < limit * grace   # grace=3.0 at the only call site
+    -> fire
+```
+
+The real threshold is **10,800 s**, not 3600, and it measures how long a worker
+has held one file — not how long any operation took. On firing it: records
+`(pid, started)`; logs the kill; **writes `.timeout.stl` from the parent**,
+because the worker is about to be SIGKILLed and will never reach its own
+marker-writing code; SIGKILLs the worker's children via `/proc` so a Blender
+grandchild cannot reparent to init and keep its memory; then SIGKILLs the
+worker.
+
+It exists for one thing: **a worker wedged inside a GIL-holding C++ call.**
+`fast_simplification`, `pymeshfix` and `pymeshlab` all ran in-process, no
+Python-level timer could interrupt them, and pymeshfix is ~80 % of runtime. The
+parent was the only process positioned to act.
+
+### Why nothing is left for it
+
+With threads the whole sequence is local to one thread:
+
+```text
+thread: spawn --one-file child
+        communicate(timeout=budget)
+        -> expires
+        kill grandchildren (/proc walk), kill the child
+        write .timeout.stl          <- it knows the file; it sent it
+        record the result, get_next()
+```
+
+There is no worker *process* to kill, and nothing outside that thread needs to
+observe the timeout. `communicate(timeout=)` is not a partial answer leaving a
+gap for a watchdog to cover — it *is* the mechanism, and the thread is already
+the right place to act because it holds both the `Popen` and the filename.
+
+An earlier draft asked whether a worker thread could wedge *outside* the
+subprocess call, and kept this open on that. The question was an artifact of the
+old shape, where the timeout enforcer and the file's owner were different
+processes and the parent had to reach across. Once they are the same thread it
+stops existing. (Third time machinery was carried over from the design being
+replaced, after the pickling detour and `requeue`.)
+
+### What moves rather than disappears
+
+- **Marker writing** stops being special: the killer and the marker-writer are
+  the same thread, so `.timeout.stl` is written on the ordinary path.
+- **`_child_pids` before the kill** stays — a `--one-file` child must still have
+  its Blender grandchild reaped. Process-tree logic, already noted in D3.
+
+### Stale justifications retired with it
+
+The docstring claimed the kill is safe because "the file is retried once, then
+set aside" — D6 removed retry. It also carried the `_status_snapshot`
+workaround and the `Manager()` deadlock commentary, both of which D3 deletes
+along with the proxy.
+
+---
+
+## D9 — Volume is measured at open, like any other fact
+
+**Decided.**
+
+### The problem as it was framed
+
+Seam recovery fires when PyMeshFix reports success — nm=0, open=0, every defect
+count clean — and has quietly deleted part of the model:
+
+```python
+_vol_before = _mesh_volume(working)      # before PyMeshFix
+_vol_after  = _mesh_volume(_pmf_tmp)     # after
+if _vol_after < _vol_before * _VOLUME_LOSS_LIMIT and not _is_seam_piece:
+    -> _repair_by_seam_split(...)
+```
+
+Mandy's head: 13,730 mm³ → 11,676, a 121,537-face component gone, reported `ok`.
+Invisible to everything else — the deleted region sits inside the model's own
+bounding box, so the bbox check stays quiet too.
+
+That looked like a problem for the module design, because every other predicate
+asks about *a mesh* (`isRequiredDecimation` reads a face count) while this one
+asks about *a transition*: 11,676 mm³ is not suspicious on its own, only beside
+13,730.
+
+### Why it is not a special case
+
+**Volume is a property of the mesh, measured at open, like triangle count and
+defect counts.** The DTO carries it because that is what the DTO is for — not
+because seam recovery asked for it. `repairer` then compares what it measures
+now against what the DTO already holds, and there is no transition fact needing
+a home.
+
+The awkwardness came from meeting volume first *inside* the recovery logic and
+concluding it belonged to it. Every operation that transforms a mesh produces a
+new `Stl` with fresh measurements; comparing against the previous one is
+available to anyone, stored for no one.
+
+### Heavier state
+
+Scalars live on the DTO. Vertex maps and edge counts are megabytes and do not —
+but they are already computed and discarded repeatedly:
+`scan_mesh_errors(return_edges=True)` builds a packed edge map that
+`_open_loops_are_printable` recomputes a few lines later.
+
+Those can be kept on disk beside the working file and reloaded, so a step can be
+skipped or re-entered without redoing the scan. The mechanism already exists:
+`--one-file` writes `.decimate.stl` and `.pymeshfix.stl` intermediates and
+deletes them in a `finally`. Treating them as resumable checkpoints is a change
+of intent, not of machinery.
+
+**Caution, from a bug already hit once.** A cache keyed only by filename goes
+stale when the file is rewritten. The parts protocol solved that with
+`~`-prefixed pending names, so the convention exists — but a scan cache is
+easier to get subtly wrong than a whole-file rename, because a stale *number*
+still looks plausible where a missing file does not.
+
+---
+
+## D10 — The budget arithmetic stays in `--one-file`
+
+**Decided.** Same logic as now, unchanged.
+
+### It was never cross-cutting
+
+The question claimed the arithmetic had no home because decimation, repair and
+Blender all draw on one mesh budget and Blender's share depends on what earlier
+steps spent. Traced against the code, every budget computation **already runs
+inside the child process**:
+
+| site | function | process |
+|---|---|---|
+| 2633, 2867, 2989 | `_process_file_impl` → `_part_cap` + `_arm_mesh_alarm` | child |
+| 2101, 2158, 2172 | `_run_blender_script` / `fix_stl` / `blender_decimate` → `_blender_budget` | child |
+| 3726 | `--one-file` entry → `_arm_mesh_alarm(TIMEOUT_PART or _effective_timeout())` | child |
+
+So the arithmetic is not scattered across modules needing a shared owner. It is
+one process tracking its own elapsed time, which is exactly what "decimation,
+repair and Blender share one budget" means in practice. `elapsed` is the child's
+own clock.
+
+Fifth time in this discussion a difficulty came from importing the old design's
+framing rather than from the new design — after the pickling detour, `requeue`,
+the watchdog gap, and volume-as-a-transition-fact.
+
+### The one parent-side budget decision
+
+`stl_batch_fix.py:3436`, in `process_file_subprocess`:
+
+```python
+_budget = int(budget) if budget else _effective_timeout()
+```
+
+That is the parent deciding **how long to wait for a child before killing it**.
+Under D3 and D8 it becomes the worker thread's `communicate(timeout=)`.
+
+The split is clean rather than complicated:
+
+- the **parent** owns *when to give up on a child*
+- the **child** owns *how to spend its own time*
+
+### What it means for the operation modules
+
+`decimator`, `repairer` and `blender_handler` do not each own a timeout policy.
+They receive the remaining time, or ask the child's clock for it — so the
+injected-capability pattern from D5 covers this too, and no budget owner is
+needed.
+
+---
+
+## D11 — Status is a plain dict under a lock, written by the owning thread
+
+**Decided.**
+
+### What the state actually is
+
+Four fields per worker, written once when a file is picked up and removed when
+it finishes:
+
+```python
+_worker_status[pid] = {'rel':     rel,            # which file
+                       'started': _t.monotonic(), # when it was picked up
+                       'bytes':   _bytes,         # size on disk
+                       'tris':    _tris}          # triangle count from the header
+```
+
+Never updated mid-file, which is why the panel can say "on this file for 41m"
+but nothing about progress within it.
+
+Three consumers: the worker panel at 4 Hz (all four fields), the watchdog
+(`started` only — dies with D8), and a stale-row sweep.
+
+### Why it needs so much machinery today
+
+All of it follows from the dict living in another process with killable writers:
+
+- **`_status_snapshot`** reads the proxy on a throwaway daemon thread it never
+  joins, because a `Manager` proxy call has no timeout and a worker SIGKILLed
+  mid-read blocks the parent forever — observed as `futex_do_wait`, 0 % CPU,
+  the TUI still redrawing stale rows.
+- **The stale-row sweep** exists because a SIGKILLed worker never reaches the
+  line that pops its own entry, so its row would count up forever against a file
+  nobody is working on.
+- **`_pid_is_live`** reads `/proc/<pid>/stat` because `os.kill(pid, 0)` succeeds
+  for a zombie.
+
+### What replaces it
+
+A plain `dict` guarded by a `threading.Lock`. Writers are threads in the same
+process; a thread is never SIGKILLed mid-write, and a thread that finishes
+always runs its own cleanup. So:
+
+| today | with threads |
+|---|---|
+| `_status_snapshot` daemon-thread read | `with lock: return dict(status)` |
+| stale-row sweep | deleted — entries cannot be orphaned |
+| `_pid_is_live` on this path | deleted |
+
+The owning thread writes its entry on pickup and removes it on completion, both
+under the lock; the TUI copies the dict under the same lock at 4 Hz. Four
+fields, a sub-microsecond critical section, no contention worth designing
+around.
+
+The question of whether status could leave the `Manager` proxy was already
+answered by D3 — removing the process pool removes the proxy. What was left of
+it, *who reports status*, is answered here: the thread that owns the file.
+
+### What becomes possible
+
+Status can now be updated **mid-file**, because the writer is not a process that
+must survive being killed. The step E start line already knows a mesh is about
+to spend minutes inside PyMeshFix; that could appear in the panel rather than
+only in the log.
+
+---
+
 ## Open, not yet decided
 
-**Nothing on the pool side.** O1–O8 are all closed: five became decisions (D4b,
-D7, D8, D9, D10), two were folded into D6, and one — O4 — turned out to have
-been answered already by D3.
+**Nothing on the pool side.** Every question raised during the pool design is
+closed: five became decisions (D5, D8, D9, D10, D11), two were folded into D7,
+and one turned out to have been answered already by D3.
 
 What remains open belongs to the **mesh pipeline**, not the pool, and is
 recorded in `TODO.md` item 1: extracting the steps of `_process_file_impl`
