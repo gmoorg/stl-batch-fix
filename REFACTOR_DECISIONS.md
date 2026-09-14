@@ -847,6 +847,190 @@ case, which is a single model whose shells belong together. Its one useful
 result: part 0 repaired correctly at 200,546 faces, visually confirmed, which
 is evidence *for* decimate-then-split producing sound geometry.
 
+### Proposed pipeline — `_process_file_impl` restructured
+
+**Draft, for review.** Four changes agreed 2026-09-14 are marked **[NEW]**;
+everything else restates current behaviour with its real condition, because the
+prose descriptions of this function have repeatedly described the source order
+rather than the execution order.
+
+Entered once per mesh. Parts re-enter it with `is_part=True`.
+
+#### 0. Skip checks — **[NEW: extracted]**
+
+```text
+if is_part:                         skip this phase entirely
+if exists(dst):                     -> skip "already fixed"
+if exists(dst_base.broken.stl):     -> skip "previously broken"
+if exists(dst_base.failed.stl):     -> skip "previously failed"
+if exists(dst_base.unrepaired.stl): -> skip "previously unrepaired"
+if exists(dst_base.open.stl):       -> skip "previously open-edges"
+```
+
+Pure filename predicates — no mesh is read. Extracted as
+`should_skip(dst, dst_base) -> reason | None`, this removes **9 of the 23
+exits** from the main function on its own.
+
+#### 1. Integrity
+
+```text
+n_tris, is_ascii, err = check_stl_integrity(src)
+if err:                             -> corrupt, copy to .broken.stl, exit
+```
+
+Also the first point where `fmt` and `dims_mm` are known, so they are recorded
+here.
+
+#### 2. Decimate — **[NEW: moved ahead of the scan]**
+
+```text
+if MAX_FACES > 0 and n_tris > MAX_FACES:
+        decimate to MAX_FACES        (fast_simplification)
+        working = <decimated temp>
+```
+
+The limit test is free — the triangle count is bytes 80–84 of the header. The
+scan is the expensive part, so testing the cheap condition first is strictly
+better.
+
+**What this fixes.** Today a 5.1 M-triangle file is scanned *before*
+decimation, exceeds `_LARGE_MESH_TRI_LIMIT` (2 M), and returns
+`nm=-1 open=-1` — unmeasurable. That scan is wasted work, and its `-1` sentinel
+then threads through the rest of the function as a special case. Decimate first
+and nothing over `MAX_FACES` ever reaches the scanner, so
+**`_LARGE_MESH_TRI_LIMIT` largely dissolves as a concept.**
+
+**What it does not fix, and must be stated:** defect counts remain
+post-decimation. `Lower_Body.stl` records `nm 134 -> 0` and nobody knows what
+the source had. The new order does not recover that — it only stops the
+pipeline from pretending otherwise, because there is now exactly one scan.
+
+#### 3. Scan
+
+```text
+nm, open              = scan_mesh_errors(working)
+seam_edges, seam_loops = find_winding_seams(working)
+```
+
+Always runs, on whatever `working` now points at. A file under `MAX_FACES`
+skipped step 2 and is scanned at source size — so this is *decimate if needed,
+then scan, always*, not *decimate instead of scanning*.
+
+#### 4. Clean-copy shortcut
+
+```text
+if nm == 0 and open == 0 and seam_loops == 0:
+        copy working -> dst          -> ok (clean copy)
+```
+
+The seam condition is load-bearing: a mesh can be `nm=0 open=0` and still hold
+a reversed region. Without it such a mesh takes the shortcut past every repair
+stage, which is exactly what happened to the model that prompted the seam work.
+
+#### 5. Split — **[NEW: one call site, no B2]**
+
+```text
+if not is_part and pymeshlab available:
+        parts = split_shells(working)
+        if parts:
+                for each part: repair inline (recursive, is_part=True)
+                all ok    -> merge            -> ok
+                some ok   -> merge what repaired -> open (+ source kept)
+                none      -> failed
+```
+
+**B and B2 collapse into this.** They were the same operation reached two ways:
+step B ran first in source order, tested `_split_deferred` and skipped itself;
+B2 did the real work later. Execution order was already decimate-then-split
+(D13) — the source order merely disguised it. `_split_deferred`, the `_why`
+message and the `step B: deferred` log line all disappear.
+
+The recursion stays: each part gets the full pipeline, and depth is capped by
+construction because the whole block is guarded by `not is_part`.
+
+#### 6. Repair — PyMeshFix
+
+```text
+needs_repair = nm > 0 or open > 0 or seam_loops > 0
+
+if not pymeshfix available:   skip "unavailable"
+elif not needs_repair:        skip "nothing-to-repair"
+else:
+        fill_holes -> remove_smallest_components -> clean
+        working = <repaired temp>;  nm, open = new counts
+```
+
+#### 7. Seam recovery (E0)
+
+```text
+if volume_after < 0.95 * volume_before
+   and volume_before >= _VOLUME_MIN_MEANINGFUL
+   and not is_seam_piece:
+        split at closed winding-seam loops, repair each region, merge
+        if recovered:                -> ok
+```
+
+Triggered by **enclosed volume**, not bounding box — Mandy lost its head with
+the bbox unchanged, because the head sat inside the silhouette. Measured
+2-for-20 this run, on the wrong population: only ~6 of 20 were real destruction
+(27–34% retained), twelve retained 85–94%, and the threshold cannot simply be
+tightened because Mandy itself sits at 85%.
+
+#### 8. Post-verify
+
+```text
+if nm == 0 and open == 0:
+        nm, open = independent rescan    # pymeshfix self-report is unreliable
+```
+
+#### 9. Print-scale gate
+
+```text
+if nm == 0 and open > 0 and MIN_LAYER > 0:
+        measure every open boundary loop
+        largest < MIN_LAYER  ->  open = 0           (accept, skip Blender)
+        else                 ->  record "above-print-scale"
+```
+
+`nm > 0` deliberately never reaches here: those are topology errors, not holes,
+and a slicer can genuinely mis-fill them. Open issue: `MIN_LAYER = 0.6 mm` is
+14.6% of the Neck_Cuff's diagonal — on a 4 mm part this waves through a gap
+spanning a seventh of the model.
+
+#### 10. Success, or Blender fallback
+
+```text
+if nm == 0 and open == 0:
+        move working -> dst          -> ok
+
+else:   Blender (step F)
+        ok           -> ok
+        open_only    -> PyMeshFix once more -> ok, else .open.stl
+        unrepaired   -> PyMeshFix once more -> ok, else .unrepaired.stl
+        neither      -> .broken.stl or .failed.stl
+```
+
+#### What the rewrite buys
+
+| | now | proposed |
+|---|---|---|
+| exits in the main function | 23 | ~14 |
+| split call sites | 2 (B, B2) | 1 |
+| scans of an oversized mesh | 2 (one useless) | 1 |
+| `-1` sentinel threading through | yes | no |
+
+#### Still unresolved
+
+- **The state baton.** `working`, `working_tris`, `nm`, `open`, `stats` and
+  `temps` are read and written by nearly every step. Extracting a step means
+  deciding what it takes and returns, and for most the honest answer is "the
+  whole state, and the whole state back" — which is the `Stl` DTO from the
+  target design, not a parameter list. **This draft does not solve it.**
+- **Source defect counts are unknowable** for anything decimated. Worth
+  deciding whether that is acceptable or whether a cheap pre-scan is wanted.
+- **Does seam recovery earn its place?** 2-for-20, and both successes are the
+  same model duplicated in the collection.
+
 ### Float drift was tested and ruled out (2026-09-14)
 
 **Do not re-propose quantised vertex welding.** Reading
@@ -963,7 +1147,7 @@ enough (`min_feature` 0.003–0.011 mm) that PyMeshFix had ample real geometry t
 work with, and all 19 returned `ok`. The constants were wrong and the meshes
 were good enough to absorb it.
 
-### `MAX_FACES` is a memory ceiling doing a quality job
+### The fused seam on Leia is decimation, not repair
 
 The user noticed the Leia output looked *"slightly distorted — two touching
 parts have a fused line between them, like hip and leg stitched together rather
@@ -988,13 +1172,17 @@ silhouette — so it is cheap to collapse across, and QEC does. At 5.7x on a par
 whose features are already ~85x below the layer height, that is the visible
 result.
 
-**The constant is the problem, not the algorithm.** `MAX_FACES = 900_000`
+**The same limit lands very differently by scale.** `MAX_FACES = 900_000`
 applies identically to a 12.5 mm hip and a 200 mm Falcon. The Falcon, at 393 k
-triangles, was never decimated at all; Leia's Lower_Body lost 82% of its
-geometry to reach the same ceiling. A target derived from printable resolution
-(`min_feature` vs `MIN_LAYER`) rather than a flat face count would cut far less
-and keep the creases. Right now `MAX_FACES` is serving as both a memory ceiling
-and a quality target with one number.
+triangles, was never decimated at all; Leia's `Lower_Body` lost 82% of its
+geometry to reach the same ceiling.
+
+That reads like an argument for a resolution-derived target — decimate only
+until features reach printable size — and it is wrong. See the next section:
+`MAX_FACES` is Bambu's complexity threshold, and models are scaled to printable
+size *after* repair, so a target computed from `min_feature` at authoring scale
+is wrong by the scale factor. **The fused seam is a trade-off of reaching 900 k
+at all, not a badly chosen number.**
 
 **Also exposed by this trace:** `Lower_Body.stl` scanned as `nm=-1 open=-1` —
 over the 2 M limit, so never measured. The `nm 134 -> 0, open 96 -> 0` recorded
