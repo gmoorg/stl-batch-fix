@@ -39,8 +39,8 @@ needs repairing all over again.
 | Library | Role | Required |
 | --- | --- | --- |
 | **fast_simplification** | Primary decimator (numpy arrays, no mesh database) | Strongly recommended |
-| **pymeshfix** | Repairs non-manifold AND open edges | Recommended |
-| **pymeshlab** | Shell splitting and merging, decimation fallback | Recommended |
+| **pymeshfix** | Repairs non-manifold AND open edges | **Required** |
+| **pymeshlab** | Shell splitting and merging, decimation fallback | **Required** |
 | **numpy** | Mesh arrays throughout | Required |
 | **Blender 4.x** | Last-resort repair when the Python passes cannot finish | Optional but useful |
 

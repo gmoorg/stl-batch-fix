@@ -393,6 +393,19 @@ branch to a differently-scaling decimator. (The pymeshlab and blender rungs of
 the ladder have therefore never executed. They are not proven dead — rung one
 simply never failed — but nothing is known about how they scale.)
 
+**Dropping the pymeshlab rung does not drop pymeshlab.** It stays a hard
+dependency for a different job: `split_shells` and `_merge_parts` are the only
+implementations of shell splitting and merging, with no fallback of any kind.
+"Remove the pymeshlab decimation rung" must not be read as "remove pymeshlab" —
+the `pymeshlab_handler` tool module survives D12 intact.
+
+Both pymeshlab and pymeshfix are now **checked at startup**
+(`require_mesh_libraries`, called from both entry points), for the same reason
+D12 requires a decimator: their absence used to surface as a mesh *outcome*
+rather than a setup error. A missing pymeshlab made `split_shells` return `[]`,
+indistinguishable from "single shell", so a run silently stopped splitting and
+the log said nothing.
+
 #### Worker shedding
 
 `get_next` returns `None` for worker N when there is no longer room for it, and

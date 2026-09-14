@@ -47,7 +47,10 @@ if "$PYTHON" -c "import pymeshlab" 2>/dev/null; then
     ok "pymeshlab $ver already installed"
 else
     warn "pymeshlab not found — installing..."
-    "$PYTHON" -m pip install pymeshlab && ok "pymeshlab installed" || fail "pymeshlab install failed"
+    "$PYTHON" -m pip install pymeshlab && ok "pymeshlab installed" || {
+        fail "pymeshlab install failed — it is REQUIRED (shell splitting and merging have no fallback)"
+        exit 1
+    }
 fi
 
 # ── pymeshfix ─────────────────────────────────────────────────────────────────
@@ -57,7 +60,8 @@ if "$PYTHON" -c "import pymeshfix" 2>/dev/null; then
 else
     warn "pymeshfix not found — installing..."
     "$PYTHON" -m pip install pymeshfix && ok "pymeshfix installed" || {
-        warn "pymeshfix install failed — the script will still work but open-edge repair uses Blender only"
+        fail "pymeshfix install failed — it is REQUIRED (hole filling has no fallback)"
+        exit 1
     }
 fi
 

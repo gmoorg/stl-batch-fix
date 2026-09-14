@@ -107,9 +107,9 @@ not the directory name, is what guarantees correctness.)
 
 | Library | Role | Required |
 |---|---|---|
-| **pymeshlab** | Decimation, NM repair, degenerate face removal, shell splitting | Strongly recommended |
-| **pymeshfix** | Open-edge fill (fast, robust watertight repair) | Recommended |
-| **numpy** | Required by pymeshfix | Recommended |
+| **pymeshlab** | Decimation, NM repair, degenerate face removal, shell splitting | **Required** — checked at startup |
+| **pymeshfix** | Open-edge fill (fast, robust watertight repair) | **Required** — checked at startup |
+| **numpy** | Required by pymeshfix; mesh arrays throughout | **Required** |
 | **Blender 4.x** | Fallback repair for meshes that Python passes cannot fully fix | Optional but useful |
 
 Run `bash install.sh` to check and install Python libraries automatically.

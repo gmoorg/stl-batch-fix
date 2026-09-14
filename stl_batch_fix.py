@@ -926,6 +926,40 @@ def split_shells(src, dst_dir, L=None):
         return []
 
 
+def require_mesh_libraries():
+    """Exit unless PyMeshLab and PyMeshFix are importable.
+
+    Both were optional, and both degraded silently rather than loudly:
+
+    - PyMeshLab is the ONLY implementation of shell splitting (`split_shells`)
+      and merging (`_merge_parts`).  Without it `split_shells` returns [] —
+      indistinguishable from "this mesh is a single shell" — so a run on a
+      machine missing it quietly stops splitting altogether and the log says
+      nothing.  `_merge_parts` has no guard at all and fails with a NameError
+      caught as an ordinary "merge failed", sending the caller down the
+      whole-mesh path.  Neither leaves a trace that the tool was absent.
+    - PyMeshFix is the only hole-filling repair; without it every mesh with
+      open edges finishes as `.open.stl` with reason "pymeshfix unavailable".
+
+    A missing library is a setup mistake, not a mesh outcome, and it should
+    not be discoverable only by reading a summary column days later.  Failing
+    at startup matches how a missing Blender is already treated.
+    """
+    missing = []
+    if not _PYMESHLAB_AVAILABLE:
+        missing.append(('pymeshlab', 'shell splitting and merging'))
+    if not _PYMESHFIX_AVAILABLE:
+        missing.append(('pymeshfix', 'hole filling and open-edge repair'))
+    if not missing:
+        return
+    for _name, _role in missing:
+        print(f"Error: {_name} is required ({_role}) but is not installed.")
+    print("Install it with:  " + " ".join(
+        ["python3 -m pip install"] + [_n for _n, _ in missing]))
+    print("Or run:  ./install.sh")
+    sys.exit(1)
+
+
 def retarget_logs(input_folder=None):
     """Point the log files at the output tree for `input_folder`.
 
@@ -3689,6 +3723,11 @@ if __name__ == '__main__' and _ONE_FILE:
     # --input happens to be the collection folder.
     retarget_logs()
 
+    # A hand-launched child is checked too: this is the process that actually
+    # calls split_shells/_merge_parts, so guarding only main() would leave the
+    # real consumer of the dependency unprotected.
+    require_mesh_libraries()
+
     # Kill Blender before dying, on either signal.
     #
     # This process is the one that actually spawns Blender, and until this
@@ -3746,6 +3785,8 @@ if __name__ == '__main__':
         print("Install it with:  sudo apt install blender")
         sys.exit(1)
 
+    require_mesh_libraries()
+
     if not os.path.isdir(INPUT_FOLDER):
         print(f"Error: input folder not found: {INPUT_FOLDER}")
         sys.exit(1)
@@ -3799,8 +3840,11 @@ if __name__ == '__main__':
           + ("  (TIMEOUT=0 — no practical ceiling)" if not TIMEOUT else ""))
     print(f"Recursive     : {RECURSIVE}")
     print(f"Blender       : {BLENDER}")
-    print(f"PyMeshFix     : {'available' if _PYMESHFIX_AVAILABLE else 'not available'}")
-    print(f"PyMeshLab     : {'available' if _PYMESHLAB_AVAILABLE else 'not available'}")
+    # Both are required — require_mesh_libraries() has already exited if either
+    # is missing, so these can only read 'available'.  Kept as a visible record
+    # of what the run is using.
+    print(f"PyMeshFix     : {'available' if _PYMESHFIX_AVAILABLE else 'not available'}  (required)")
+    print(f"PyMeshLab     : {'available' if _PYMESHLAB_AVAILABLE else 'not available'}  (required)")
     print(f"FastSimplify  : {'available' if _FASTSIMP_AVAILABLE else 'not available (decimation falls back to PyMeshLab/Blender)'}")
     print()
 
