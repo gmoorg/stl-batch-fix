@@ -945,6 +945,39 @@ B2 did the real work later. Execution order was already decimate-then-split
 (D13) — the source order merely disguised it. `_split_deferred`, the `_why`
 message and the `step B: deferred` log line all disappear.
 
+**[NEW] A partial merge is not `open`.** The branch currently returns
+`status='open'` and writes `<name>.open.stl`. Measured on the only two files
+that took it this run — both Falcons, `split5+partial4`:
+
+```text
+Millenium_Falcon.open.stl   90,942 tris   nm=0  open=0
+Millenium_Falcon.open.stl   90,942 tris   nm=0  open=0
+```
+
+**Both are perfectly watertight.** Every part that reaches the merge passed its
+own repair, so a merge of four clean shells is clean. The label is asserted by
+the code path and never measured, and it is false. What is true about those
+files is that **4 of 5 shells are present** — incompleteness, not open edges.
+
+Three consequences:
+
+- **`status='open'` currently means two unrelated things** — *has open edges*
+  and *is missing parts*. That is why the run's summary shows 2 `open` files
+  with no open edges. Separating them makes both countable.
+- **The status is derivable, not diagnosable.** `n_ok` and `len(parts)` are
+  both in hand when the file is written; `4/5` needs no scan. It is already
+  carried on the result as `'partial': "4/5"` and then contradicted by the
+  status beside it.
+- **The suffix should match**, since the skip logic keys on it: writing to
+  `<name>.open.stl` makes the file itself claim open edges, and a rerun then
+  skips it for the wrong stated reason.
+
+**A bbox condition would not work**, though it was the natural proposal. Both
+files recorded `drift=[]`: the dropped shell was debris well inside the
+Falcon's silhouette, so removing it moved no extent. That is the same blind
+spot that let PyMeshFix delete Mandy's head unflagged — volume catches it,
+bounding box cannot.
+
 The recursion stays: each part gets the full pipeline, and depth is capped by
 construction because the whole block is guarded by `not is_part`.
 
