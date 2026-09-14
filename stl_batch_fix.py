@@ -197,6 +197,10 @@ if __name__ == '__main__' and len(sys.argv) > 1:
                              f"(default: {TIMEOUT_PART}, 0=one whole-file budget)")
     parser.add_argument('--max-faces',    type=int, default=None,
                         help=f"Decimate mesh if face count exceeds this (default: {MAX_FACES}, 0=disabled)")
+    parser.add_argument('--stats',        action='store_true',
+                        help="Print step counts and success rates from the "
+                             "existing summary file and exit. Reads "
+                             "--input's summary if given, else the default.")
     parser.add_argument('--one-file',     default=None,
                         help="Repair exactly this one file and exit. Used by the "
                              "worker to run each file in its own process, and "
@@ -223,9 +227,11 @@ if __name__ == '__main__' and len(sys.argv) > 1:
     _ONE_FILE   = args.one_file
     _ONE_IS_PART = args.is_part
     _RESULT_FD  = args.result_fd
+    _STATS      = args.stats
 else:
     _ONE_FILE = _RESULT_FD = None
     _ONE_IS_PART = False
+    _STATS = False
 
 # ---------------------------------------------------------------------------
 # Blender script template — loaded from the companion file at startup.
@@ -848,6 +854,7 @@ def _merge_parts(parts, dst, dst_dir, L, stats, failed_copy, unrepaired_copy,
         L(f"merged {len(parts)} parts → {os.path.basename(dst)}  ({size:,} bytes)"
           f"; removed {_n_removed} part file(s)")
         stats['path'].append(f'split{len(parts)}+merge')
+        _step(stats, 'split', 'ok', f'{len(parts)}parts')
         return {'rel': rel, 'status': 'ok', 'dst': os.path.basename(dst),
                 'size': size, 'is_ascii': False, 'split': len(parts)}
     except Exception as _merge_err:
@@ -1249,6 +1256,7 @@ def _repair_by_seam_split(src_mesh, dst, dst_base, temps, stats, L, rel,
     n_ok = 0
     for p in parts:
         r = _repair_part(p, L=L, label='region')
+        _absorb_part_steps(stats, r, 'region')
         L(f"  region {os.path.basename(p)}: {r['status']}")
         if r['status'] in ('ok', 'skip'):
             n_ok += 1
@@ -1352,7 +1360,59 @@ SUMMARY_FILE = "/mnt/sda2/STL/Fixed/repair_summary.tsv"
 # new field coming back empty rather than shifting every value one place left.
 _SUMMARY_COLUMNS = ('file', 'status', 'secs', 'tris_in', 'tris_out',
                     'nm_in', 'open_in', 'blender_secs', 'path', 'bbox_drift',
-                    'blender_runs', 'reason')
+                    'blender_runs', 'reason', 'steps_ran', 'steps_failed',
+                    'fmt', 'dims_mm')
+
+
+# Step outcomes recorded per mesh, so success rates can be counted instead of
+# grepped out of prose.
+#
+# The step log says what happened, but only in sentences: counting "how often
+# did the post-Blender PyMeshFix rescue the output" meant regexing 14,843 lines
+# and getting 26 markers for 13 events, because one event prints two lines.
+# Worse, `result: open` and `result: unrepaired` appeared ZERO times in those
+# lines while a summary row recorded status='open' — so those branches could not
+# be told apart from branches that never ran.
+#
+# `ok` and `fail` are outcomes of a step that ran; `skip` means it did not run,
+# and always carries a reason.  A step may appear more than once per mesh
+# (pymeshfix runs again after Blender), which is why this is a list and not a
+# dict -- the order is the route the mesh actually took.
+def _step(stats, name, outcome, reason=''):
+    """Record that `name` ended as `outcome` ('ok' | 'fail' | 'skip')."""
+    if stats is None:
+        return
+    stats.setdefault('steps', []).append((name, outcome, reason))
+
+
+def _absorb_part_steps(stats, part_result, prefix='part'):
+    """Fold a part's step outcomes into its parent's stats.
+
+    Named `part/<step>` so a step that happened inside a shell stays
+    distinguishable from one the parent ran itself -- otherwise a file that
+    split into 39 shells would report 39 PyMeshFix runs as though the whole
+    mesh had been repaired 39 times."""
+    if stats is None or not isinstance(part_result, dict):
+        return
+    for name, outcome, reason in part_result.get('steps') or ():
+        _step(stats, f'{prefix}/{name}', outcome, reason)
+
+
+def _steps_ran(stats):
+    """`name:outcome` for every step that executed, in order."""
+    return '+'.join(f'{n}:{o}' for n, o, _ in stats.get('steps', ())
+                    if o != 'skip') or ''
+
+
+def _steps_failed(stats):
+    """`name:reason` for every step that failed or was skipped.
+
+    Skips are carried here rather than dropped: 'pymeshfix never ran because it
+    is unavailable' and 'pymeshfix ran and failed' are different facts, and the
+    old logging could not distinguish them after the fact."""
+    return '+'.join(f'{n}:{o}' + (f'({r})' if r else '')
+                    for n, o, r in stats.get('steps', ())
+                    if o != 'ok') or ''
 
 
 def _reset_summary_file():
@@ -1393,6 +1453,86 @@ def log_summary(row):
     be answered without parsing prose."""
     line = '\t'.join(str(row.get(c, '')) for c in _SUMMARY_COLUMNS) + '\n'
     _append_locked(SUMMARY_FILE, line)
+
+
+def step_statistics(path=None):
+    """Count step outcomes across a summary file.
+
+    Returns (per_step, totals) where per_step maps a step name to its
+    {'ok': n, 'fail': n, 'skip': n, 'reasons': {reason: n}} and totals counts
+    the files considered.
+
+    This exists because the step log could not answer "how often did X work".
+    Counting it there meant regexing prose: one event prints several lines, so
+    26 grep hits meant 13 events, and the branches that write `result: open`
+    logged nothing at all -- 0 occurrences in 14,843 lines next to a summary row
+    that said status='open'.  A step that never ran and a step that ran and
+    failed were indistinguishable after the fact."""
+    per_step = {}
+    totals = {'files': 0, 'with_steps': 0}
+
+    def _bump(name, outcome, reason=''):
+        d = per_step.setdefault(name, {'ok': 0, 'fail': 0, 'skip': 0,
+                                       'reasons': {}})
+        d[outcome] = d.get(outcome, 0) + 1
+        if reason:
+            d['reasons'][reason] = d['reasons'].get(reason, 0) + 1
+
+    for rec in read_summary(path):
+        totals['files'] += 1
+        seen = False
+        # steps_ran carries the steps that executed; steps_failed carries
+        # failures AND skips, each with its reason.  A step that ran fine
+        # appears only in the first, a skip only in the second.
+        for item in (rec.get('steps_ran') or '').split('+'):
+            if not item:
+                continue
+            name, _, outcome = item.partition(':')
+            if outcome == 'ok':
+                _bump(name, 'ok')
+                seen = True
+        for item in (rec.get('steps_failed') or '').split('+'):
+            if not item:
+                continue
+            name, _, rest = item.partition(':')
+            outcome, _, reason = rest.partition('(')
+            reason = reason.rstrip(')')
+            if outcome in ('fail', 'skip'):
+                _bump(name, outcome, reason)
+                seen = True
+        if seen:
+            totals['with_steps'] += 1
+    return per_step, totals
+
+
+def print_step_statistics(path=None):
+    """Render step_statistics() as a table."""
+    per_step, totals = step_statistics(path)
+    print(f"Summary  : {path or SUMMARY_FILE}")
+    print(f"Files    : {totals['files']:,} "
+          f"({totals['with_steps']:,} with step data)")
+    if not per_step:
+        print()
+        print("No step data. Rows written before the steps_ran/steps_failed")
+        print("columns existed carry no step outcomes — rerun to populate it.")
+        return
+    print()
+    print(f"{'step':<14}{'ran':>7}{'ok':>7}{'fail':>7}{'skip':>7}  {'rate':>7}")
+    print('-' * 56)
+    for name in sorted(per_step, key=lambda n: -(per_step[n]['ok']
+                                                 + per_step[n]['fail'])):
+        d = per_step[name]
+        ran = d['ok'] + d['fail']
+        rate = f"{100 * d['ok'] / ran:.0f}%" if ran else '-'
+        print(f"{name:<14}{ran:>7,}{d['ok']:>7,}{d['fail']:>7,}"
+              f"{d['skip']:>7,}  {rate:>7}")
+    print()
+    for name in sorted(per_step):
+        reasons = per_step[name]['reasons']
+        if reasons:
+            detail = ', '.join(f"{r}={c}" for r, c in
+                               sorted(reasons.items(), key=lambda kv: -kv[1]))
+            print(f"  {name}: {detail}")
 
 
 def read_summary(path=None):
@@ -2409,6 +2549,17 @@ def process_file(src, is_part=False):
         # to find out would be absurd.
         if result is not None and stats.get('bbox_drift'):
             result['bbox_drift'] = stats['bbox_drift']
+        # Carry the step outcomes out the same way, for the same reason: a part
+        # is repaired by its own process_file() call with its own stats, which
+        # is then discarded, and log_summary only runs for `not is_part`.  So
+        # every step inside a split file — the PyMeshFix pass, the Blender
+        # fallback, all of it — was invisible to the summary.  Measured on the
+        # foot1 fixture: its part 1 ran PyMeshFix (failed, empty mesh) and a
+        # Blender fallback that succeeded, and the parent row recorded
+        # path=none with no steps at all.  The parent folds these in via
+        # _absorb_part_steps().
+        if result is not None and stats.get('steps'):
+            result['steps'] = stats['steps']
         if not is_part:
             # Read the delivered triangle count from the output itself rather
             # than tracking it through the pipeline — whatever path ran, this is
@@ -2444,6 +2595,18 @@ def process_file(src, is_part=False):
                 'reason':       (result or {}).get('reason', ''),
                 'path':         '+'.join(stats['path']) or 'none',
                 'bbox_drift':   stats.get('bbox_drift', ''),
+                # Which steps ran and how they ended.  'path' records the route;
+                # these record the outcome of each step on it.
+                'steps_ran':    _steps_ran(stats),
+                'steps_failed': _steps_failed(stats),
+                # Source format and model size.  Both were already known and
+                # thrown away: is_ascii/is_obj ride on the result dict, and
+                # stl_bounds() is called twice per file for drift detection.
+                # Recorded because questions like "do ASCII sources fail more
+                # often" and "is the print-scale gate firing on small models"
+                # cannot be asked without them.
+                'fmt':          stats.get('fmt', ''),
+                'dims_mm':      stats.get('dims_mm', ''),
             })
 
 
@@ -2513,6 +2676,10 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
     is_obj = src.lower().endswith('.obj')
 
     n_tris, is_ascii, err = check_stl_integrity(src)
+    # Recorded here, the first point where both are known, so a corrupt file
+    # still reports the format it claimed to be.
+    if stats is not None:
+        stats['fmt'] = 'obj' if is_obj else 'ascii' if is_ascii else 'binary'
     if err:
         if src != broken_copy:  # avoid copying a part onto itself
             _ensure_parent(broken_copy)
@@ -2556,6 +2723,14 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         stats['tris_in'] = n_tris
         stats['nm_in']   = nm_src
         stats['open_in'] = open_src
+        # Model extents, recorded once from the source.  The bbox is already
+        # streamed here for drift detection, so this costs one more call on a
+        # file that is about to be read anyway.
+        _src_bounds = stl_bounds(src)
+        if _src_bounds:
+            _lo, _hi = _src_bounds
+            stats['dims_mm'] = 'x'.join(f'{_hi[_i] - _lo[_i]:.1f}'
+                                        for _i in range(3))
 
         # Perfect mesh within limit — just copy, nothing to do.
         # Winding seams are a defect scan_mesh_errors cannot see — it counts
@@ -2681,6 +2856,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                         L(f"  part: {os.path.basename(part_path)}")
                         part_result = _repair_part(part_path, L=L)
                         part_results.append(part_result)
+                        _absorb_part_steps(stats, part_result)
                         L(f"  part {os.path.basename(part_path)}: {part_result['status']}")
                     if len(part_results) < len(parts):
                         part_results.append({'status': 'interrupted'})
@@ -2761,6 +2937,8 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                               f"({_partial:,} bytes); dropped {', '.join(_lost)}; "
                               f"source kept as {os.path.basename(failed_copy)}")
                             stats['path'].append(f'split{len(parts)}+partial{n_ok}')
+                            _step(stats, 'split', 'fail',
+                                  f'partial{n_ok}of{len(parts)}')
                             # stdout/stderr must be present: the runner's 'open'
                             # branch indexes them directly (the TUI uses .get(),
                             # so only the bare-script path would have crashed).
@@ -2805,8 +2983,10 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                         nm_src, open_src = _dec_nm, _dec_open
                         _dec_done = True
                         stats['path'].append('fastsimp')
+                        _step(stats, 'decimate', 'ok', 'fastsimp')
                 except Exception as _dec_err:
                     L(f"decimate (fast_simplification): FAILED — {_dec_err}")
+                    _step(stats, 'decimate', 'fail', 'fastsimp')
 
             if not _dec_done and _PYMESHLAB_AVAILABLE and working_tris <= _LARGE_MESH_TRI_LIMIT:
                 L(f"step C: decimate {working_tris:,} tris → target {MAX_FACES:,} (pymeshlab)")
@@ -2819,8 +2999,10 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                     nm_src, open_src = _dec_nm, _dec_open
                     _dec_done = True
                     stats['path'].append('pymeshlab-dec')
+                    _step(stats, 'decimate', 'ok', 'pymeshlab')
                 except Exception as _dec_err:
                     L(f"decimate (pymeshlab): FAILED — {_dec_err}")
+                    _step(stats, 'decimate', 'fail', 'pymeshlab')
 
             if not _dec_done:
                 L(f"step C: decimate {working_tris:,} tris → target {MAX_FACES:,} (blender fallback)")
@@ -2840,6 +3022,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                       f"nm={nm_src}  open={open_src}{_scan_note2}")
                     _dec_done = True
                     stats['path'].append('blender-dec')
+                    _step(stats, 'decimate', 'ok', 'blender')
                 else:
                     if os.path.exists(_dec_tmp):
                         os.unlink(_dec_tmp)
@@ -2913,6 +3096,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                             L(f"  part: {os.path.basename(part_path)}")
                             part_result = _repair_part(part_path, L=L)
                             part_results.append(part_result)
+                            _absorb_part_steps(stats, part_result)
                             L(f"  part {os.path.basename(part_path)}: "
                               f"{part_result['status']}")
                         if len(part_results) < len(parts):
@@ -2958,10 +3142,13 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         _needs_pmf = nm_src > 0 or open_src > 0 or _seam_loops > 0
         if not _PYMESHFIX_AVAILABLE:
             L("skip E: pymeshfix unavailable")
+            _step(stats, 'pymeshfix', 'skip', 'unavailable')
         elif nm_src == -1 or open_src == -1:
             L("skip E: mesh too large to scan")
+            _step(stats, 'pymeshfix', 'skip', 'too-large-to-scan')
         elif not _needs_pmf:
             L("skip E: nm=0 open=0 (nothing to repair)")
+            _step(stats, 'pymeshfix', 'skip', 'nothing-to-repair')
         # Step E0 — separate regions whose winding cannot be reconciled.
         #
         # PyMeshFix rebuilds one coherent surface.  Handed a mesh containing two
@@ -3034,6 +3221,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                                 break
                             _n_run += 1
                             _r = _repair_part(_p, L=L, label='region')
+                            _absorb_part_steps(stats, _r, 'region')
                             L(f"  region {os.path.basename(_p)}: {_r['status']}")
                             if _r['status'] in ('ok', 'skip'):
                                 _n_ok += 1
@@ -3069,6 +3257,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
             try:
                 _pmf_nm, _pmf_open = run_pymeshfix(working, _pmf_tmp, L=L)
                 L(f"pymeshfix: nm={_pmf_nm}  open={_pmf_open}")
+                _step(stats, 'pymeshfix', 'ok')
 
                 # Did it repair the mesh, or delete part of it?
                 #
@@ -3098,7 +3287,9 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                         failed_copy, unrepaired_copy, open_copy,
                         elapsed=_time.monotonic() - _t0)
                     if _recovered is not None:
+                        _step(stats, 'seamsplit', 'ok')
                         return _recovered
+                    _step(stats, 'seamsplit', 'fail', 'no-recovery')
                     L("seam split did not recover it — keeping the "
                       "pymeshfix result")
 
@@ -3133,6 +3324,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                     os.unlink(_pmf_tmp)
                 _pmf_tmp = None
                 L(f"pymeshfix: FAILED — {_pmf_err}")
+                _step(stats, 'pymeshfix', 'fail', type(_pmf_err).__name__)
 
         # If clean after all python passes, post-verify with an independent edge scan
         # before writing the final output — pymeshfix self-report is not always reliable.
@@ -3152,6 +3344,7 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                           f"{_nloops} loop(s), largest {_big:.4f}mm < "
                           f"{MIN_LAYER}mm layer; accepting without blender")
                         stats['path'].append(f'subprint-open{open_src}')
+                        _step(stats, 'printscale', 'ok')
                         open_src = 0
             except Exception as _tiny_err:
                 L(f"print-scale check failed — {_tiny_err}")
@@ -3201,6 +3394,9 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         L=L, route=('obj' if is_obj else 'ascii' if is_ascii else 'fallback'),
     )
     stats['path'].append('blender')
+    _step(stats, 'blender', 'ok' if success else 'fail',
+          '' if success else ('open' if open_only else
+                              'unrepaired' if unrepaired else 'no-output'))
     # Observe only, as in step E.  Blender merges doubles and can decimate, so
     # small movement here is expected — the number is what makes it judgeable.
     if os.path.exists(dst):
@@ -3249,6 +3445,12 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                 is_ascii, is_obj, stdout, stderr, "post-blender", L, _result,
                 temps=temps)
             if r is not None:
+                # The second PyMeshFix pass, on Blender's output.  Recorded here
+                # rather than inside the helper because the helper has no stats
+                # and its return value already says which way it went.
+                _step(stats, 'pymeshfix2', 'ok' if r.get('status') == 'ok'
+                      else 'fail', '' if r.get('status') == 'ok'
+                      else r.get('status', ''))
                 return r
         _ensure_parent(open_copy)
         os.replace(dst, open_copy)
@@ -3265,6 +3467,9 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                 is_ascii, is_obj, stdout, stderr, "post-blender (unrepaired)", L, _result,
                 temps=temps)
             if r is not None:
+                _step(stats, 'pymeshfix2', 'ok' if r.get('status') == 'ok'
+                      else 'fail', '' if r.get('status') == 'ok'
+                      else r.get('status', ''))
                 return r
         size = _save_indicator(unrepaired_copy, src, [failed_copy])
         L(f"result: unrepaired (nm remains)")
@@ -3777,6 +3982,15 @@ if __name__ == '__main__' and _ONE_FILE:
         print(_json.dumps(_r, indent=2))
     # 0 = handled (whatever the outcome), 1 = no result at all.
     sys.exit(0 if _r else 1)
+
+
+if __name__ == '__main__' and _STATS:
+    # Reading a summary needs neither Blender nor the mesh libraries, so this
+    # runs before those checks.  retarget_logs() first, so `--input <tree>
+    # --stats` reads that tree's summary rather than this machine's default.
+    retarget_logs()
+    print_step_statistics()
+    sys.exit(0)
 
 
 if __name__ == '__main__':

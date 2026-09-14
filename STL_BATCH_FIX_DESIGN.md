@@ -617,6 +617,40 @@ without it the one file that killed the run is the single file missing from the
 summary. Its row is built from `_SUMMARY_COLUMNS` so adding a column cannot
 silently misalign it.
 
+### Step outcomes — why the summary counts them and the step log cannot
+
+`steps_ran` and `steps_failed` record each step as `name:outcome`, with skips
+carrying a reason. `--stats` aggregates them into per-step success rates.
+
+They exist because the step log states what happened in sentences, and sentences
+do not count. Measured while trying to answer "how often does the second
+PyMeshFix rescue Blender's output": 26 grep matches for 13 actual events,
+because one event prints two lines. Worse, `result: open` and
+`result: unrepaired` appeared **zero times in 14,843 log lines** next to a
+summary row recording `status='open'` — so a branch that never ran and a branch
+that ran without logging were indistinguishable after the fact.
+
+`ok`/`fail` mean the step ran; `skip` means it did not, and always carries why.
+"PyMeshFix never ran because it is unavailable" and "PyMeshFix ran and failed"
+are different facts that the old logging conflated.
+
+**Parts report through their parent.** A shell part is repaired by its own
+`process_file()` call with its own `stats`, discarded on return, and
+`log_summary()` only runs for `not is_part` — so every step inside a split file
+was invisible. Measured on the `foot1` fixture: its part 1 ran PyMeshFix (failed
+on an empty mesh) then a Blender fallback that succeeded, and the parent row
+recorded `path=none` with no steps at all. `process_file()` now carries `steps`
+out on the result, exactly as it already did for `bbox_drift`, and the parent
+folds them in via `_absorb_part_steps()` under a `part/` or `region/` prefix —
+prefixed so a 39-shell file does not report 39 PyMeshFix runs as though the
+whole mesh had been repaired 39 times.
+
+`fmt` and `dims_mm` record the source format and model extents. Both were
+already computed and thrown away: `is_ascii`/`is_obj` rode on the result dict,
+and `stl_bounds()` is called twice per file for drift detection. Without them,
+"do ASCII sources fail more often" and "is the print-scale gate firing on small
+models" cannot be asked.
+
 `_post_verify()` returns `(nm, open, verified)`. The third value exists because
 the first two cannot express *unknown*: a scan that could not run — ASCII input,
 a scan error, a mesh too large — used to return a bare `(0, 0)`, which callers
