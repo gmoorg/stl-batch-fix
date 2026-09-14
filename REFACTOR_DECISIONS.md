@@ -37,13 +37,17 @@ discarded inside each operation, as they are today.
 
 Values are overwritten as newer data arrives. Where a step genuinely needs the
 prior value, the DTO simply holds both — `volume` and `volume_before`, `bounds`
-and `bounds_before`. Three decisions need that: volume loss after repair (the
-Mandy seam recovery), bbox drift, and whether Blender actually ran. No
-append-only history mechanism; the cases are few and known. See D9.
+and `bounds_before`. Two decisions need that: volume loss after repair (the
+Mandy seam recovery) and bbox drift. No append-only history mechanism; the cases
+are few and known. See D9.
 
-Keep it serialisable. Results cross worker→parent as plain dicts over a JSON
-pipe, so either the DTO is plain data by construction or it gains an explicit
-`to_dict()` at the boundary.
+Keep it serialisable. The `--one-file` child reports its result to the thread
+that spawned it as a plain dict over a JSON pipe, so either the DTO is plain
+data by construction or it gains an explicit `to_dict()` at that boundary.
+
+**That is the only boundary.** Under D3 the worker is a thread in the parent
+process, not a separate process, so nothing has to be serialised between a
+worker and the parent — only between the child and the thread that owns it.
 
 **Tool modules** — `blender_handler`, `pymeshfix_handler`, `pymeshlab_handler`.
 One tool each, no policy. This is where the invisible-Blender bug came from:
@@ -152,7 +156,9 @@ already made unnecessary. With worker threads driving subprocesses:
 **The GIL does not matter**: every worker thread is blocked in `communicate()`
 waiting on a subprocess, not computing.
 
-**Nothing crosses a process boundary** except argv and a return code. An earlier
+**The only process boundary is child↔thread**: argv and `--result-fd` going
+down, a JSON result dict and a return code coming back. Worker and parent are
+the same process, so nothing is serialised between them. An earlier
 worry about pickling lambdas was an artifact of `ProcessPoolExecutor` — it does
 not apply to this design. Measured, for the record: a lambda cannot be pickled,
 a closure cannot, a bound method can. None of it is relevant once the pool is
