@@ -975,7 +975,7 @@ def retarget_logs(input_folder=None):
     went on landing in /mnt/sda2/STL/Fixed — the diagnostics for a run ended up
     somewhere unrelated to its results.  Called once at run start, after the
     config is settled and before anything is written."""
-    global LOG_FILE, REVIEW_FILE, SUMMARY_FILE
+    global LOG_FILE, REVIEW_FILE, SUMMARY_FILE, STEPS_FILE
     if input_folder is None:
         input_folder = INPUT_FOLDER
     try:
@@ -986,6 +986,7 @@ def retarget_logs(input_folder=None):
     LOG_FILE     = os.path.join(root, os.path.basename(LOG_FILE))
     REVIEW_FILE  = os.path.join(root, os.path.basename(REVIEW_FILE))
     SUMMARY_FILE = os.path.join(root, os.path.basename(SUMMARY_FILE))
+    STEPS_FILE   = os.path.join(root, os.path.basename(STEPS_FILE))
 
 
 def _ensure_parent(path):
@@ -1355,6 +1356,64 @@ def _write_binary_stl(path, verts, faces):
 
 SUMMARY_FILE = "/mnt/sda2/STL/Fixed/repair_summary.tsv"
 
+# One row per step, rather than per file.
+#
+# The summary's steps_ran/steps_failed columns answer "did it work"; they cannot
+# answer "what did it fix".  Packing before/after defect counts into a single
+# cell means parsing a cell to count anything, which is the same mistake the
+# step log made in prose.  A row per step makes every question a group-by:
+#   awk -F'\t' '$3=="pymeshfix2"' repair_steps.tsv
+# answers "does PyMeshFix ever fix Blender's output", with the numbers attached.
+#
+# `mesh` is the mesh the step ran on (a part, for a step inside a split file);
+# `file` is the parent file it belongs to, so parts group with their parent.
+STEPS_FILE = "/mnt/sda2/STL/Fixed/repair_steps.tsv"
+
+# The file currently being processed by this child, so a shell part can name
+# its parent.  A part is repaired by its own process_file() call that receives
+# only the part path, so the parent stamps its name here first.  A module
+# global is safe for the same reason _blender_cost is: one --one-file child
+# handles exactly one file, parts included.
+_CURRENT_FILE = ['']
+
+_STEP_COLUMNS = ('file', 'mesh', 'step', 'outcome', 'reason', 'secs',
+                 'nm_in', 'nm_out', 'open_in', 'open_out', 'tris_in',
+                 'tris_out', 'detail')
+
+
+def _reset_steps_file():
+    """Truncate the per-step log at the start of a run and write its header."""
+    try:
+        _ensure_parent(STEPS_FILE)
+        with open(STEPS_FILE, 'w') as f:
+            f.write('\t'.join(_STEP_COLUMNS) + '\n')
+    except OSError:
+        pass
+
+
+def log_step_row(row):
+    """Append one row describing a single step.  Best-effort, like the others."""
+    line = '\t'.join(str(row.get(c, '')) for c in _STEP_COLUMNS) + '\n'
+    _append_locked(STEPS_FILE, line)
+
+
+def read_steps(path=None):
+    """Parse the per-step log into a list of dicts."""
+    out = []
+    try:
+        with open(path or STEPS_FILE) as f:
+            for line in f:
+                line = line.rstrip('\n')
+                if not line or line.startswith('file\t'):
+                    continue
+                parts = line.split('\t')
+                if len(parts) < len(_STEP_COLUMNS):
+                    parts += [''] * (len(_STEP_COLUMNS) - len(parts))
+                out.append(dict(zip(_STEP_COLUMNS, parts)))
+    except OSError:
+        pass
+    return out
+
 # blender_runs is appended at the END deliberately: read_summary pads short
 # rows, so a summary written before this column existed still parses, with the
 # new field coming back empty rather than shifting every value one place left.
@@ -1378,11 +1437,27 @@ _SUMMARY_COLUMNS = ('file', 'status', 'secs', 'tris_in', 'tris_out',
 # and always carries a reason.  A step may appear more than once per mesh
 # (pymeshfix runs again after Blender), which is why this is a list and not a
 # dict -- the order is the route the mesh actually took.
-def _step(stats, name, outcome, reason=''):
-    """Record that `name` ended as `outcome` ('ok' | 'fail' | 'skip')."""
+def _step(stats, name, outcome, reason='', _emit=True, **measured):
+    """Record that `name` ended as `outcome` ('ok' | 'fail' | 'skip').
+
+    Writes one row to STEPS_FILE immediately and keeps a copy in `stats` for
+    the summary's steps_ran/steps_failed columns.  `measured` carries whatever
+    the call site knows -- nm_in/nm_out, open_in/open_out, tris_in/tris_out,
+    secs, detail -- because "did it work" and "what did it fix" are different
+    questions and only the call site has the numbers for the second.
+
+    _emit=False records into stats without writing a row: used when folding a
+    part's steps into its parent, where the part already wrote its own rows and
+    a second write would double-count every step inside every split file."""
     if stats is None:
         return
     stats.setdefault('steps', []).append((name, outcome, reason))
+    if not _emit:
+        return
+    row = {'file': stats.get('file', ''), 'mesh': stats.get('mesh', ''),
+           'step': name, 'outcome': outcome, 'reason': reason}
+    row.update({k: v for k, v in measured.items() if v is not None})
+    log_step_row(row)
 
 
 def _absorb_part_steps(stats, part_result, prefix='part'):
@@ -1395,7 +1470,9 @@ def _absorb_part_steps(stats, part_result, prefix='part'):
     if stats is None or not isinstance(part_result, dict):
         return
     for name, outcome, reason in part_result.get('steps') or ():
-        _step(stats, f'{prefix}/{name}', outcome, reason)
+        # _emit=False: the part wrote its own STEPS_FILE row when the step ran.
+        # This only mirrors it into the parent's summary columns.
+        _step(stats, f'{prefix}/{name}', outcome, reason, _emit=False)
 
 
 def _steps_ran(stats):
@@ -1815,7 +1892,7 @@ def rotate_log(path, keep=None):
 
 def rotate_all_logs(keep=None):
     """Rotate every run log.  Call once per run, before the reset helpers."""
-    for _p in (LOG_FILE, REVIEW_FILE, SUMMARY_FILE):
+    for _p in (LOG_FILE, REVIEW_FILE, SUMMARY_FILE, STEPS_FILE):
         rotate_log(_p, keep)
 
 
@@ -2526,6 +2603,16 @@ def process_file(src, is_part=False):
     result = None
     _rel_for_log = (os.path.basename(src) if is_part
                     else os.path.relpath(src, INPUT_FOLDER))
+    # Identity for the per-step rows.  `mesh` is what the step ran on; `file`
+    # is the parent this belongs to, so a split file's parts group with it.
+    # A part cannot name its own parent -- it is repaired by a separate
+    # process_file() call that only receives the part path -- so the parent
+    # stamps its name into _CURRENT_FILE before repairing parts, and parts
+    # read it from there.
+    stats['mesh'] = _rel_for_log
+    stats['file'] = _CURRENT_FILE[0] if is_part else _rel_for_log
+    if not is_part:
+        _CURRENT_FILE[0] = _rel_for_log
     if not is_part:
         # Zero the Blender tally for this file.  Guarded on not is_part so the
         # parts repaired inline below accumulate into their parent's total.
@@ -3254,10 +3341,19 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
               + (f"; {_pmf_expectation(nm_src + open_src)}"
                  if (nm_src + open_src) else ""))
             _bounds_before = stl_bounds(working)
+            _t_pmf = _time.monotonic()
             try:
                 _pmf_nm, _pmf_open = run_pymeshfix(working, _pmf_tmp, L=L)
                 L(f"pymeshfix: nm={_pmf_nm}  open={_pmf_open}")
-                _step(stats, 'pymeshfix', 'ok')
+                # The numbers are what make the row answerable: "did it work"
+                # is outcome, "what did it fix" is nm_in -> nm_out.
+                _pmf_tris, _ = _read_stl_header(_pmf_tmp)
+                _step(stats, 'pymeshfix', 'ok',
+                      secs=f"{_time.monotonic() - _t_pmf:.1f}",
+                      nm_in=nm_src, nm_out=_pmf_nm,
+                      open_in=open_src, open_out=_pmf_open,
+                      tris_in=working_tris,
+                      tris_out=(_pmf_tris if _pmf_tris > 0 else ''))
 
                 # Did it repair the mesh, or delete part of it?
                 #
@@ -3324,7 +3420,10 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                     os.unlink(_pmf_tmp)
                 _pmf_tmp = None
                 L(f"pymeshfix: FAILED — {_pmf_err}")
-                _step(stats, 'pymeshfix', 'fail', type(_pmf_err).__name__)
+                _step(stats, 'pymeshfix', 'fail', type(_pmf_err).__name__,
+                      secs=f"{_time.monotonic() - _t_pmf:.1f}",
+                      nm_in=nm_src, open_in=open_src, tris_in=working_tris,
+                      detail=str(_pmf_err)[:120])
 
         # If clean after all python passes, post-verify with an independent edge scan
         # before writing the final output — pymeshfix self-report is not always reliable.
@@ -3344,10 +3443,24 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                           f"{_nloops} loop(s), largest {_big:.4f}mm < "
                           f"{MIN_LAYER}mm layer; accepting without blender")
                         stats['path'].append(f'subprint-open{open_src}')
-                        _step(stats, 'printscale', 'ok')
+                        _step(stats, 'printscale', 'ok',
+                              open_in=open_src, open_out=0,
+                              detail=f'{_nloops}loops/largest{_big:.4f}mm'
+                                     f'/layer{MIN_LAYER}')
                         open_src = 0
+                    else:
+                        # The gate ran and declined -- recorded, because a gate
+                        # that never fires and a gate that fires and rejects
+                        # look identical once the run is over, and whether this
+                        # threshold is right is exactly the open question.
+                        _step(stats, 'printscale', 'fail', 'above-print-scale',
+                              open_in=open_src,
+                              detail=f'{_nloops}loops/largest{_big:.4f}mm'
+                                     f'/layer{MIN_LAYER}')
             except Exception as _tiny_err:
                 L(f"print-scale check failed — {_tiny_err}")
+                _step(stats, 'printscale', 'fail',
+                      type(_tiny_err).__name__, open_in=open_src)
         if nm_src == 0 and open_src == 0:
             _ensure_parent(dst)
             os.replace(working, dst)
@@ -3394,9 +3507,18 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         L=L, route=('obj' if is_obj else 'ascii' if is_ascii else 'fallback'),
     )
     stats['path'].append('blender')
+    # Seconds come from _blender_cost, which every route funnels through --
+    # timing it here again would count only this one site, the bug that left
+    # the blender_secs column filled on 1 row out of 646.
     _step(stats, 'blender', 'ok' if success else 'fail',
           '' if success else ('open' if open_only else
-                              'unrepaired' if unrepaired else 'no-output'))
+                              'unrepaired' if unrepaired else 'no-output'),
+          # nm/open are only meaningful on the binary-STL path; the OBJ/ASCII
+          # route reaches Blender without ever scanning.
+          nm_in=('' if (is_ascii or is_obj) else nm_src),
+          open_in=('' if (is_ascii or is_obj) else open_src),
+          secs=(f"{_blender_cost[1]:.1f}" if _blender_cost[0] else ''),
+          detail=('obj' if is_obj else 'ascii' if is_ascii else 'fallback'))
     # Observe only, as in step E.  Blender merges doubles and can decimate, so
     # small movement here is expected — the number is what makes it judgeable.
     if os.path.exists(dst):
@@ -3444,13 +3566,18 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                 dst, dst, open_copy, failed_copy, unrepaired_copy,
                 is_ascii, is_obj, stdout, stderr, "post-blender", L, _result,
                 temps=temps)
+            # The second PyMeshFix pass, on Blender's output.  Recorded here
+            # rather than inside the helper because the helper has no stats.
+            # Recorded on BOTH paths: it returns None when the pass ran and
+            # left nm > 0, or threw -- so guarding this on `r is not None`
+            # would log nothing for a second pass that ran and failed, which
+            # is the exact "ran and failed" vs "never ran" conflation these
+            # columns exist to end.
+            _step(stats, 'pymeshfix2',
+                  'ok' if (r or {}).get('status') == 'ok' else 'fail',
+                  '' if (r or {}).get('status') == 'ok'
+                  else (r or {}).get('status', 'no-result'))
             if r is not None:
-                # The second PyMeshFix pass, on Blender's output.  Recorded here
-                # rather than inside the helper because the helper has no stats
-                # and its return value already says which way it went.
-                _step(stats, 'pymeshfix2', 'ok' if r.get('status') == 'ok'
-                      else 'fail', '' if r.get('status') == 'ok'
-                      else r.get('status', ''))
                 return r
         _ensure_parent(open_copy)
         os.replace(dst, open_copy)
@@ -3466,10 +3593,12 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                 src, dst, open_copy, failed_copy, unrepaired_copy,
                 is_ascii, is_obj, stdout, stderr, "post-blender (unrepaired)", L, _result,
                 temps=temps)
+            # Recorded on both paths, as above.
+            _step(stats, 'pymeshfix2',
+                  'ok' if (r or {}).get('status') == 'ok' else 'fail',
+                  '' if (r or {}).get('status') == 'ok'
+                  else (r or {}).get('status', 'no-result'))
             if r is not None:
-                _step(stats, 'pymeshfix2', 'ok' if r.get('status') == 'ok'
-                      else 'fail', '' if r.get('status') == 'ok'
-                      else r.get('status', ''))
                 return r
         size = _save_indicator(unrepaired_copy, src, [failed_copy])
         L(f"result: unrepaired (nm remains)")
@@ -4033,6 +4162,7 @@ if __name__ == '__main__':
     open(LOG_FILE, 'w').close()
     _reset_review_file()
     _reset_summary_file()
+    _reset_steps_file()
 
     # WORKERS = 0 means "decide from RAM and cores", the same contract the TUI
     # honours.  Without this the standalone CLI passed max_workers=0 straight to

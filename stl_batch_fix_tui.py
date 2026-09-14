@@ -655,6 +655,7 @@ def run_progress_screen(values, files, cfg, sized=None):
     open(_fix.LOG_FILE, 'w').close()
     _fix._reset_review_file()
     _fix._reset_summary_file()
+    _fix._reset_steps_file()
 
     # Clear intermediates a previously killed worker could not clean up (a
     # SIGKILL skips the finally block that normally removes them).

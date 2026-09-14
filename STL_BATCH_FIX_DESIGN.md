@@ -609,6 +609,7 @@ truncated, so restarting after a bad run does not destroy the log explaining it:
 
 - `repair_log.tsv` — per-step trace, written under `flock` by all workers
 - `repair_summary.tsv` — one row per file, machine-readable
+- `repair_steps.tsv` — one row per **step**, with before/after numbers
 - `review_decimated.tsv` — files decimated `REVIEW_RATIO` (2×) or more
 
 `log_summary_start()` writes a provisional `started` row before any work begins.
@@ -616,6 +617,37 @@ A worker killed mid-file never reaches the code that writes the real row, so
 without it the one file that killed the run is the single file missing from the
 summary. Its row is built from `_SUMMARY_COLUMNS` so adding a column cannot
 silently misalign it.
+
+### `repair_steps.tsv` — one row per step
+
+The summary's `steps_ran`/`steps_failed` answer *did it work*. They cannot
+answer *what did it fix*, because packing before/after counts into one cell
+means parsing a cell to count anything — the same mistake the step log made in
+prose. So each step also writes its own row:
+
+```text
+file    mesh    step    outcome  reason  secs  nm_in nm_out  open_in open_out
+        tris_in tris_out  detail
+```
+
+Every question becomes a group-by rather than a regex:
+
+```bash
+awk -F'\t' '$3=="pymeshfix2"' repair_steps.tsv   # does PyMeshFix ever fix Blender's output?
+```
+
+`mesh` is what the step ran on, `file` the parent it belongs to, so a split
+file's parts group with their parent. A part cannot name its own parent — it is
+repaired by a separate `process_file()` call receiving only the part path — so
+the parent stamps `_CURRENT_FILE` before repairing parts and parts read it from
+there. Parts write their own rows; `_absorb_part_steps()` mirrors them into the
+parent's summary columns with `_emit=False`, so nothing is counted twice.
+
+**Steps that decline are recorded too.** The print-scale gate used to log only
+when it fired, so a gate that never ran and a gate that ran and rejected the
+mesh were indistinguishable — and whether `MIN_LAYER` is set right is exactly
+the open question. A rejection now records `printscale fail above-print-scale`
+with `2loops/largest11.3137mm/layer0.6`, which says why.
 
 ### Step outcomes — why the summary counts them and the step log cannot
 
