@@ -338,6 +338,72 @@ needed.
 
 ---
 
+## D10 — Status is a plain dict under a lock, written by the owning thread
+
+**Decided**, closing O3 and O4 together.
+
+### What the state actually is
+
+Four fields per worker, written once when a file is picked up and removed when
+it finishes:
+
+```python
+_worker_status[pid] = {'rel':     rel,            # which file
+                       'started': _t.monotonic(), # when it was picked up
+                       'bytes':   _bytes,         # size on disk
+                       'tris':    _tris}          # triangle count from the header
+```
+
+Never updated mid-file, which is why the panel can say "on this file for 41m"
+but nothing about progress within it.
+
+Three consumers: the worker panel at 4 Hz (all four fields), the watchdog
+(`started` only — dies with D7), and a stale-row sweep.
+
+### Why it needs so much machinery today
+
+All of it follows from the dict living in another process with killable writers:
+
+- **`_status_snapshot`** reads the proxy on a throwaway daemon thread it never
+  joins, because a `Manager` proxy call has no timeout and a worker SIGKILLed
+  mid-read blocks the parent forever — observed as `futex_do_wait`, 0 % CPU,
+  the TUI still redrawing stale rows.
+- **The stale-row sweep** exists because a SIGKILLed worker never reaches the
+  line that pops its own entry, so its row would count up forever against a file
+  nobody is working on.
+- **`_pid_is_live`** reads `/proc/<pid>/stat` because `os.kill(pid, 0)` succeeds
+  for a zombie.
+
+### What replaces it
+
+A plain `dict` guarded by a `threading.Lock`. Writers are threads in the same
+process; a thread is never SIGKILLed mid-write, and a thread that finishes
+always runs its own cleanup. So:
+
+| today | with threads |
+|---|---|
+| `_status_snapshot` daemon-thread read | `with lock: return dict(status)` |
+| stale-row sweep | deleted — entries cannot be orphaned |
+| `_pid_is_live` on this path | deleted |
+
+The owning thread writes its entry on pickup and removes it on completion, both
+under the lock; the TUI copies the dict under the same lock at 4 Hz. Four
+fields, a sub-microsecond critical section, no contention worth designing
+around.
+
+**O4 was already answered by D3** — removing the process pool removes the proxy.
+What was left of it, *who reports status*, is answered here: the thread that
+owns the file.
+
+### What becomes possible
+
+Status can now be updated **mid-file**, because the writer is not a process that
+must survive being killed. The step E start line already knows a mesh is about
+to spend minutes inside PyMeshFix; that could appear in the panel rather than
+only in the log.
+
+---
+
 ## D5 — No retry. If it failed, it failed
 
 **Decided**, replacing an earlier "the pool counts attempts, the caller decides
@@ -518,15 +584,14 @@ was accurate.
 
 ## Open, not yet decided
 
-**O3 — status reporting.** `_worker_status` becomes a plain dict, but the TUI
-reads it every 0.25 s from the render loop while workers write. Needs a lock;
-`_status_snapshot`'s daemon-thread workaround becomes unnecessary.
+**Nothing on the pool side.** O1–O8 are all closed: five became decisions (D4b,
+D7, D8, D9, D10), two were folded into D6, and one — O4 — turned out to have
+been answered already by D3.
 
-**O4 — can `_worker_status` leave the Manager proxy entirely?** It is the main
-reason a worker can wedge today. If the child reported its own status, or status
-travelled the existing result pipe, the restart machinery becomes genuinely
-vestigial rather than arguably so. (Partly answered by D3, which removes the
-proxy — but the question of *who* reports status is still open.)
+What remains open belongs to the **mesh pipeline**, not the pool, and is
+recorded in `TODO.md` item 1: extracting the steps of `_process_file_impl`
+(826 lines, nesting depth 8, 91 if-statements, 23 return points) into the
+operation modules this design describes.
 
 ---
 
