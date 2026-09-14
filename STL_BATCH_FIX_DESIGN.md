@@ -643,6 +643,19 @@ the parent stamps `_CURRENT_FILE` before repairing parts and parts read it from
 there. Parts write their own rows; `_absorb_part_steps()` mirrors them into the
 parent's summary columns with `_emit=False`, so nothing is counted twice.
 
+**`pymeshfix2` carries Blender's numbers as its baseline.** The question this
+row exists for — *does running PyMeshFix on Blender's output ever improve it* —
+cannot be answered from the return value. `None` means "did not settle the
+file", which conflates *ran and left nm>0* with *threw*; `ok` says it worked
+without saying what it fixed. So `_try_pymeshfix_after_blender` takes a
+`measured` dict the caller owns and fills it on every path, and `nm_in`/
+`open_in` come from Blender's own post-verify rather than the file's original
+counts — the comparison has to start where Blender finished. The `unrepaired`
+route re-runs PyMeshFix on the *source* instead, so its rows are tagged
+`from-source` in `detail`.
+
+The archived 13-for-13 success rate is survivorship: the failures wrote nothing.
+
 **Steps that decline are recorded too.** The print-scale gate used to log only
 when it fired, so a gate that never ran and a gate that ran and rejected the
 mesh were indistinguishable — and whether `MIN_LAYER` is set right is exactly

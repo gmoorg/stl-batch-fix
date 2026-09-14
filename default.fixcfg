@@ -11,19 +11,16 @@ MERGE_DIST = 0.01
 # Finest print layer; open boundaries smaller than this are accepted (0 = require zero)
 MIN_LAYER = 0.6
 
-# Flag bbox drift above this percent of the model's bbox diagonal.
-# Relative rather than mm, so the flag survives rescaling the model in the slicer.
+# Flag bbox drift above this percent of the model's diagonal (survives rescaling)
 BBOX_TOLERANCE_PCT = 0.7
 
 # Parallel worker processes (0 = auto from RAM and cores)
 WORKERS = 0
 
 # Budget for one mesh: a whole unsplit model, or a single shell part
-# A file that exceeds it gets a .timeout.stl marker — hand those to another tool
 TIMEOUT_PART = 600
 
-# Whole-file ceiling for a split model; cap is min(TIMEOUT, TIMEOUT_PART * n_parts)
-# 0 = no practical ceiling (resolves to 24h)
+# Whole-file ceiling for a split model; 0 = no practical ceiling (24h)
 TIMEOUT = 3600
 
 # Percent of TIMEOUT_PART held back from Blender for the steps after it

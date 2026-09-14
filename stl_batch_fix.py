@@ -2529,18 +2529,32 @@ def _save_indicator(indicator_path, src_path, stales):
 
 def _try_pymeshfix_after_blender(src_for_fix, dst, open_copy, failed_copy,
                                  unrepaired_copy, is_ascii, is_obj, stdout, stderr,
-                                 label, L, _result, temps=None):
+                                 label, L, _result, temps=None, measured=None):
     """Attempt a PyMeshFix pass on src_for_fix after Blender left open edges.
 
     Returns a result dict if PyMeshFix settles the file (ok or open), or None
     if it fails / makes things worse (caller should fall through to its own
-    indicator logic)."""
+    indicator logic).
+
+    `measured` is an optional dict the caller owns; the counts this pass
+    produced are written into it whatever the return value.  It exists because
+    the interesting question about this step -- does running PyMeshFix on
+    Blender's output ever actually improve it -- cannot be answered from the
+    return value alone.  A None return means "did not settle the file", which
+    conflates "ran and left nm>0" with "threw"; and an 'ok' return says it
+    worked without saying what it fixed.  The numbers have to come out of here
+    because nothing outside this function ever sees them."""
+    import time as _time          # module-level `time` is not imported here
     _pmf_tmp = dst + '.pymeshfix.stl'
     if temps is not None:
         temps.append(_pmf_tmp)
+    _tp = _time.monotonic()
     try:
         _pmf_nm, _pmf_open = run_pymeshfix(src_for_fix, _pmf_tmp, L=L)
         L(f"pymeshfix {label}: nm={_pmf_nm}  open={_pmf_open}")
+        if measured is not None:
+            measured.update(nm_out=_pmf_nm, open_out=_pmf_open,
+                            secs=f"{_time.monotonic() - _tp:.1f}")
         if _pmf_nm == 0 and _pmf_open == 0:
             # Verify with an independent edge scan — pymeshfix self-report is not reliable.
             _pv_nm, _pv_open, _pv_ok = _post_verify(
@@ -2573,6 +2587,10 @@ def _try_pymeshfix_after_blender(src_for_fix, dst, open_copy, failed_copy,
         if os.path.exists(_pmf_tmp):
             os.unlink(_pmf_tmp)
         L(f"pymeshfix {label}: FAILED — {_pmf_err}")
+        if measured is not None:
+            measured.update(detail=f'{type(_pmf_err).__name__}: '
+                                   f'{str(_pmf_err)[:100]}',
+                            secs=f"{_time.monotonic() - _tp:.1f}")
     return None
 
 
@@ -3584,6 +3602,12 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
         return {'rel': rel, **kwargs}
 
     _pv_ok = True
+    # Initialised before the branch: these are only assigned when Blender
+    # reported success, but the pymeshfix2 rows below read them on the
+    # open_only and unrepaired paths too, where Blender never reported
+    # success at all.  Referencing them unguarded is a NameError on exactly
+    # the branch that matters.  -1 means "not measured", distinct from 0.
+    _pv_nm = _pv_open = -1
     if success and os.path.exists(dst):
         _pv_nm, _pv_open, _pv_ok = _post_verify(dst, L, label="blender post-verify")
         if _pv_nm > 0 or _pv_open > 0:
@@ -3599,10 +3623,11 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                        is_ascii=is_ascii, is_obj=is_obj, verified=_pv_ok)
     elif open_only and os.path.exists(dst):
         if _PYMESHFIX_AVAILABLE:
+            _m2 = {}
             r = _try_pymeshfix_after_blender(
                 dst, dst, open_copy, failed_copy, unrepaired_copy,
                 is_ascii, is_obj, stdout, stderr, "post-blender", L, _result,
-                temps=temps)
+                temps=temps, measured=_m2)
             # The second PyMeshFix pass, on Blender's output.  Recorded here
             # rather than inside the helper because the helper has no stats.
             # Recorded on BOTH paths: it returns None when the pass ran and
@@ -3610,10 +3635,18 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
             # would log nothing for a second pass that ran and failed, which
             # is the exact "ran and failed" vs "never ran" conflation these
             # columns exist to end.
+            #
+            # nm_in/open_in are what BLENDER left, not what the file started
+            # with: the question this row answers is whether a second
+            # PyMeshFix improves Blender's output, so the comparison has to
+            # start from Blender's result.
             _step(stats, 'pymeshfix2',
                   'ok' if (r or {}).get('status') == 'ok' else 'fail',
                   '' if (r or {}).get('status') == 'ok'
-                  else (r or {}).get('status', 'no-result'))
+                  else (r or {}).get('status', 'no-result'),
+                  nm_in=('' if _pv_nm < 0 else _pv_nm),
+                  open_in=('' if _pv_open < 0 else _pv_open),
+                  **_m2)
             if r is not None:
                 return r
         _ensure_parent(open_copy)
@@ -3626,15 +3659,23 @@ def _process_file_impl(src, is_part=False, temps=None, stats=None):
                        stdout=stdout, stderr=stderr)
     elif unrepaired:
         if _PYMESHFIX_AVAILABLE:
+            _m2 = {}
             r = _try_pymeshfix_after_blender(
                 src, dst, open_copy, failed_copy, unrepaired_copy,
                 is_ascii, is_obj, stdout, stderr, "post-blender (unrepaired)", L, _result,
-                temps=temps)
-            # Recorded on both paths, as above.
+                temps=temps, measured=_m2)
+            # Recorded on both paths, as above.  This route re-runs PyMeshFix
+            # on the ORIGINAL source rather than Blender's output, so its
+            # nm_in is the file's own count, not Blender's -- detail says
+            # which route produced the row.
             _step(stats, 'pymeshfix2',
                   'ok' if (r or {}).get('status') == 'ok' else 'fail',
                   '' if (r or {}).get('status') == 'ok'
-                  else (r or {}).get('status', 'no-result'))
+                  else (r or {}).get('status', 'no-result'),
+                  nm_in=('' if nm_src < 0 else nm_src),
+                  open_in=('' if open_src < 0 else open_src),
+                  **{**_m2,
+                     'detail': (_m2.get('detail', '') + ' from-source').strip()})
             if r is not None:
                 return r
         size = _save_indicator(unrepaired_copy, src, [failed_copy])
