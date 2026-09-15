@@ -864,6 +864,16 @@ from another thread.
 killed run still spent its time and still cost a launch, so a caller
 accumulating cost should read it rather than timing the call itself.
 
+**`_kill` kills but does not reap**, and that separation is load-bearing.
+Reaping means `communicate()`, which closes the pipes — and a kill arriving
+from a signal handler or another thread lands while the thread inside `run` is
+mid-`os.read` on exactly those descriptors. Measured: it raises
+`OSError: [Errno 9] Bad file descriptor`, that propagates out of `run`, and no
+`Result` is ever built. So reaping belongs to whoever is already waiting; the
+timeout path calls `communicate()` itself immediately after killing because it
+*is* the waiter. Consolidating the two kill sites into one helper is right —
+consolidating the reap with it is not.
+
 ---
 
 ## Tests

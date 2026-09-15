@@ -97,19 +97,41 @@ class Runner:
         self._lock = threading.Lock()
         self._current: subprocess.Popen | None = None
 
+    @staticmethod
+    def _kill(proc: subprocess.Popen) -> None:
+        """Kill `proc`.  The only place a Blender is killed.
+
+        **It does not reap.**  Reaping means `communicate()`, which closes the
+        pipes — and when a kill arrives from a signal handler or another
+        thread, the thread inside `run` is mid-`os.read` on exactly those
+        descriptors.  Measured: it raises `OSError: [Errno 9] Bad file
+        descriptor`, that propagates out of `run`, and no `Result` is ever
+        built.
+
+        So reaping belongs to whoever is already waiting: the `communicate()`
+        in `run` returns as soon as the process dies and reaps it there.  The
+        timeout path is the one exception, and calls `communicate()` itself
+        immediately after this — it *is* the waiter.
+        """
+        proc.kill()
+
     def kill_current(self) -> bool:
         """Kill the Blender running right now, if any.  Safe from a handler.
 
-        Returns True if something was killed.  The waiting `run` sees the death
-        as an ordinary exit, not a timeout — a caller that kills deliberately
-        already knows why.
+        Returns True if something was killed — not a `Result`, because the
+        thread blocked in `run` is the one that builds it.  Handing one back
+        here would mean two callers each holding a result for the same run, and
+        a signal handler waiting on a thread to produce it.
+
+        The waiting `run` sees the death as an ordinary exit rather than a
+        timeout: a caller that kills deliberately already knows why.
         """
         with self._lock:
             proc = self._current
         if proc is None:
             return False
         try:
-            proc.kill()
+            self._kill(proc)
             return True
         except Exception:
             return False
@@ -136,8 +158,8 @@ class Runner:
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                # Reap it, or the caller inherits a zombie.
+                self._kill(proc)
+                # This thread is the waiter, so it reaps — see _kill.
                 stdout, stderr = proc.communicate()
                 return Result(exit_code=None, stdout_capture=stdout,
                               stderr_capture=stderr, is_timed_out=True,
