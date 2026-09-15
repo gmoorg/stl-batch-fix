@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from libs.indicators import (
-    EXPORT_DIRNAME, Finding, Indicator, check, export_path, needs_export,
+    EXPORT_DIRNAME, Finding, Indicator, check, export_path,
 )
 
 
@@ -138,17 +138,6 @@ class TestExport(IndicatorCase):
         self._touch(self.output)
         found = self._check()
         self.assertIs(found.indicator, Indicator.ALREADY_FIXED)
-
-
-class TestNeedsExport(unittest.TestCase):
-
-    def test_obj_needs_export(self):
-        self.assertTrue(needs_export('/x/y/model.obj'))
-        self.assertTrue(needs_export('/x/y/MODEL.OBJ'))
-
-    def test_stl_is_not_decided_by_name(self):
-        """Whether an .stl is ASCII needs the file read, so not our call."""
-        self.assertFalse(needs_export('/x/y/model.stl'))
 
 
 class TestFinding(unittest.TestCase):

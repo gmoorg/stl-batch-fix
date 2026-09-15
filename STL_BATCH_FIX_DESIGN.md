@@ -833,7 +833,7 @@ treating it as one would skip files that actually worked.
 
 ## Tests
 
-`test_indicators.py` — 15 tests for `libs/indicators.py`, ~0.01 s. Every file
+`test_indicators.py` — 13 tests for `libs/indicators.py`, ~0.01 s. Every file
 is an empty touch, since the module tests for existence and never opens
 anything.
 

@@ -122,13 +122,3 @@ def check(source: str, input_folder: str, output_file: str) -> Finding:
             found = Finding(source, indicator, marker)
 
     return found
-
-
-def needs_export(source: str) -> bool:
-    """True when `source` is a format that must be converted before processing.
-
-    A name test only — no file is opened.  Whether an `.stl` is ASCII cannot be
-    answered without reading it, so that decision belongs with whatever does
-    the reading; this covers only the case the extension settles.
-    """
-    return os.path.splitext(source)[1].lower() == '.obj'
