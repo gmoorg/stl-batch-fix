@@ -96,7 +96,7 @@ class Pool[T]:
         self._admit = admit
         self._select = select or get_next_default
         self._lock = threading.Lock()
-        self._free = threading.Condition(self._lock)
+        self._queue_signal = threading.Condition(self._lock)
         self._running: dict[str, T] = {}      # thread name -> item in flight
         self._stopped = False
 
@@ -125,9 +125,9 @@ class Pool[T]:
         final time with alone=True and shuts the worker down if refused.
         """
         me = threading.current_thread().name
-        with self._free:
+        with self._queue_signal:
             self._running.pop(me, None)
-            self._free.notify_all()           # releasing may unblock someone
+            self._queue_signal.notify_all()           # releasing may unblock someone
             while True:
                 if self._stopped or not self._items:
                     return None
@@ -138,7 +138,7 @@ class Pool[T]:
                     return item
                 if not wait:
                     return None               # shed: nothing will change
-                self._free.wait(0.25)
+                self._queue_signal.wait(0.25)
 
     # -- observation ---------------------------------------------------------
 
@@ -154,9 +154,9 @@ class Pool[T]:
 
     def stop(self) -> None:
         """Tell every worker to shut down after its current item."""
-        with self._free:
+        with self._queue_signal:
             self._stopped = True
-            self._free.notify_all()
+            self._queue_signal.notify_all()
 
     # -- running -------------------------------------------------------------
 
