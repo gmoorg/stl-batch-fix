@@ -239,6 +239,27 @@ class Pool[T]:
    cannot resolve, so nothing was left for it to escape from.
 3. **`pending()` added**, because the tests needed to assert that a refused
    item stays queued rather than being dropped.
+4. **Selection is injectable — `select=`.** `get_next` keeps only the
+   synchronisation: take the lock, release the finished item, notify, loop,
+   wait. *Which* item to hand out moved into `get_next_default`, and passing
+   `select=` to the constructor replaces it entirely.
+
+   ```python
+   select(items, running, admit) -> (item, wait)
+
+       (item, _)      hand it out; select has already popped it
+       (None, True)   nothing now, but work is in flight — block and retry
+       (None, False)  nothing, and waiting cannot help — shed this worker
+   ```
+
+   It is called **with the lock held and receives the real list**, so it can
+   reorder or extend the queue. That is deliberate: an earlier draft of this
+   passed an index and let the pool do the popping, so a caller's bug could
+   never corrupt the queue. The user's call was that the safer shape is
+   speculative generality for a module only this project uses — *"if we decide
+   a lambda should add elements to the queue, we should have a really important
+   reason for that."* Recorded because the reasoning, not the ruling, is what
+   would be re-litigated: the risk is real but the caller is us.
 
 `log` is also gone: a domain-free module has nothing worth saying that the
 caller cannot observe through `status()`.

@@ -41,14 +41,60 @@ class Admit[T](Protocol):
     def __call__(self, item: T, running: list[T], alone: bool) -> bool: ...
 
 
+class Select[T](Protocol):
+    """Picks the next item to hand out, or declines.
+
+    Called with the pool's lock held, so it may mutate `items` directly —
+    that is the point of being able to replace it. Returns:
+
+        (item, wait)
+
+        (item, _)      hand this item out; the caller has already removed it
+                       from `items`
+        (None, True)   nothing right now, but work is in flight that may
+                       change the answer — the worker blocks and asks again
+        (None, False)  nothing, and waiting cannot help — the worker shuts
+                       down (shedding)
+    """
+
+    def __call__(self, items: list[T], running: list[T],
+                 admit: "Admit[T] | None") -> tuple[T | None, bool]: ...
+
+
+def get_next_default[T](items: list[T], running: list[T],
+                        admit: "Admit[T] | None") -> tuple[T | None, bool]:
+    """Take from the head of the queue, subject to `admit`.
+
+    The default policy, and the only one this project uses. Split out of
+    `get_next` so the selection rule can be replaced without touching the
+    locking around it: pass `select=` to the constructor and this is bypassed
+    entirely.
+
+    Ordering is FIFO because the caller sorts the queue before handing it over
+    — smallest first, so cost rises as it drains.
+    """
+    head = items[0]
+    if admit is None or admit(head, running, False):
+        return items.pop(0), True
+    if running:
+        return None, True           # someone is in flight; ask again later
+    # Nothing in flight, so waiting cannot change the answer. Let the policy
+    # decide between running it solo and refusing it outright.
+    if admit(head, [], True):
+        return items.pop(0), True
+    return None, False
+
+
 class Pool[T]:
     """Owns the queue and the threads.  Workers pull; nobody pushes to them."""
 
     def __init__(self, items: Iterable[T], n_workers: int,
-                 admit: Admit[T] | None = None) -> None:
+                 admit: Admit[T] | None = None,
+                 select: Select[T] | None = None) -> None:
         self._items: list[T] = list(items)
         self._n = max(1, min(n_workers, len(self._items) or 1))
         self._admit = admit
+        self._select = select or get_next_default
         self._lock = threading.Lock()
         self._free = threading.Condition(self._lock)
         self._running: dict[str, T] = {}      # thread name -> item in flight
@@ -85,26 +131,14 @@ class Pool[T]:
             while True:
                 if self._stopped or not self._items:
                     return None
-                head = self._items[0]
-                if self._admit is None:
-                    return self._take(me)
                 running = list(self._running.values())
-                if self._admit(head, running, False):
-                    return self._take(me)
-                if not running:
-                    # Nothing in flight: waiting cannot change the answer.
-                    # The caller's policy decides between running it solo and
-                    # refusing it outright; the pool does not override either.
-                    if self._admit(head, [], True):
-                        return self._take(me)
-                    return None
+                item, wait = self._select(self._items, running, self._admit)
+                if item is not None:
+                    self._running[me] = item
+                    return item
+                if not wait:
+                    return None               # shed: nothing will change
                 self._free.wait(0.25)
-
-    def _take(self, me: str) -> T:
-        """Pop the head and record it.  Caller must hold the lock."""
-        item = self._items.pop(0)
-        self._running[me] = item
-        return item
 
     # -- observation ---------------------------------------------------------
 

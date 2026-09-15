@@ -737,9 +737,17 @@ program without edits.
 admission. Implements D4 in `REFACTOR_DECISIONS.md`; all policy is injected:
 
 ```python
-admit(item, running, alone) -> bool     # may this item start now?
-work(pool)                              # what a worker thread does
+admit(item, running, alone) -> bool            # may this item start now?
+select(items, running, admit) -> (item, wait)  # which item, or why not
+work(pool)                                     # what a worker thread does
 ```
+
+`get_next` keeps only the synchronisation — take the lock, release the finished
+item, notify, loop, wait. **Which** item to hand out lives in
+`get_next_default`, and passing `select=` replaces it outright. The default
+takes from the head subject to `admit`; a replacement is free to reorder the
+queue, ignore `admit`, or extend the queue, because it is called with the lock
+held and receives the real list.
 
 `get_next()` returns `None` to mean *this worker should shut down*, for either
 of two reasons the caller need not distinguish: the queue is drained, or

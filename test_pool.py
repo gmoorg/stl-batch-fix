@@ -129,6 +129,68 @@ class TestAdmission(unittest.TestCase):
         self.assertEqual(pool.pending(), 1, "the item should stay queued")
 
 
+class TestSelectOverride(unittest.TestCase):
+    """The injected selection policy — the reason get_next_default exists."""
+
+    def test_default_is_used_when_none_passed(self):
+        from libs.pool import get_next_default
+        self.assertIs(Pool([1, 2], 2)._select, get_next_default)
+
+    def test_custom_select_controls_order(self):
+        """LIFO instead of FIFO, purely by passing a different select."""
+        def newest_first(items, running, admit):
+            return items.pop(), True
+
+        order, lock = [], threading.Lock()
+
+        def work(pool):
+            while (item := pool.get_next()) is not None:
+                with lock:
+                    order.append(item)
+
+        # One worker, so the order recorded is the order handed out.
+        Pool([1, 2, 3, 4, 5], n_workers=1, select=newest_first).start(work)
+        self.assertEqual(order, [5, 4, 3, 2, 1])
+
+    def test_custom_select_may_ignore_admit_entirely(self):
+        """A select that never consults admit is free to do so."""
+        def blind(items, running, admit):
+            return items.pop(0), True
+
+        def refuse_everything(item, running, alone):
+            raise AssertionError("admit should not have been consulted")
+
+        work, seen = _collector()
+        Pool(["a", "b"], n_workers=1,
+             admit=refuse_everything, select=blind).start(work)
+        self.assertCountEqual(seen, ["a", "b"])
+
+    def test_custom_select_can_shed(self):
+        """(None, False) shuts the worker down without a deadlock."""
+        def never(items, running, admit):
+            return None, False
+
+        work, seen = _collector()
+        pool = Pool(["x"], n_workers=2, select=never)
+        done = threading.Event()
+        threading.Thread(target=lambda: (pool.start(work), done.set()),
+                         daemon=True).start()
+        self.assertTrue(done.wait(timeout=5), "select-driven shed deadlocked")
+        self.assertEqual(seen, [])
+        self.assertEqual(pool.pending(), 1)
+
+    def test_custom_select_may_add_to_the_queue(self):
+        """It holds the real list under the lock, so it can grow it."""
+        def expand_once(items, running, admit):
+            if items == ["seed"]:
+                items.extend(["grown-1", "grown-2"])
+            return items.pop(0), True
+
+        work, seen = _collector()
+        Pool(["seed"], n_workers=1, select=expand_once).start(work)
+        self.assertCountEqual(seen, ["seed", "grown-1", "grown-2"])
+
+
 class TestControl(unittest.TestCase):
 
     def test_stop_ends_the_run_early(self):
