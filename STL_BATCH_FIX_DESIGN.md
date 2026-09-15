@@ -726,7 +726,45 @@ carrying `verified=False` display as `OK UNVERIFIED`.
 
 ---
 
+## `libs/` — domain-free modules
+
+Modules that know nothing about this project. The rule is deliberately strict:
+nothing in `libs/` may import the pipeline, mention meshes, or assume what the
+work items are. A module earns its place there by being usable in an unrelated
+program without edits.
+
+`libs/pool.py` — N threads pulling from a shared queue, with optional
+admission. Implements D4 in `REFACTOR_DECISIONS.md`; all policy is injected:
+
+```python
+admit(item, running, alone) -> bool     # may this item start now?
+work(pool)                              # what a worker thread does
+```
+
+`get_next()` returns `None` to mean *this worker should shut down*, for either
+of two reasons the caller need not distinguish: the queue is drained, or
+`admit` will not let the head item run beside the work in flight **and** will
+not let it run alone. The second is worker shedding — the worker exits so the
+oversized item can have the room, rather than parking on a condition variable
+while holding the very resources that item is waiting for.
+
+**The `alone=True` second ask is the one design decision worth knowing.** The
+earlier sketch handed the item over anyway when nothing else was running, and
+logged an override — which silently violates the caller's policy. Asking again
+with `alone=True` puts that choice back where it belongs: a resource rule says
+yes (nothing is competing), a "never run this" rule says no and the pool sheds
+the worker instead of deadlocking.
+
+---
+
 ## Tests
+
+`test_pool.py` — 12 tests for `libs/pool.py`, ~0.6 s. No meshes, no
+subprocesses: fake work is a short sleep and admission rules are plain
+predicates, so it is fast and deterministic. It covers the half of the system
+`test_pipeline.py` cannot reach — every item handled exactly once under 16-way
+contention, admission actually gating, both outcomes of the `alone=True` ask,
+`stop()`, and a raising worker not stranding the pool.
 
 `test_pipeline.py` — 36 end-to-end tests, ~3.8 s:
 

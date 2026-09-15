@@ -212,6 +212,43 @@ clock running out.
 worker.** It has not been updated — treat this section as the current interface
 and the sketch as the earlier draft.
 
+#### Implemented 2026-09-15 as `libs/pool.py`
+
+Built to this interface, with three changes the implementation forced:
+
+```python
+class Pool[T]:
+    def __init__(self, items, n_workers, admit=None)
+    def get_next(self) -> T | None      # None = shut this worker down
+    def status(self) -> dict[str, T]
+    def pending(self) -> int
+    def stop(self)
+    def start(self, work)
+```
+
+1. **`admit` gained an `alone` parameter** — `admit(item, running, alone)`.
+   The sketch, when `admit` refused but nothing else was running, handed the
+   item over **anyway** and logged an override. For a module that claims to be
+   policy-free that is wrong: it silently violates the caller's rule. But
+   removing it outright reintroduces the deadlock the escape existed to
+   prevent. Asking a second time with `alone=True` puts the choice where it
+   belongs — a resource rule says yes (nothing is competing), a "never run
+   this" rule says no and the pool sheds the worker. Both paths are tested.
+2. **`timeout` is gone from `get_next`.** D4 already argued it means nothing
+   for this workload; with the `alone` handshake there is no waiting that
+   cannot resolve, so nothing was left for it to escape from.
+3. **`pending()` added**, because the tests needed to assert that a refused
+   item stays queued rather than being dropped.
+
+`log` is also gone: a domain-free module has nothing worth saying that the
+caller cannot observe through `status()`.
+
+**Tests: `test_pool.py`, 12 cases, ~0.6 s.** This is the half of the system
+`test_pipeline.py` cannot reach — no meshes, no subprocesses, fake work is a
+sleep. Covers every item handled exactly once under 16-way contention,
+admission actually gating concurrency, both outcomes of the `alone` ask,
+`stop()`, and a raising worker not stranding the pool.
+
 ---
 
 ### D5 — Admission is a condition variable and a caller-supplied callback
