@@ -220,18 +220,26 @@ each one is the part worth not repeating.
 
 ```python
 class Pool[T]:
-    def __init__(self, n_workers, select)
-    def get_next(self) -> T | None      # None = shut this worker down
-    def holding(self) -> dict[str, T]
+    def __init__(self, n_workers, item_selector, item_handler,
+                 item_error_handler=None)
     def stop(self)
-    def start(self, work)
+    def start(self)
 
-select(done) -> T | None                # the caller's, over the caller's queue
+item_selector(done) -> T | None    # next item, or None to shut this worker down
+item_handler(item)                 # do the work
+item_error_handler(item, exc)      # optional; called if the handler raises
 ```
 
-**The pool owns no queue.** Not the items, not the ordering, not the admission
-rule — a lock, a shutdown flag, and which item each thread holds. Everything
-else moved to the caller, which resolved three problems at once:
+**The pool owns the loop.** There is no `get_next`: the caller supplies work,
+not control flow. `item_selector` runs with the lock held, `item_error_handler`
+too (cheap bookkeeping, so the caller's log needs no lock); `item_handler` runs
+without it, or every worker would serialise and the pool would be pointless.
+
+**The pool owns nothing but a lock and a shutdown flag.** Not the items, not
+the ordering, not the admission rule, and not even which item each thread
+holds — the worker passes its finished item back as `done`, because the worker
+is the only thing that knows. Everything else moved to the caller, which
+resolved four problems at once:
 
 - **`admit`, `alone` and the wait loop are gone.** The queue is sorted
   cheapest-first, so if the head does not fit now it never will: waiting cannot
@@ -242,6 +250,14 @@ else moved to the caller, which resolved three problems at once:
   pool to the queue would require the pool to know the queue. The user's point
   settled it: *"if you spawn 10 threads and 8 immediately close themselves,
   what the harm?"* — a surplus thread asks once, is told `None`, and exits.
+- **The per-thread map went too.** The pool kept `dict[thread name → item]`
+  so it could work out `done` itself, and exposed it as `holding()`. But that
+  duplicated a value the worker already had in a local variable, and its one
+  observable use reported progress keyed by `"w3"` — a thread name, meaningless
+  to any display. The user's objection was exact: *"keeping item in both places
+  is confusing (you have no idea what item belongs to what thread) and
+  unneeded."* Passing `done` back removed the map, `holding()`, and the use of
+  thread identity altogether.
 - **The `stop()` leak disappeared rather than being fixed.** See below.
 
 **The combined call is the load-bearing decision.** `select(done)` both reports
@@ -263,8 +279,9 @@ assertion that a running total returns to zero after a full run.
 
 **Everything below describes an interface that no longer exists.** It is kept
 because each item records a wrong turn and why it was wrong — `admit` and
-`alone` are gone, `status()` is now `holding()`, `pending()` is gone with the
-queue, and the pool no longer takes `items` at all. Read it as history.
+`alone` are gone, `status()` and `pending()` are gone with the queue, and the
+pool no longer takes `items` at all — nor does it track which thread holds
+what. Read it as history.
 
 It was built to this interface, with three changes the implementation forced:
 
@@ -519,12 +536,11 @@ the log said nothing.
 #### Worker shedding
 
 **`None` is how the pool tells a worker to shut down.** The worker loop is
-`while (item := pool.get_next()) is not None:` — so returning `None` ends that
-thread, and the thread releases its stack, its status slot and any memory it
-was holding.
+the pool's own, and `item_selector` returning `None` ends that thread — which
+then releases its stack and any memory it was holding.
 
-There are exactly **two reasons** the pool says `None`, and they are different
-questions that happen to share an answer:
+There are exactly **two reasons** the selector returns `None`, and they are
+different questions that happen to share an answer:
 
 1. **The queue is drained.** Nothing left to hand out, so every worker that
    asks is told to stop. This is ordinary shutdown.

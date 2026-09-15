@@ -734,18 +734,29 @@ work items are. A module earns its place there by being usable in an unrelated
 program without edits.
 
 `libs/pool.py` — N threads, each pulling work from a caller-supplied function.
-Implements D4 in `REFACTOR_DECISIONS.md`. The pool owns **no queue**: not the
-items, not the ordering, not the admission rule. It owns a lock, a shutdown
-flag, and which item each thread currently holds.
+Implements D4 in `REFACTOR_DECISIONS.md`. The pool owns **a lock and a shutdown
+flag**, and nothing else: not the items, not the ordering, not the admission
+rule, not even which item each thread holds — the worker passes its finished
+item back, because the worker is the only thing that knows.
 
 ```python
-select(done) -> T | None   # the next item, or None to shut this worker down
-work(pool)                 # what a worker thread does
+Pool(n_workers, item_selector, item_handler, item_error_handler=None).start()
+
+item_selector(done) -> T | None   # next item, or None to shut this worker down
+item_handler(item)                # do the work
+item_error_handler(item, exc)     # optional; called if the handler raises
 ```
 
-`select` is called with the pool's lock held, so the caller's queue and
-accounting need no locks of their own — serialising those calls is the pool's
-entire contribution.
+**The pool owns the loop.** The caller supplies work, not control flow —
+there is no `get_next` and nothing to write a `while` around.
+
+`item_selector` runs **with the lock held**, so the caller's queue and
+accounting need no locks of their own; serialising those calls is the pool's
+entire contribution. `item_error_handler` runs under the lock too, for the same
+reason — it is cheap bookkeeping, so the caller's error log needs no lock
+either. `item_handler` runs **without** it, concurrently: that is where a
+subprocess is spawned and a mesh repaired, and holding the lock across it would
+serialise every worker and make the pool pointless.
 
 **One call does two jobs**: it reports the item a worker just finished (`done`,
 `None` on the first call) and returns the next one. That is what makes resource
@@ -759,30 +770,35 @@ worker down frees its share for the workers still running. `n_workers` is a
 ceiling, not a target: surplus threads ask once, are told `None`, and exit,
 which costs microseconds and is why the pool need not know the queue's length.
 
-`get_next()` returns `None` to mean *this worker should shut down*, for either
-of two reasons the caller need not distinguish: the queue is drained, or
-`admit` will not let the head item run beside the work in flight **and** will
-not let it run alone. The second is worker shedding — the worker exits so the
-oversized item can have the room, rather than parking on a condition variable
-while holding the very resources that item is waiting for.
+**A failed item is still reported.** The loop assigns `done` after the
+try/except, so an item whose handler raised comes back to the selector exactly
+like one that succeeded — whether a failure should release its resources is the
+policy's business, and it sees the item either way.
 
-**The `alone=True` second ask is the one design decision worth knowing.** The
-earlier sketch handed the item over anyway when nothing else was running, and
-logged an override — which silently violates the caller's policy. Asking again
-with `alone=True` puts that choice back where it belongs: a resource rule says
-yes (nothing is competing), a "never run this" rule says no and the pool sheds
-the worker instead of deadlocking.
+Two earlier shapes were tried and dropped:
+
+- **The pool kept `dict[thread name → item]`** so it could work out `done`
+  itself. That duplicated a value the worker already held in a local, and its
+  only observable use reported progress keyed by `"w3"`, which means nothing to
+  any display. Since workers write their own logs, nothing wanted it.
+- **The caller wrote the loop** around a public `get_next(done)`. That is
+  correct only if the caller remembers a `try` — forget it and an exception
+  leaves the loop with the in-flight item, so the policy is never told and a
+  budget silently loses that capacity. Moving the loop inside removed the
+  possibility rather than documenting the hazard.
 
 ---
 
 ## Tests
 
-`test_pool.py` — 12 tests for `libs/pool.py`, ~0.6 s. No meshes, no
-subprocesses: fake work is a short sleep and admission rules are plain
-predicates, so it is fast and deterministic. It covers the half of the system
-`test_pipeline.py` cannot reach — every item handled exactly once under 16-way
-contention, admission actually gating, both outcomes of the `alone=True` ask,
-`stop()`, and a raising worker not stranding the pool.
+`test_pool.py` — 17 tests for `libs/pool.py`, ~0.8 s. No meshes, no
+subprocesses: fake work is a short sleep and policies are plain closures over
+each test's own list, so it is fast and deterministic. It covers the half of
+the system `test_pipeline.py` cannot reach — every item handled exactly once
+under 16-way contention, `select` never called concurrently, every item
+reported back including each worker's last, a budget policy holding a capacity
+ceiling end to end and returning to zero, shedding by returning `None`, and
+`stop()`.
 
 `test_pipeline.py` — 36 end-to-end tests, ~3.8 s:
 
