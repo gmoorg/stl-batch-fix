@@ -177,6 +177,50 @@ class Runner:
                 pass
 
 
+#: Where the Blender scripts live.  They are data, not modules — read at
+#: import time, rendered with `str.format`, and handed to Blender.  Kept as
+#: files rather than string literals because a Blender script is Python that an
+#: editor should be able to read, and burying it in a quoted block makes it
+#: unreadable and unlintable.
+SCRIPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'blender_fx')
+
+
+def load_script(name: str) -> str:
+    """Read `<name>.blender` from the script folder."""
+    with open(os.path.join(SCRIPT_DIR, f'{name}.blender')) as f:
+        return f.read()
+
+
+CONVERT_SCRIPT = load_script('convert')
+
+
+def convert(source: str, destination: str, timeout: float = 600,
+            executable: str = 'blender') -> tuple[bool, str]:
+    """Convert `source` to a binary STL at `destination`.
+
+    Accepts OBJ or STL in either encoding; always writes binary STL.  A
+    lossless container change — same triangles, same coordinates — so it is
+    generic Blender work rather than anything this project invented, which is
+    why it lives here and the repair and decimation scripts do not.
+
+    Returns `(ok, destination)`.  The full `Result` is deliberately not
+    returned: a caller almost always wants to know whether the file is there
+    now, and anyone who needs stdout can render `CONVERT_SCRIPT` and call
+    `Runner.run` directly.
+
+    The script writes to `<destination>.partial` and renames, so an interrupted
+    export cannot leave a file that a later run mistakes for a finished one —
+    existence is what decides whether an export is reused.
+    """
+    script = CONVERT_SCRIPT.format(src=source, dst=destination)
+    result = Runner(executable).run(script, timeout=timeout)
+    ok = (not result.is_timed_out
+          and result.exit_code == 0
+          and 'BLENDER_CONVERT_OK' in result.stdout_capture)
+    return ok, destination
+
+
 def is_available(executable: str = 'blender') -> bool:
     """True when `executable` can be found and reports a version.
 

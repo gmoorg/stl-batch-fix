@@ -864,6 +864,34 @@ from another thread.
 killed run still spent its time and still cost a launch, so a caller
 accumulating cost should read it rather than timing the call itself.
 
+**`convert()`** turns an OBJ or an ASCII STL into a binary STL:
+
+```python
+ok, path = blender.convert(source, destination, timeout=600)
+```
+
+It lives here rather than in the pipeline because a format conversion is
+generic Blender work — *load this, save that as binary STL* — with no
+`MERGE_DIST`, no markers of ours, no protocol. The repair and decimation
+scripts fail that test and stay outside. This is what makes D7 buildable:
+`indicators.check()` could already report `EXPORT_READY`, and until now nothing
+could produce one.
+
+It returns `(ok, path)` rather than a `Result`: a caller almost always wants to
+know whether the file is there now, and anyone needing stdout can render
+`CONVERT_SCRIPT` and call `Runner.run` directly.
+
+The script writes `<destination>.partial` and renames on success, so an
+interrupted conversion cannot leave a file that a later run mistakes for a
+finished one — existence is what decides whether a conversion is reused.
+
+**Scripts live in `libs/blender_fx/`** as `<name>.blender`, read at import and
+rendered with `str.format`. They are data, not modules. Kept as files rather
+than string literals because a Blender script is Python that an editor should
+be able to read, and burying it in a quoted block makes it unreadable and
+unlintable. `fix` and `decimate` will join `convert` there when the pipeline's
+own scripts move.
+
 **`_kill` kills but does not reap**, and that separation is load-bearing.
 Reaping means `communicate()`, which closes the pipes — and a kill arriving
 from a signal handler or another thread lands while the thread inside `run` is
@@ -878,7 +906,7 @@ consolidating the reap with it is not.
 
 ## Tests
 
-`test_blender.py` — 21 tests, ~15 s. Most never launch Blender: the module's
+`test_blender.py` — 32 tests, ~20 s. Most never launch Blender: the module's
 job is process handling, and that is exercised against a stand-in executable in
 milliseconds, deterministically, on a machine with no Blender installed. A
 stand-in is a real subprocess, so `Popen`, `communicate`, the timeout and the
