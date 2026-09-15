@@ -801,9 +801,43 @@ Two earlier shapes were tried and dropped:
 
 ---
 
+`libs/indicators.py` — what the filesystem already says about a source file.
+Detection only: it looks for the markers a previous run left, reports the last
+one found, and decides nothing. Whether a finding means skip, convert or
+process is the caller's judgement.
+
+```python
+check(source, input_folder, output_file) -> Finding(source, indicator, path)
+```
+
+Two trees are involved, which is why this is a module rather than a few
+`os.path.exists` calls at a call site:
+
+```text
+SOURCE tree   <input>/stl-exported/<rel>.stl   already converted — use this path
+OUTPUT tree   <output>/<rel>.stl               already fixed
+              <rel>.broken .failed .unrepaired .open .timeout   how it ended
+```
+
+Checks run in that order and the **last** match is reported, so anything in the
+output tree outranks an export — converting a file that will not be processed
+is wasted work. Among the output markers the choice is cosmetic: every one of
+them means the file has been dealt with, so which is named affects the message
+and not the outcome.
+
+`.original.stl` is deliberately *not* an indicator. It sits beside a
+**successful** output as evidence that the repair moved the bounding box, so
+treating it as one would skip files that actually worked.
+
+---
+
 ## Tests
 
-`test_pool.py` — 17 tests for `libs/pool.py`, ~0.8 s. No meshes, no
+`test_indicators.py` — 15 tests for `libs/indicators.py`, ~0.01 s. Every file
+is an empty touch, since the module tests for existence and never opens
+anything.
+
+`test_pool.py` — 24 tests for `libs/pool.py`, ~0.9 s. No meshes, no
 subprocesses: fake work is a short sleep and policies are plain closures over
 each test's own list, so it is fast and deterministic. It covers the half of
 the system `test_pipeline.py` cannot reach — every item handled exactly once

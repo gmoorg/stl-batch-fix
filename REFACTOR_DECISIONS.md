@@ -468,6 +468,10 @@ for each collected file:
 Exports go to a `stl-exported/` folder **in the source tree**, and the collector
 must skip that folder.
 
+> **Detection half built 2026-09-15** as `libs/indicators.py` — `export_path()`
+> derives the location and `check()` reports `EXPORT_READY` when one exists.
+> The module detects only; exporting, collecting and skipping remain to do.
+
 **No mtime check.** An export could in principle go stale if its source were
 replaced under the same name, but that does not happen in this workflow —
 sources arrive and stay put. Existence alone decides, exactly as it does for the
