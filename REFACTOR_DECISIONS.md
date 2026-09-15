@@ -1042,9 +1042,33 @@ wedges, there must still be a way out — the TUI's `_shutdown_started` flag plu
 `os._exit(130)` is the shape to preserve.
 
 **Carried forward:** `_child_pids_of` must survive the refactor unchanged.
-Blender is a grandchild of the worker, so a `Popen.kill()` does not reach it;
-walking `/proc` is why the existing handler works. Worth verifying by
-experiment rather than assumption when the pool is wired in.
+
+**Measured 2026-09-15, and the wording above was misleading.** "Blender is a
+grandchild" is true of one relationship and false of the other, and building
+the wrapper on the wrong one would have moved `/proc` walking into a module
+that cannot use it:
+
+```text
+Case 1 — within one process (what libs/blender.py does)
+    spawner 1210131 -> blender 1210132        DIRECT child
+    proc.kill() reaches it; blender has no children of its own
+
+Case 2 — across the --one-file boundary (what the runner does)
+    me 1210200 -> middle 1210201 -> blender 1210202
+    blender is NOT a direct child of me
+    kill only the middle process:
+        blender still alive : True
+        its PPid becomes    : 1      (reparented to init)
+```
+
+So the responsibility splits:
+
+- **`libs/blender.py`** spawns Blender as a direct child and kills it directly
+  on overrun. No `/proc` walk, because there is no intermediate process.
+- **The runner**, killing a `--one-file` child, must walk `/proc` *first* or it
+  orphans a Blender that keeps its memory until it finishes on its own. That is
+  what `_child_pids_of` is for, and it belongs with whatever supervises child
+  processes — not with the Blender wrapper.
 
 ### Proposed pipeline — `_process_file_impl` restructured
 

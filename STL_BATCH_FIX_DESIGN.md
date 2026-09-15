@@ -829,9 +829,58 @@ and not the outcome.
 **successful** output as evidence that the repair moved the bounding box, so
 treating it as one would skip files that actually worked.
 
+`libs/blender.py` — run a script in headless Blender, with a deadline. It knows
+how to launch Blender, wait for it, kill it if it overruns and clean up after
+itself; it knows nothing about meshes, about what the script does, or about
+what its output means.
+
+```python
+runner = Runner()                       # or Runner('/path/to/blender')
+result = runner.run(script_text, timeout=420)
+
+result.exit_code        # None if it was killed
+result.stdout_capture   # the caller's protocol lives in here
+result.is_timed_out
+result.second_elapsed   # filled on the kill path too
+```
+
+**No budget arithmetic.** `timeout` is seconds, supplied by the caller. How
+much of a mesh's remaining time Blender may have, and what to reserve for the
+steps after it, is pipeline policy that changes with the pipeline.
+
+**No `/proc` walking**, and that was measured rather than assumed — see D14.
+Within one process Blender is a **direct** child with no children of its own,
+so `Popen.kill()` reaches it. The grandchild problem is real but belongs to
+whoever kills an intermediate process: killing a `--one-file` child alone
+leaves its Blender alive and reparented to init, holding its memory.
+
+**`Runner` is a class rather than a function** because a signal handler needs
+to reach a Blender that is already in flight, so the handle has to live
+somewhere. Holding it on an instance means two runners cannot fight over it and
+the caller decides what is shared. `kill_current()` is safe from a handler and
+from another thread.
+
+`second_elapsed` is filled on the timeout path as well as the success path: a
+killed run still spent its time and still cost a launch, so a caller
+accumulating cost should read it rather than timing the call itself.
+
 ---
 
 ## Tests
+
+`test_blender.py` — 21 tests, ~15 s. Most never launch Blender: the module's
+job is process handling, and that is exercised against a stand-in executable in
+milliseconds, deterministically, on a machine with no Blender installed. A
+stand-in is a real subprocess, so `Popen`, `communicate`, the timeout and the
+kill are all genuinely tested — only the program on the other end differs. The
+few tests that need the real thing are guarded by `is_available()`.
+
+> **A stand-in must `exec`.** A shell script running `sleep 30` is *two*
+> processes: `kill()` reaches the shell, but `sleep` survives holding the
+> stdout pipe open, so `communicate()` waits the full 30 s. That modelled the
+> wrong shape and produced three failures against correct code — the suite took
+> 183 s instead of 15 s. Blender is a single process, so `exec sleep 30` models
+> it and a bare `sleep 30` models something else entirely.
 
 `test_indicators.py` — 13 tests for `libs/indicators.py`, ~0.01 s. Every file
 is an empty touch, since the module tests for existence and never opens
