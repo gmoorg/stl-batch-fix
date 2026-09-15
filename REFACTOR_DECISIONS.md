@@ -408,9 +408,28 @@ the log said nothing.
 
 #### Worker shedding
 
-`get_next` returns `None` for worker N when there is no longer room for it, and
-that worker exits and frees its resources — rather than blocking and holding a
-stack and a status slot while doing nothing.
+**`None` is how the pool tells a worker to shut down.** The worker loop is
+`while (item := pool.get_next()) is not None:` — so returning `None` ends that
+thread, and the thread releases its stack, its status slot and any memory it
+was holding.
+
+There are exactly **two reasons** the pool says `None`, and they are different
+questions that happen to share an answer:
+
+1. **The queue is drained.** Nothing left to hand out, so every worker that
+   asks is told to stop. This is ordinary shutdown.
+2. **The next file needs more memory than is free while N workers are
+   running.** The file itself is fine — it just cannot run *alongside* the
+   others. So the pool sheds workers until the remaining set leaves enough
+   headroom, and the big file then runs with fewer threads beside it.
+
+Case 2 is the whole point. The alternative is a worker that blocks waiting for
+room, holding a stack and a status slot while doing nothing, and — worse —
+holding memory that is exactly what the blocked file is waiting for. Shedding
+converts a deadlock-shaped wait into "run the big one narrow, then finish".
+
+Note what is *not* happening: the file is never rejected and the queue is never
+reordered. A worker leaves so the next file can have the room.
 
 Ordering and shedding interact: smallest-first means workers shed late,
 largest-first means they shed early and the tail runs wide.
