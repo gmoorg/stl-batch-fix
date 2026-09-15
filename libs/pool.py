@@ -100,12 +100,30 @@ class Pool[T]:
         self._stopped = False
 
     def stop(self) -> None:
-        """Tell every worker to shut down before it takes another item."""
+        """Tell every worker to shut down before it takes another item.
+
+        Only prevents the *next* selection — a worker already inside its
+        handler runs to completion.  That makes this the wrong answer to an
+        interrupt (see `start`) and the right one for a graceful limit, such as
+        "stop after N items".
+        """
         with self._lock:
             self._stopped = True
 
     def start(self) -> None:
-        """Spawn the threads and wait for all of them to finish."""
+        """Spawn the threads and wait for all of them to finish.
+
+        **KeyboardInterrupt is deliberately not caught.**  It propagates to the
+        caller, which installs the signal handler and owns the whole shutdown
+        sequence — killing subprocesses, sweeping child PIDs, deciding what a
+        second Ctrl+C means.  None of that is knowable here.
+
+        Catching it and calling `stop()` would be worse than useless: `stop()`
+        waits for in-flight handlers, so an interrupt would appear to do
+        nothing for as long as the slowest item takes — the opposite of what
+        pressing it means.  Killing mid-work is safe in this project because an
+        unfinished item leaves its pending marker and the next run redoes it.
+        """
         threads = [threading.Thread(target=self._run, name=f"w{i}", daemon=True)
                    for i in range(self._n)]
         for t in threads:

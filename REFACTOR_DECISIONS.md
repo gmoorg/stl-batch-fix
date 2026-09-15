@@ -995,6 +995,53 @@ case, which is a single model whose shells belong together. Its one useful
 result: part 0 repaired correctly at 200,546 faces, visually confirmed, which
 is evidence *for* decimate-then-split producing sound geometry.
 
+### D14 — Ctrl+C kills; the pool does not catch it
+
+**Decided.** `KeyboardInterrupt` propagates out of `Pool.start()`. The pool does
+not catch it, does not call its own `stop()`, and does not wait for in-flight
+work. The caller installs the signal handler and owns the whole shutdown
+sequence.
+
+**Why killing mid-flight is safe, which is the load-bearing part.** A part
+killed while running leaves its `~`-prefixed pending file, and the next run
+reads that as unprocessed and redoes it. Nothing is half-committed and nothing
+is lost — so "let the current item finish" protects nothing. The user's
+framing: *"the reason for a Ctrl+C would be something went drastically wrong
+and I do not need to wait for item to complete — I probably clicked Ctrl+C
+because it already took too long. Also, if we kill mid-flight, the consequent
+run would pick up unprocessed items."*
+
+**Why `stop()` is not the answer to an interrupt.** `stop()` only prevents the
+*next* selection. A worker already inside a 20-minute PyMeshFix call keeps
+going, so catching the interrupt and calling `stop()` would make Ctrl+C look
+like nothing happened for a long while — the opposite of what pressing it
+means. `stop()` remains for genuine graceful cases (a `--max-files` limit, say).
+
+**Why the pool cannot own the handler at all.** `signal.signal()` works only
+from the main thread and allows one handler per signal per process, so a pool
+that installed one would fight any other pool and override the caller's own
+needs — a module reaching for a process-wide global, against the `libs/` rule.
+And the real shutdown work is entirely outside the pool's knowledge:
+
+```text
+--one-file child   kill Blender, SIGKILL own children, _exit(130)
+TUI                first Ctrl+C  -> graceful shutdown
+                   second Ctrl+C -> restore SIG_DFL, _exit(130) immediately
+```
+
+The pool knows nothing about Blender, child PIDs, or what a second interrupt
+should mean. Its entire contribution to shutdown is `stop()`, and the caller
+decides whether to use it.
+
+**Keep the second-interrupt escape.** If the first interrupt's own cleanup
+wedges, there must still be a way out — the TUI's `_shutdown_started` flag plus
+`os._exit(130)` is the shape to preserve.
+
+**Carried forward:** `_child_pids_of` must survive the refactor unchanged.
+Blender is a grandchild of the worker, so a `Popen.kill()` does not reach it;
+walking `/proc` is why the existing handler works. Worth verifying by
+experiment rather than assumption when the pool is wired in.
+
 ### Proposed pipeline — `_process_file_impl` restructured
 
 **Draft, for review.** Four changes agreed 2026-09-14 are marked **[NEW]**;
