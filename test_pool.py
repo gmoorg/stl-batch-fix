@@ -191,6 +191,44 @@ class TestFailureHandling(unittest.TestCase):
         self.assertIs(kind, ValueError)
         self.assertEqual(msg, "no good: x")
 
+    def test_a_failed_item_is_reported_once_not_twice(self):
+        """The error handler must not release — the selector already will.
+
+        A failed item reaches the selector as `done` exactly like a successful
+        one. A caller that also frees resources in the error handler frees them
+        twice, and a budget policy drifts upward until it admits work there is
+        no memory for.
+        """
+        queue = [("ok", 10), ("boom", 30), ("fine", 20)]
+        committed = {"total": 0}
+        lock = threading.Lock()
+
+        def budget(done):
+            with lock:
+                if done is not None:
+                    committed["total"] -= done[1]
+                if not queue:
+                    return None
+                item = queue.pop(0)
+                committed["total"] += item[1]
+                return item
+
+        def handle(item):
+            if item[0] == "boom":
+                raise RuntimeError("blew up")
+
+        seen_errors = []
+
+        def on_error(item, exc):
+            # Correct: log only. Releasing here would double-count.
+            seen_errors.append(item)
+
+        Pool(1, budget, handle, item_error_handler=on_error).start()
+        self.assertEqual(seen_errors, [("boom", 30)])
+        self.assertEqual(committed["total"], 0,
+                         "a failed item was released a different number of "
+                         "times than it was committed")
+
     def test_errors_are_swallowed_without_on_error(self):
         def handle(item):
             raise RuntimeError("silent")

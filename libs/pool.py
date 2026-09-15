@@ -78,9 +78,18 @@ class Pool[T]:
         item_error_handler  called if the handler raises.  Bookkeeping, and
                             cheap, so it runs under the lock too: the caller's
                             error log needs no lock of its own, same argument as
-                            the selector.  The item is still reported to the
-                            selector afterwards.  Without this, exceptions are
+                            the selector.  Without this, exceptions are
                             swallowed silently.
+
+                            **It must not release the item.**  A failed item is
+                            still passed to the selector as `done` on the next
+                            call, exactly like a successful one — so a caller
+                            that frees resources here *and* in the selector
+                            frees them twice.  For a budget policy that means
+                            the running total drifts upward until the pool
+                            admits work there is no memory for.  Log here;
+                            release in the selector, which sees every item
+                            regardless of outcome.
         """
         self._n = max(1, n_workers)
         self._select = item_selector
@@ -127,4 +136,8 @@ class Pool[T]:
                 if self._on_error is not None:
                     with self._lock:
                         self._on_error(item, exc)
+            # Assigned outside the except, so a failed item is reported to the
+            # selector exactly like a successful one.  This is also why the
+            # error handler must not release the item itself: it would be
+            # released here too, and a budget policy would drift upward.
             done = item

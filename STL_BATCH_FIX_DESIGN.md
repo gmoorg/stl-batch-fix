@@ -775,6 +775,14 @@ try/except, so an item whose handler raised comes back to the selector exactly
 like one that succeeded — whether a failure should release its resources is the
 policy's business, and it sees the item either way.
 
+**Which means `item_error_handler` must not release the item.** It is called
+with the failed item *and* the selector receives that same item as `done` on
+the next call, so a caller that frees resources in both places frees them
+twice. For a budget policy the running total then drifts upward until the pool
+admits work there is no memory for. Log in the error handler; release in the
+selector, which sees every item regardless of outcome.
+`test_a_failed_item_is_reported_once_not_twice` pins it.
+
 Two earlier shapes were tried and dropped:
 
 - **The pool kept `dict[thread name → item]`** so it could work out `done`
