@@ -37,6 +37,8 @@ class Indicator(Enum):
     """
 
     PROCESS = 'process'              # nothing found — use the source as it is
+    COPY_AS_IS = 'copy_as_is'        # not a mesh; copy it to the output tree
+    ALREADY_COPIED = 'already_copied'  # not a mesh, and the copy is there
     EXPORT_READY = 'export_ready'    # a converted binary exists; use that path
     ALREADY_FIXED = 'already_fixed'  # the repaired output is present
     BROKEN = 'broken'                # unreadable mesh; never retried
@@ -95,23 +97,44 @@ def export_path(source: str, input_folder: str) -> str:
     return os.path.join(input_folder, EXPORT_DIRNAME, base + '.stl')
 
 
-def check(source: str, input_folder: str, output_file: str) -> Finding:
+def check(source: str, input_folder: str, output_file: str,
+          copy_extensions: frozenset[str] | set[str] | None = None) -> Finding:
     """Report what the filesystem already says about `source`.
 
     `output_file` is where the repaired result would be written; the markers
     are its siblings, named from the same base.  It is passed in rather than
     derived so this module needs no opinion about output layout.
 
-    **The output tree is checked first and the first match wins.**  Only one
-    ordering rule matters: anything in the output tree outranks the export,
-    because converting a file that is not going to be processed is wasted
-    work.  Beyond that the order is arbitrary — every output-tree finding means
-    the file has already been dealt with, so which one is named changes the
-    message and not the outcome.
+    `copy_extensions` is the set of suffixes that are **not meshes** — images,
+    READMEs, archives shipped alongside a model.  Pass it and a matching file
+    short-circuits everything else, reporting COPY_AS_IS or ALREADY_COPIED.
+    The set is injected rather than hardcoded because which extensions count is
+    the caller's policy, not a fact about the filesystem.
+
+    That branch runs first, and not merely for speed: none of the mesh markers
+    can exist for a `.png`, so testing for a `.broken.stl` beside it is
+    meaningless work.  ALREADY_COPIED is deliberately separate from
+    ALREADY_FIXED — the same existence test, but "copied" and "repaired" are
+    different claims, and collapsing them would make any count of repaired
+    files wrong.
+
+    **Otherwise the output tree is checked first and the first match wins.**
+    Only one ordering rule matters: anything in the output tree outranks the
+    export, because converting a file that is not going to be processed is
+    wasted work.  Beyond that the order is arbitrary — every output-tree
+    finding means the file has already been dealt with, so which one is named
+    changes the message and not the outcome.
 
     Returning on the first match is the point: once the answer is known, the
     remaining `os.path.exists` calls cannot change it.
     """
+    if copy_extensions:
+        suffix = os.path.splitext(source)[1].lower()
+        if suffix in copy_extensions:
+            if os.path.exists(output_file):
+                return Finding(source, Indicator.ALREADY_COPIED, output_file)
+            return Finding(source, Indicator.COPY_AS_IS, output_file)
+
     base, _ = os.path.splitext(output_file)
     for suffix, indicator in _OUTPUT_MARKERS:
         marker = base + suffix

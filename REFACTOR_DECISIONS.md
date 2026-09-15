@@ -472,6 +472,38 @@ must skip that folder.
 > derives the location and `check()` reports `EXPORT_READY` when one exists.
 > The module detects only; exporting, collecting and skipping remain to do.
 
+#### Companion files belong in the same queue
+
+Raised while reviewing what the old script does with images. It copies them —
+`.png .jpg .gif .bmp .webp .tiff .svg .pdf .txt .md .readme .zip .7z .rar` —
+from the source tree to the output tree, preserving relative paths, skipping
+any already present.
+
+Two defects in how, both fixed by treating a copy as ordinary work rather than
+a startup chore:
+
+```python
+for src, dst in companions:          # serial, on the main thread,
+    ...                              # before a single mesh is touched
+    shutil.copy2(src, dst)           # unguarded
+```
+
+- **One failure aborts the whole run.** A permission error or a full disk on a
+  single JPEG raises before any mesh is processed. Every other I/O path in the
+  pipeline is defensive; this one is not.
+- **It is serial and blocking**, scaling with file count on the main thread.
+
+`check()` now reports `COPY_AS_IS` / `ALREADY_COPIED`, so the preparation pool
+handles three kinds of item — copy, convert, queue — which is one coherent job
+rather than three. A failed copy then fails one item, not the run.
+
+The user's framing settled where it goes: *"indicator sounds more correct, it
+indicates what file should be just copied; mesh_io opens mesh."* An image is
+not a mesh, so `mesh_io` has no business being asked about it.
+
+**Still to do:** the design doc's companion list omits `.zip .7z .rar`, which
+are in `COMPANION_EXTENSIONS`. Minor drift, left until the collector moves.
+
 **No mtime check.** An export could in principle go stale if its source were
 replaced under the same name, but that does not happen in this workflow —
 sources arrive and stay put. Existence alone decides, exactly as it does for the

@@ -144,6 +144,75 @@ class TestExport(IndicatorCase):
         self.assertIs(found.indicator, Indicator.ALREADY_FIXED)
 
 
+class TestCopyAsIs(IndicatorCase):
+    """Non-mesh companions: images, READMEs, archives beside a model."""
+
+    COPY_EXTS = frozenset({'.png', '.jpg', '.txt', '.zip'})
+
+    def setUp(self):
+        super().setUp()
+        self.image = os.path.join(self.src_dir, 'Leia', 'render.png')
+        self.image_out = os.path.join(self.out_dir, 'Leia', 'render.png')
+        self._touch(self.image)
+
+    def _check_image(self):
+        return check(self.image, self.src_dir, self.image_out,
+                     copy_extensions=self.COPY_EXTS)
+
+    def test_a_companion_not_yet_copied(self):
+        found = self._check_image()
+        self.assertIs(found.indicator, Indicator.COPY_AS_IS)
+        self.assertEqual(found.path, self.image_out)
+
+    def test_a_companion_already_copied(self):
+        self._touch(self.image_out)
+        found = self._check_image()
+        self.assertIs(found.indicator, Indicator.ALREADY_COPIED)
+        self.assertEqual(found.path, self.image_out)
+
+    def test_already_copied_is_not_already_fixed(self):
+        """Same existence test, different claim — collapsing them would make
+        any count of repaired files wrong."""
+        self._touch(self.image_out)
+        self.assertIsNot(self._check_image().indicator, Indicator.ALREADY_FIXED)
+
+    def test_matching_is_case_insensitive(self):
+        upper = os.path.join(self.src_dir, 'Leia', 'PHOTO.JPG')
+        self._touch(upper)
+        found = check(upper, self.src_dir,
+                      os.path.join(self.out_dir, 'Leia', 'PHOTO.JPG'),
+                      copy_extensions=self.COPY_EXTS)
+        self.assertIs(found.indicator, Indicator.COPY_AS_IS)
+
+    def test_a_mesh_is_unaffected_by_the_parameter(self):
+        found = check(self.source, self.src_dir, self.output,
+                      copy_extensions=self.COPY_EXTS)
+        self.assertIs(found.indicator, Indicator.PROCESS)
+
+    def test_omitting_the_parameter_keeps_old_behaviour(self):
+        """A .png with no copy_extensions is treated as any other path."""
+        found = check(self.image, self.src_dir, self.image_out)
+        self.assertIs(found.indicator, Indicator.PROCESS)
+
+    def test_a_companion_short_circuits_the_marker_checks(self):
+        """None of the mesh markers can exist for a .png, so testing for them
+        is meaningless work — measured, not assumed."""
+        import libs.indicators as ind
+        real_exists, calls = os.path.exists, []
+
+        def counting(p):
+            calls.append(p)
+            return real_exists(p)
+
+        ind.os.path.exists = counting
+        try:
+            self._check_image()
+        finally:
+            ind.os.path.exists = real_exists
+        self.assertEqual(len(calls), 1,
+                         f"expected one stat for the destination, got {calls}")
+
+
 class TestFinding(unittest.TestCase):
 
     def test_finding_is_immutable(self):

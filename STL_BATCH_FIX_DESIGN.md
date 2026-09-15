@@ -814,10 +814,23 @@ Two trees are involved, which is why this is a module rather than a few
 `os.path.exists` calls at a call site:
 
 ```text
+COMPANION     not a mesh at all              copy it, or it is already copied
 SOURCE tree   <input>/stl-exported/<rel>.stl   already converted — use this path
 OUTPUT tree   <output>/<rel>.stl               already fixed
               <rel>.broken .failed .unrepaired .open .timeout   how it ended
 ```
+
+**Companions are checked first.** Pass `copy_extensions` and a matching file
+reports `COPY_AS_IS` or `ALREADY_COPIED` without touching anything else: none
+of the mesh markers can exist beside a `.png`, so testing for them is
+meaningless work. The set is injected rather than hardcoded, because which
+extensions count as companions is the caller's policy and not a fact about the
+filesystem.
+
+`ALREADY_COPIED` is deliberately distinct from `ALREADY_FIXED`. Same existence
+test, different claim — collapsing them would make any count of *repaired*
+files wrong, the same conflation that let `status='open'` mean two unrelated
+things.
 
 Checks run in that order and the **last** match is reported, so anything in the
 output tree outranks an export — converting a file that will not be processed
