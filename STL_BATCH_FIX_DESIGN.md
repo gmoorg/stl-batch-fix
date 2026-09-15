@@ -733,21 +733,31 @@ nothing in `libs/` may import the pipeline, mention meshes, or assume what the
 work items are. A module earns its place there by being usable in an unrelated
 program without edits.
 
-`libs/pool.py` — N threads pulling from a shared queue, with optional
-admission. Implements D4 in `REFACTOR_DECISIONS.md`; all policy is injected:
+`libs/pool.py` — N threads, each pulling work from a caller-supplied function.
+Implements D4 in `REFACTOR_DECISIONS.md`. The pool owns **no queue**: not the
+items, not the ordering, not the admission rule. It owns a lock, a shutdown
+flag, and which item each thread currently holds.
 
 ```python
-admit(item, running, alone) -> bool            # may this item start now?
-select(items, running, admit) -> (item, wait)  # which item, or why not
-work(pool)                                     # what a worker thread does
+select(done) -> T | None   # the next item, or None to shut this worker down
+work(pool)                 # what a worker thread does
 ```
 
-`get_next` keeps only the synchronisation — take the lock, release the finished
-item, notify, loop, wait. **Which** item to hand out lives in
-`get_next_default`, and passing `select=` replaces it outright. The default
-takes from the head subject to `admit`; a replacement is free to reorder the
-queue, ignore `admit`, or extend the queue, because it is called with the lock
-held and receives the real list.
+`select` is called with the pool's lock held, so the caller's queue and
+accounting need no locks of their own — serialising those calls is the pool's
+entire contribution.
+
+**One call does two jobs**: it reports the item a worker just finished (`done`,
+`None` on the first call) and returns the next one. That is what makes resource
+accounting possible — a budget policy releases what the finished item reserved
+before deciding what fits next. Every item is reported, including each worker's
+last, so a running total returns to zero.
+
+**Returning `None` shrinks the pool.** With a cheapest-first queue an item that
+does not fit now never will — everything after it is larger — so shutting the
+worker down frees its share for the workers still running. `n_workers` is a
+ceiling, not a target: surplus threads ask once, are told `None`, and exit,
+which costs microseconds and is why the pool need not know the queue's length.
 
 `get_next()` returns `None` to mean *this worker should shut down*, for either
 of two reasons the caller need not distinguish: the queue is drained, or

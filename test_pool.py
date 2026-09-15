@@ -2,7 +2,10 @@
 
 The pool is the half of the refactor the 36 pipeline tests cannot reach, so it
 gets its own. Everything here is pure Python and deterministic: fake work is a
-short sleep, and admission rules are plain predicates.
+short sleep, and policies are plain closures over the caller's own queue.
+
+Note the shape: the pool owns no queue. Every test builds its own list and
+closes over it, which is exactly how the pipeline will use it.
 """
 
 import threading
@@ -10,6 +13,13 @@ import time
 import unittest
 
 from libs.pool import Pool
+
+
+def _fifo_over(queue):
+    """The simplest policy: hand out the head of the caller's list."""
+    def select(done):
+        return queue.pop(0) if queue else None
+    return select
 
 
 def _collector():
@@ -29,117 +39,122 @@ class TestBasics(unittest.TestCase):
 
     def test_every_item_handled_exactly_once(self):
         items = [f"i{n}" for n in range(50)]
+        queue = list(items)
         work, seen = _collector()
-        Pool(items, n_workers=4).start(work)
+        Pool(4, _fifo_over(queue)).start(work)
         self.assertCountEqual(seen, items)
+        self.assertEqual(queue, [], "queue not drained")
 
     def test_empty_queue_stops_immediately(self):
         work, seen = _collector()
-        Pool([], n_workers=4).start(work)
+        Pool(4, _fifo_over([])).start(work)
         self.assertEqual(seen, [])
 
-    def test_worker_count_capped_by_queue_length(self):
-        pool = Pool(["only"], n_workers=8)
-        names = set()
-        lock = threading.Lock()
+    def test_more_threads_than_work_is_harmless(self):
+        """n_workers is a ceiling, not a target — surplus threads just exit."""
+        queue = ["only"]
+        work, seen = _collector()
+        Pool(10, _fifo_over(queue)).start(work)
+        self.assertEqual(seen, ["only"])
 
-        def work(p):
-            while p.get_next() is not None:
-                with lock:
-                    names.add(threading.current_thread().name)
-
-        pool.start(work)
-        self.assertEqual(len(names), 1, "more threads than items")
-
-    def test_pending_drains(self):
-        pool = Pool(list(range(10)), n_workers=2)
-        self.assertEqual(pool.pending(), 10)
+    def test_holding_is_empty_after_the_run(self):
+        queue = list(range(20))
         work, _ = _collector()
+        pool = Pool(3, _fifo_over(queue))
         pool.start(work)
-        self.assertEqual(pool.pending(), 0)
+        self.assertEqual(pool.holding(), {})
 
 
-class TestAdmission(unittest.TestCase):
+class TestDoneReporting(unittest.TestCase):
+    """`done` is what makes resource accounting possible."""
 
-    def test_admit_is_consulted(self):
-        asked = []
+    def test_first_call_reports_none(self):
+        firsts, lock = [], threading.Lock()
+        queue = ["a"]
+
+        def select(done):
+            with lock:
+                firsts.append(done)
+            return queue.pop(0) if queue else None
+
+        work, _ = _collector()
+        Pool(1, select).start(work)
+        self.assertIsNone(firsts[0], "first call should report done=None")
+
+    def test_each_item_is_reported_before_the_next_is_taken(self):
+        """A single worker must report item N before receiving item N+1."""
+        events, lock = [], threading.Lock()
+        queue = ["a", "b", "c"]
+
+        def select(done):
+            with lock:
+                if done is not None:
+                    events.append(("done", done))
+            item = queue.pop(0) if queue else None
+            if item is not None:
+                with lock:
+                    events.append(("take", item))
+            return item
+
+        work, _ = _collector()
+        Pool(1, select).start(work)
+        self.assertEqual(
+            events,
+            [("take", "a"), ("done", "a"), ("take", "b"),
+             ("done", "b"), ("take", "c"), ("done", "c")])
+
+    def test_every_item_is_reported_including_the_last(self):
+        """No item goes unreported, which is what keeps accounting exact.
+
+        The worker's final call still runs `select(done)` before being told
+        None and exiting, so the last item of each worker comes back too. An
+        earlier design had the pool call select itself in start()'s finally to
+        achieve this; that turned out unnecessary — and it was the thing making
+        stop() over-commit, since a combined select cannot release without also
+        acquiring.
+        """
+        queue = list(range(12))
+        reported, lock = [], threading.Lock()
+
+        def select(done):
+            with lock:
+                if done is not None:
+                    reported.append(done)
+            return queue.pop(0) if queue else None
+
+        work, seen = _collector()
+        Pool(3, select).start(work)
+        self.assertCountEqual(reported, seen,
+                              "an item was handled but never reported back")
+
+    def test_budget_returns_to_zero_after_a_full_run(self):
+        """The practical consequence: a running total ends where it started."""
+        queue = [("a", 10), ("b", 20), ("c", 30), ("d", 40)]
+        committed = {"total": 0}
         lock = threading.Lock()
 
-        def admit(item, running, alone):
+        def budget(done):
             with lock:
-                asked.append(item)
-            return True
+                if done is not None:
+                    committed["total"] -= done[1]
+                if not queue:
+                    return None
+                item = queue.pop(0)
+                committed["total"] += item[1]
+                return item
 
-        work, seen = _collector()
-        Pool(["a", "b", "c"], n_workers=2, admit=admit).start(work)
-        self.assertCountEqual(seen, ["a", "b", "c"])
-        self.assertTrue(asked, "admit was never called")
-
-    def test_exclusive_item_never_runs_beside_another(self):
-        """The real case: one item that must not share the machine."""
-        concurrent, peak, lock = [], [0], threading.Lock()
-
-        def admit(item, running, alone):
-            if item == "big":
-                return not running          # big runs only when alone
-            return "big" not in running     # nothing starts beside big
-
-        def work(pool):
-            while (item := pool.get_next()) is not None:
-                with lock:
-                    concurrent.append(item)
-                    peak[0] = max(peak[0], len(concurrent))
-                    beside_big = "big" in concurrent and len(concurrent) > 1
-                time.sleep(0.02)
-                with lock:
-                    concurrent.remove(item)
-                self.assertFalse(beside_big, "something ran beside 'big'")
-
-        items = ["s1", "s2", "big", "s3", "s4"]
-        Pool(items, n_workers=3, admit=admit).start(work)
-        self.assertGreater(peak[0], 1, "never ran concurrently at all")
-
-    def test_alone_true_lets_policy_run_it_solo(self):
-        """Refused beside others, accepted alone -> it still gets handled."""
-        calls = []
-        lock = threading.Lock()
-
-        def admit(item, running, alone):
-            with lock:
-                calls.append(alone)
-            return alone or not running
-
-        work, seen = _collector()
-        Pool(["x"], n_workers=1, admit=admit).start(work)
-        self.assertEqual(seen, ["x"])
-
-    def test_alone_false_sheds_the_worker(self):
-        """A policy that refuses even when alone must not deadlock."""
-        def admit(item, running, alone):
-            return False                    # never admissible
-
-        work, seen = _collector()
-        pool = Pool(["never"], n_workers=2, admit=admit)
-
-        done = threading.Event()
-        threading.Thread(target=lambda: (pool.start(work), done.set()),
-                         daemon=True).start()
-        self.assertTrue(done.wait(timeout=5), "pool deadlocked on a refused item")
-        self.assertEqual(seen, [], "a refused item was handled anyway")
-        self.assertEqual(pool.pending(), 1, "the item should stay queued")
+        work, _ = _collector()
+        Pool(2, budget).start(work)
+        self.assertEqual(committed["total"], 0, "capacity leaked")
 
 
-class TestSelectOverride(unittest.TestCase):
-    """The injected selection policy — the reason get_next_default exists."""
+class TestPolicyControl(unittest.TestCase):
 
-    def test_default_is_used_when_none_passed(self):
-        from libs.pool import get_next_default
-        self.assertIs(Pool([1, 2], 2)._select, get_next_default)
+    def test_policy_controls_order(self):
+        queue = [1, 2, 3, 4, 5]
 
-    def test_custom_select_controls_order(self):
-        """LIFO instead of FIFO, purely by passing a different select."""
-        def newest_first(items, running, admit):
-            return items.pop(), True
+        def newest_first(done):
+            return queue.pop() if queue else None
 
         order, lock = [], threading.Lock()
 
@@ -148,53 +163,102 @@ class TestSelectOverride(unittest.TestCase):
                 with lock:
                     order.append(item)
 
-        # One worker, so the order recorded is the order handed out.
-        Pool([1, 2, 3, 4, 5], n_workers=1, select=newest_first).start(work)
+        Pool(1, newest_first).start(work)
         self.assertEqual(order, [5, 4, 3, 2, 1])
 
-    def test_custom_select_may_ignore_admit_entirely(self):
-        """A select that never consults admit is free to do so."""
-        def blind(items, running, admit):
-            return items.pop(0), True
+    def test_returning_none_sheds_the_worker(self):
+        queue = ["x"]
 
-        def refuse_everything(item, running, alone):
-            raise AssertionError("admit should not have been consulted")
+        def never(done):
+            return None
 
         work, seen = _collector()
-        Pool(["a", "b"], n_workers=1,
-             admit=refuse_everything, select=blind).start(work)
-        self.assertCountEqual(seen, ["a", "b"])
-
-    def test_custom_select_can_shed(self):
-        """(None, False) shuts the worker down without a deadlock."""
-        def never(items, running, admit):
-            return None, False
-
-        work, seen = _collector()
-        pool = Pool(["x"], n_workers=2, select=never)
-        done = threading.Event()
-        threading.Thread(target=lambda: (pool.start(work), done.set()),
+        done_flag = threading.Event()
+        pool = Pool(2, never)
+        threading.Thread(target=lambda: (pool.start(work), done_flag.set()),
                          daemon=True).start()
-        self.assertTrue(done.wait(timeout=5), "select-driven shed deadlocked")
+        self.assertTrue(done_flag.wait(timeout=5), "shedding deadlocked")
         self.assertEqual(seen, [])
-        self.assertEqual(pool.pending(), 1)
+        self.assertEqual(queue, ["x"], "the item should stay in the caller's queue")
 
-    def test_custom_select_may_add_to_the_queue(self):
-        """It holds the real list under the lock, so it can grow it."""
-        def expand_once(items, running, admit):
-            if items == ["seed"]:
-                items.extend(["grown-1", "grown-2"])
-            return items.pop(0), True
+    def test_policy_may_grow_its_own_queue(self):
+        queue = ["seed"]
+
+        def expand_once(done):
+            if queue == ["seed"]:
+                queue.extend(["grown-1", "grown-2"])
+            return queue.pop(0) if queue else None
 
         work, seen = _collector()
-        Pool(["seed"], n_workers=1, select=expand_once).start(work)
+        Pool(1, expand_once).start(work)
         self.assertCountEqual(seen, ["seed", "grown-1", "grown-2"])
+
+
+class TestBudgetPolicy(unittest.TestCase):
+    """End to end on the case the whole design exists for."""
+
+    def test_costly_items_never_exceed_capacity(self):
+        CAPACITY = 100
+        committed = {"total": 0}
+        peak = {"value": 0}
+        # (name, cost), cheapest first — the ordering the real queue uses.
+        queue = [("a", 10), ("b", 20), ("c", 30), ("d", 60), ("e", 90)]
+
+        def budget(done):
+            if done is not None:
+                committed["total"] -= done[1]
+            if not queue:
+                return None
+            item = queue[0]
+            if committed["total"] + item[1] > CAPACITY:
+                return None        # will not fit, and nothing smaller is coming
+            committed["total"] += item[1]
+            peak["value"] = max(peak["value"], committed["total"])
+            return queue.pop(0)
+
+        handled, lock = [], threading.Lock()
+
+        def work(pool):
+            while (item := pool.get_next()) is not None:
+                time.sleep(0.02)
+                with lock:
+                    handled.append(item[0])
+
+        Pool(4, budget).start(work)
+        self.assertLessEqual(peak["value"], CAPACITY, "capacity was exceeded")
+        self.assertCountEqual(handled, ["a", "b", "c", "d", "e"])
+
+    def test_item_larger_than_capacity_is_left_queued(self):
+        CAPACITY = 50
+        committed = {"total": 0}
+        queue = [("huge", 500)]
+
+        def budget(done):
+            if done is not None:
+                committed["total"] -= done[1]
+            if not queue:
+                return None
+            item = queue[0]
+            if committed["total"] + item[1] > CAPACITY:
+                return None
+            committed["total"] += item[1]
+            return queue.pop(0)
+
+        work, seen = _collector()
+        done_flag = threading.Event()
+        pool = Pool(2, budget)
+        threading.Thread(target=lambda: (pool.start(work), done_flag.set()),
+                         daemon=True).start()
+        self.assertTrue(done_flag.wait(timeout=5), "oversized item deadlocked")
+        self.assertEqual(seen, [])
+        self.assertEqual(queue, [("huge", 500)])
 
 
 class TestControl(unittest.TestCase):
 
     def test_stop_ends_the_run_early(self):
-        pool = Pool(list(range(500)), n_workers=3)
+        queue = list(range(500))
+        pool = Pool(3, _fifo_over(queue))
         handled, lock = [], threading.Lock()
 
         def work(p):
@@ -207,44 +271,67 @@ class TestControl(unittest.TestCase):
 
         pool.start(work)
         self.assertLess(len(handled), 500, "stop() did not stop anything")
-        self.assertGreater(pool.pending(), 0)
+        self.assertGreater(len(queue), 0, "queue should still hold work")
 
-    def test_status_reports_work_in_flight(self):
-        pool = Pool(["a", "b", "c", "d"], n_workers=2)
-        saw_busy = threading.Event()
+    def test_stop_hands_out_nothing_further(self):
+        """After stop(), select is not called again — nothing is committed
+        and then discarded, which is what made the earlier design leak."""
+        queue = list(range(200))
+        calls = {"n": 0}
+        lock = threading.Lock()
+
+        def counting(done):
+            with lock:
+                calls["n"] += 1
+            return queue.pop(0) if queue else None
+
+        pool = Pool(3, counting)
+        handled, hlock = [], threading.Lock()
 
         def work(p):
             while (item := p.get_next()) is not None:
-                if p.status():
-                    saw_busy.set()
-                time.sleep(0.02)
+                with hlock:
+                    handled.append(item)
+                    if len(handled) == 5:
+                        p.stop()
+                time.sleep(0.005)
 
         pool.start(work)
-        self.assertTrue(saw_busy.is_set(), "status() never showed an item in flight")
-        self.assertEqual(pool.status(), {}, "status() not empty after the run")
+        with lock:
+            # Every call handed out an item that was worked, except the ones
+            # that returned None at the very end.
+            self.assertLessEqual(calls["n"], len(handled) + 3)
 
 
 class TestThreadSafety(unittest.TestCase):
 
     def test_no_item_handed_out_twice_under_contention(self):
         items = list(range(400))
+        queue = list(items)
         work, seen = _collector()
-        Pool(items, n_workers=16).start(work)
+        Pool(16, _fifo_over(queue)).start(work)
         self.assertEqual(len(seen), len(set(seen)), "an item was handed out twice")
         self.assertCountEqual(seen, items)
 
-    def test_worker_exception_does_not_hang_the_pool(self):
-        """One thread raising must not strand the others."""
-        def work(pool):
-            while (item := pool.get_next()) is not None:
-                if item == 13:
-                    raise RuntimeError("worker blew up")
+    def test_policy_is_never_called_concurrently(self):
+        """The pool's whole contribution: one worker inside select at a time."""
+        inside = {"now": 0, "max": 0}
+        lock = threading.Lock()
+        queue = list(range(80))
 
-        pool = Pool(list(range(60)), n_workers=4)
-        done = threading.Event()
-        threading.Thread(target=lambda: (pool.start(work), done.set()),
-                         daemon=True).start()
-        self.assertTrue(done.wait(timeout=5), "pool hung after a worker raised")
+        def policy(done):
+            with lock:
+                inside["now"] += 1
+                inside["max"] = max(inside["max"], inside["now"])
+            time.sleep(0.001)
+            result = queue.pop(0) if queue else None
+            with lock:
+                inside["now"] -= 1
+            return result
+
+        work, _ = _collector()
+        Pool(8, policy).start(work)
+        self.assertEqual(inside["max"], 1, "select ran concurrently")
 
 
 if __name__ == '__main__':

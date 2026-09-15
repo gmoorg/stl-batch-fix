@@ -1,167 +1,119 @@
-"""A worker pool: N threads pull from a shared queue, with optional admission.
+"""A worker pool: N threads, each pulling work from a caller-supplied function.
 
-Domain-free by construction.  The pool never inspects an item beyond passing it
-to the caller's callbacks, so items can be paths, URLs, job records, anything.
-All policy lives in two callables the caller supplies:
+Domain-free by construction — and queue-free too.  The pool owns no items,
+no ordering and no admission rule.  It owns exactly three things: a lock, a
+shutdown flag, and which item each thread currently holds.  Everything else
+belongs to the caller:
 
-    admit(item, running, alone) -> bool     may this item start now?
-    work(pool)                             what a worker thread does
+    select(done) -> T | None     the next item, or None to shut this worker down
+    work(pool)                   what a worker thread does
 
 Usage:
 
-    pool = Pool(items, n_workers=4, admit=my_rule)
+    queue = [...]                       # the caller's list, never the pool's
+
+    def select(done):
+        if done is not None:
+            release(done)               # accounting, if the caller needs any
+        return queue.pop(0) if queue else None
 
     def worker(pool):
         while (item := pool.get_next()) is not None:
             handle(item)
 
-    pool.start(worker)
+    Pool(n_workers=4, select=select).start(worker)
 
 Threads, not processes, deliberately: a worker that drives a subprocess spends
 its life blocked in `communicate()` rather than computing, so the GIL is not a
-constraint, and sharing one queue in one process means no pickling, no proxy
+constraint, and sharing state in one process means no pickling, no proxy
 objects, and no pool-wide failure when a single worker dies.
 """
 
 from __future__ import annotations
 
 import threading
-from typing import Callable, Iterable, Protocol
-
-
-class Admit[T](Protocol):
-    """Decides whether `item` may start while `running` are in flight.
-
-    `alone` is True on a second ask, made only when the pool has nothing else
-    running and would otherwise wait forever.  A resource rule normally says
-    yes to that (nothing is competing); a rule that must never run this item
-    says no, and the pool sheds the worker instead of deadlocking.
-    """
-
-    def __call__(self, item: T, running: list[T], alone: bool) -> bool: ...
+from typing import Callable, Protocol
 
 
 class Select[T](Protocol):
-    """Picks the next item to hand out, or declines.
+    """Hands out the next item, and is told which one just finished.
 
-    Called with the pool's lock held, so it may mutate `items` directly —
-    that is the point of being able to replace it. Returns:
+    Called with the pool's lock held, so implementations never need to lock
+    their own queue or accounting.
 
-        (item, wait)
+        done    the item this worker just finished, or None on its first call
 
-        (item, _)      hand this item out; the caller has already removed it
-                       from `items`
-        (None, True)   nothing right now, but work is in flight that may
-                       change the answer — the worker blocks and asks again
-        (None, False)  nothing, and waiting cannot help — the worker shuts
-                       down (shedding)
+    Returns the next item for this worker, or None meaning *this worker should
+    shut down*.
+
+    Every item is reported, including each worker's last: a worker that has
+    finished its final item still calls `select(done)` once more, is told None,
+    and exits.  So a running total returns to where it started.
+
+    The two jobs are combined deliberately.  An earlier design had the pool
+    call `select` itself — in `start()`'s `finally`, to release a worker's last
+    item — and that is what made `stop()` over-commit: a combined call cannot
+    release without also acquiring, so every compensating call re-committed
+    what it had just freed.  The pool now calls `select` only on behalf of a
+    worker asking for work, which removes the problem rather than patching it.
+
+    Returning None is not failure; it is how a pool shrinks.  With a
+    cheapest-first queue, an item that does not fit now will never fit —
+    everything after it is larger and nothing smaller is coming — so shutting
+    the worker down frees its share for the workers still running.
     """
 
-    def __call__(self, items: list[T], running: list[T],
-                 admit: "Admit[T] | None") -> tuple[T | None, bool]: ...
-
-
-def get_next_default[T](items: list[T], running: list[T],
-                        admit: "Admit[T] | None") -> tuple[T | None, bool]:
-    """Take from the head of the queue, subject to `admit`.
-
-    The default policy, and the only one this project uses. Split out of
-    `get_next` so the selection rule can be replaced without touching the
-    locking around it: pass `select=` to the constructor and this is bypassed
-    entirely.
-
-    Ordering is FIFO because the caller sorts the queue before handing it over
-    — smallest first, so cost rises as it drains.
-    """
-    head = items[0]
-    if admit is None or admit(head, running, False):
-        return items.pop(0), True
-    if running:
-        return None, True           # someone is in flight; ask again later
-    # Nothing in flight, so waiting cannot change the answer. Let the policy
-    # decide between running it solo and refusing it outright.
-    if admit(head, [], True):
-        return items.pop(0), True
-    return None, False
+    def __call__(self, done: T | None) -> T | None: ...
 
 
 class Pool[T]:
-    """Owns the queue and the threads.  Workers pull; nobody pushes to them."""
+    """Spawns threads and serialises their calls to `select`.  Nothing more."""
 
-    def __init__(self, items: Iterable[T], n_workers: int,
-                 admit: Admit[T] | None = None,
-                 select: Select[T] | None = None) -> None:
-        self._items: list[T] = list(items)
-        self._n = max(1, min(n_workers, len(self._items) or 1))
-        self._admit = admit
-        self._select = select or get_next_default
+    def __init__(self, n_workers: int, select: Select[T]) -> None:
+        self._n = max(1, n_workers)
+        self._select = select
         self._lock = threading.Lock()
-        self._queue_signal = threading.Condition(self._lock)
-        self._running: dict[str, T] = {}      # thread name -> item in flight
         self._stopped = False
+        self._holding: dict[str, T] = {}   # thread -> item, to report as `done`
 
     # -- the synchronisation point -------------------------------------------
 
     def get_next(self) -> T | None:
-        """The next item, or None meaning *this worker should shut down*.
+        """The next item for this worker, or None meaning *shut down*.
 
-        None has exactly two causes, and the caller need not tell them apart:
-
-          1. The queue is drained (or stop() was called) — ordinary shutdown.
-          2. `admit` will not let the head item run beside the work already in
-             flight, and will not let it run alone either.  The worker exits so
-             its resources are released; the item stays at the head of the queue
-             for whoever is still running.
-
-        Case 2 is why this returns None rather than blocking.  A worker parked
-        on a condition variable still holds a stack and a status slot — and, in
-        the case that motivates admission control, the very resources the
-        blocked item is waiting for.  Shedding converts that standoff into
-        "fewer workers, then the big item runs".
-
-        Blocking still happens, but only while the situation can improve: some
-        other worker is in flight and may release what is needed.  When nothing
-        is in flight there is nothing to wait for, so the pool asks `admit` one
-        final time with alone=True and shuts the worker down if refused.
+        The pool's entire contribution is serialisation: one worker inside
+        `select` at a time, so the caller's queue and accounting need no locks
+        of their own.
         """
         me = threading.current_thread().name
-        with self._queue_signal:
-            self._running.pop(me, None)
-            self._queue_signal.notify_all()           # releasing may unblock someone
-            while True:
-                if self._stopped or not self._items:
-                    return None
-                running = list(self._running.values())
-                item, wait = self._select(self._items, running, self._admit)
-                if item is not None:
-                    self._running[me] = item
-                    return item
-                if not wait:
-                    return None               # shed: nothing will change
-                self._queue_signal.wait(0.25)
-
-    # -- observation ---------------------------------------------------------
-
-    def status(self) -> dict[str, T]:
-        """What each worker is on right now, for a progress display."""
         with self._lock:
-            return dict(self._running)
-
-    def pending(self) -> int:
-        """How many items have not been handed out yet."""
-        with self._lock:
-            return len(self._items)
+            done = self._holding.pop(me, None)
+            if self._stopped:
+                return None
+            item = self._select(done)
+            if item is not None:
+                self._holding[me] = item
+            return item
 
     def stop(self) -> None:
-        """Tell every worker to shut down after its current item."""
-        with self._queue_signal:
+        """Tell every worker to shut down when it next asks for work."""
+        with self._lock:
             self._stopped = True
-            self._queue_signal.notify_all()
+
+    def holding(self) -> dict[str, T]:
+        """What each worker currently holds, for a progress display."""
+        with self._lock:
+            return dict(self._holding)
 
     # -- running -------------------------------------------------------------
 
     def start(self, work: Callable[[Pool[T]], None]) -> None:
         """Spawn the threads, each running work(self), and wait for them.
+
+        `n_workers` is a ceiling, not a target.  Spawning more threads than
+        there is work costs microseconds: each one asks `select` once, is told
+        None, and exits.  Sizing the pool to the queue would mean the pool
+        knowing the queue, which is the whole thing this interface avoids.
 
         `work` is an ordinary callable running in this process, so it may be a
         lambda, a closure or a bound method — nothing is pickled and nothing

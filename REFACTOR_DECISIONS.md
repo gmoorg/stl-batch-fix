@@ -212,9 +212,61 @@ clock running out.
 worker.** It has not been updated — treat this section as the current interface
 and the sketch as the earlier draft.
 
-#### Implemented 2026-09-15 as `libs/pool.py`
+#### Implemented 2026-09-15 as `libs/pool.py` — final shape
 
-Built to this interface, with three changes the implementation forced:
+The interface below records how it landed after review. The three subsections
+that follow are the intermediate drafts, kept because the reasoning that killed
+each one is the part worth not repeating.
+
+```python
+class Pool[T]:
+    def __init__(self, n_workers, select)
+    def get_next(self) -> T | None      # None = shut this worker down
+    def holding(self) -> dict[str, T]
+    def stop(self)
+    def start(self, work)
+
+select(done) -> T | None                # the caller's, over the caller's queue
+```
+
+**The pool owns no queue.** Not the items, not the ordering, not the admission
+rule — a lock, a shutdown flag, and which item each thread holds. Everything
+else moved to the caller, which resolved three problems at once:
+
+- **`admit`, `alone` and the wait loop are gone.** The queue is sorted
+  cheapest-first, so if the head does not fit now it never will: waiting cannot
+  help and the honest answer is to shed the worker. The three-way
+  ADMIT/WAIT/SHED signalling I designed was solving a problem the sort order
+  had already eliminated.
+- **`n_workers` became a ceiling rather than a computed number.** Sizing the
+  pool to the queue would require the pool to know the queue. The user's point
+  settled it: *"if you spawn 10 threads and 8 immediately close themselves,
+  what the harm?"* — a surplus thread asks once, is told `None`, and exits.
+- **The `stop()` leak disappeared rather than being fixed.** See below.
+
+**The combined call is the load-bearing decision.** `select(done)` both reports
+a completion and hands out the next item, which is what lets a budget policy
+release before it decides. It also once caused a genuine bug: when `start()`
+called `select` itself to release a worker's final item, `stop()` over-committed
+by one item per worker, because a combined call cannot release without also
+acquiring — every compensating call re-committed what it had just freed. Three
+patches failed on that before the right answer appeared, which was to stop the
+pool calling `select` on its own behalf at all. A worker's last item is still
+reported: it finishes, asks once more, is told `None`, and exits.
+
+`test_pool.py` — 17 tests, ~0.8 s, including a budget policy end to end and an
+assertion that a running total returns to zero after a full run.
+
+---
+
+#### Earlier draft: `admit` + `alone` (superseded)
+
+**Everything below describes an interface that no longer exists.** It is kept
+because each item records a wrong turn and why it was wrong — `admit` and
+`alone` are gone, `status()` is now `holding()`, `pending()` is gone with the
+queue, and the pool no longer takes `items` at all. Read it as history.
+
+It was built to this interface, with three changes the implementation forced:
 
 ```python
 class Pool[T]:
