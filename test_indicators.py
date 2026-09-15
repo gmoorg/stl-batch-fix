@@ -84,13 +84,17 @@ class TestOutputMarkers(IndicatorCase):
         self.assertIs(found.indicator, Indicator.FAILED)
         self.assertEqual(found.path, marker)
 
-    def test_last_match_wins_among_markers(self):
-        """Cosmetic by design — any marker means the file was dealt with."""
-        self._marker('.broken.stl')
-        last = self._marker('.timeout.stl')
+    def test_first_match_wins_among_markers(self):
+        """Cosmetic by design — any marker means the file was dealt with.
+
+        Checking stops at the first hit: once the answer is known, the
+        remaining existence tests cannot change it.
+        """
+        first = self._marker('.broken.stl')
+        self._marker('.timeout.stl')
         found = self._check()
-        self.assertIs(found.indicator, Indicator.TIMED_OUT)
-        self.assertEqual(found.path, last)
+        self.assertIs(found.indicator, Indicator.BROKEN)
+        self.assertEqual(found.path, first)
 
     def test_original_stl_is_not_an_indicator(self):
         """It sits beside a SUCCESSFUL output as bbox-drift evidence.

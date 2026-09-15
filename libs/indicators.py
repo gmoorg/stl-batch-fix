@@ -27,12 +27,13 @@ from enum import Enum
 
 
 class Indicator(Enum):
-    """What was found on disk, in the order the checks run.
+    """What was found on disk.
 
-    The order matters only in that the **last** match is reported.  Among the
-    output-tree markers that choice is cosmetic: every one of them means the
-    file has already been dealt with, so which is named affects the message and
-    not the outcome.
+    Only one ordering rule matters: the output tree is checked before the
+    export, because anything there means the file is not going to be processed
+    and converting it would be wasted work.  Among the output-tree markers the
+    order is arbitrary — every one of them means the file has already been
+    dealt with, so which is named changes the message and not the outcome.
     """
 
     PROCESS = 'process'              # nothing found — use the source as it is
@@ -101,24 +102,27 @@ def check(source: str, input_folder: str, output_file: str) -> Finding:
     are its siblings, named from the same base.  It is passed in rather than
     derived so this module needs no opinion about output layout.
 
-    Checks run in `Indicator` order and the **last** match is reported.  The
-    export is therefore outranked by anything in the output tree, which is
-    correct: converting a file that is not going to be processed is wasted
-    work.
+    **The output tree is checked first and the first match wins.**  Only one
+    ordering rule matters: anything in the output tree outranks the export,
+    because converting a file that is not going to be processed is wasted
+    work.  Beyond that the order is arbitrary — every output-tree finding means
+    the file has already been dealt with, so which one is named changes the
+    message and not the outcome.
+
+    Returning on the first match is the point: once the answer is known, the
+    remaining `os.path.exists` calls cannot change it.
     """
-    found = Finding(source, Indicator.PROCESS)
-
-    export = export_path(source, input_folder)
-    if os.path.exists(export):
-        found = Finding(source, Indicator.EXPORT_READY, export)
-
-    if os.path.exists(output_file):
-        found = Finding(source, Indicator.ALREADY_FIXED, output_file)
-
     base, _ = os.path.splitext(output_file)
     for suffix, indicator in _OUTPUT_MARKERS:
         marker = base + suffix
         if os.path.exists(marker):
-            found = Finding(source, indicator, marker)
+            return Finding(source, indicator, marker)
 
-    return found
+    if os.path.exists(output_file):
+        return Finding(source, Indicator.ALREADY_FIXED, output_file)
+
+    export = export_path(source, input_folder)
+    if os.path.exists(export):
+        return Finding(source, Indicator.EXPORT_READY, export)
+
+    return Finding(source, Indicator.PROCESS)
