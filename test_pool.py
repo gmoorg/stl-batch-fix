@@ -18,7 +18,7 @@ from libs.pool import Pool
 
 def _fifo_over(queue):
     """The simplest policy: hand out the head of the caller's list."""
-    def select(done):
+    def select(done, error=None):
         return queue.pop(0) if queue else None
     return select
 
@@ -70,7 +70,7 @@ class TestDoneReporting(unittest.TestCase):
         firsts, lock = [], threading.Lock()
         queue = ["a"]
 
-        def select(done):
+        def select(done, error=None):
             with lock:
                 firsts.append(done)
             return queue.pop(0) if queue else None
@@ -83,7 +83,7 @@ class TestDoneReporting(unittest.TestCase):
         events, lock = [], threading.Lock()
         queue = ["a", "b", "c"]
 
-        def select(done):
+        def select(done, error=None):
             with lock:
                 if done is not None:
                     events.append(("done", done))
@@ -105,7 +105,7 @@ class TestDoneReporting(unittest.TestCase):
         queue = list(range(12))
         reported, lock = [], threading.Lock()
 
-        def select(done):
+        def select(done, error=None):
             with lock:
                 if done is not None:
                     reported.append(done)
@@ -121,7 +121,7 @@ class TestDoneReporting(unittest.TestCase):
         committed = {"total": 0}
         lock = threading.Lock()
 
-        def budget(done):
+        def budget(done, error=None):
             with lock:
                 if done is not None:
                     committed["total"] -= done[1]
@@ -144,7 +144,7 @@ class TestFailureHandling(unittest.TestCase):
         queue = ["a", "boom", "c"]
         reported, lock = [], threading.Lock()
 
-        def select(done):
+        def select(done, error=None):
             with lock:
                 if done is not None:
                     reported.append(done)
@@ -173,40 +173,79 @@ class TestFailureHandling(unittest.TestCase):
         self.assertCountEqual(handled, [0, 1, 2, 4, 5, 6, 7, 8, 9],
                               "the loop did not survive a failure")
 
-    def test_on_error_receives_the_item_and_the_exception(self):
-        errors, lock = [], threading.Lock()
+    def test_the_selector_receives_the_exception(self):
+        """`error` is the exception itself, not a flag — the detail survives."""
+        reports, lock = [], threading.Lock()
+        queue = ["x"]
+
+        def select(done, error):
+            with lock:
+                if done is not None:
+                    reports.append((done, error))
+            return queue.pop(0) if queue else None
 
         def handle(item):
             raise ValueError(f"no good: {item}")
 
-        def on_error(item, exc):
-            with lock:
-                errors.append((item, type(exc), str(exc)))
-
-        Pool(1, _fifo_over(["x"]), handle,
-             item_error_handler=on_error).start()
-        self.assertEqual(len(errors), 1)
-        item, kind, msg = errors[0]
+        Pool(1, select, handle).start()
+        self.assertEqual(len(reports), 1)
+        item, error = reports[0]
         self.assertEqual(item, "x")
-        self.assertIs(kind, ValueError)
-        self.assertEqual(msg, "no good: x")
+        self.assertIsInstance(error, ValueError)
+        self.assertEqual(str(error), "no good: x")
 
-    def test_a_failed_item_is_reported_once_not_twice(self):
-        """The error handler must not release — the selector already will.
+    def test_error_is_none_when_the_handler_succeeds(self):
+        """Success and failure are distinguishable from the same argument."""
+        reports, lock = [], threading.Lock()
+        queue = ["good", "bad"]
 
-        A failed item reaches the selector as `done` exactly like a successful
-        one. A caller that also frees resources in the error handler frees them
-        twice, and a budget policy drifts upward until it admits work there is
-        no memory for.
-        """
-        queue = [("ok", 10), ("boom", 30), ("fine", 20)]
-        committed = {"total": 0}
-        lock = threading.Lock()
-
-        def budget(done):
+        def select(done, error):
             with lock:
                 if done is not None:
-                    committed["total"] -= done[1]
+                    reports.append((done, error))
+            return queue.pop(0) if queue else None
+
+        def handle(item):
+            if item == "bad":
+                raise RuntimeError("nope")
+
+        Pool(1, select, handle).start()
+        self.assertEqual(dict((i, e is None) for i, e in reports),
+                         {"good": True, "bad": False})
+
+    def test_error_does_not_leak_into_the_next_item(self):
+        """A failure must not mark the item after it as failed too."""
+        reports, lock = [], threading.Lock()
+        queue = ["bad", "after"]
+
+        def select(done, error):
+            with lock:
+                if done is not None:
+                    reports.append((done, error))
+            return queue.pop(0) if queue else None
+
+        def handle(item):
+            if item == "bad":
+                raise RuntimeError("nope")
+
+        Pool(1, select, handle).start()
+        by_item = dict(reports)
+        self.assertIsInstance(by_item["bad"], RuntimeError)
+        self.assertIsNone(by_item["after"],
+                          "the previous item's exception leaked forward")
+
+    def test_a_failed_item_is_released_exactly_once(self):
+        """One call, one place, one outcome — nothing can double-release."""
+        queue = [("ok", 10), ("boom", 30), ("fine", 20)]
+        committed = {"total": 0}
+        logged, lock = [], threading.Lock()
+
+        def budget(done, error):
+            with lock:
+                if done is not None:
+                    committed["total"] -= done[1]      # release, always
+                    if error is not None:
+                        logged.append(done[0])         # log, only on failure
                 if not queue:
                     return None
                 item = queue.pop(0)
@@ -217,23 +256,17 @@ class TestFailureHandling(unittest.TestCase):
             if item[0] == "boom":
                 raise RuntimeError("blew up")
 
-        seen_errors = []
-
-        def on_error(item, exc):
-            # Correct: log only. Releasing here would double-count.
-            seen_errors.append(item)
-
-        Pool(1, budget, handle, item_error_handler=on_error).start()
-        self.assertEqual(seen_errors, [("boom", 30)])
+        Pool(1, budget, handle).start()
+        self.assertEqual(logged, ["boom"])
         self.assertEqual(committed["total"], 0,
                          "a failed item was released a different number of "
                          "times than it was committed")
 
-    def test_errors_are_swallowed_without_on_error(self):
+    def test_errors_do_not_escape_start(self):
         def handle(item):
             raise RuntimeError("silent")
 
-        # Must not raise out of start().
+        # Must not raise out of start(), even with no selector interest in it.
         Pool(2, _fifo_over(["a", "b"]), handle).start()
 
 
@@ -242,7 +275,7 @@ class TestPolicyControl(unittest.TestCase):
     def test_policy_controls_order(self):
         queue = [1, 2, 3, 4, 5]
 
-        def newest_first(done):
+        def newest_first(done, error=None):
             return queue.pop() if queue else None
 
         order, lock = [], threading.Lock()
@@ -257,7 +290,7 @@ class TestPolicyControl(unittest.TestCase):
     def test_returning_none_sheds_the_worker(self):
         queue = ["x"]
 
-        def never(done):
+        def never(done, error=None):
             return None
 
         handle, seen = _collector()
@@ -272,7 +305,7 @@ class TestPolicyControl(unittest.TestCase):
     def test_policy_may_grow_its_own_queue(self):
         queue = ["seed"]
 
-        def expand_once(done):
+        def expand_once(done, error=None):
             if queue == ["seed"]:
                 queue.extend(["grown-1", "grown-2"])
             return queue.pop(0) if queue else None
@@ -292,7 +325,7 @@ class TestBudgetPolicy(unittest.TestCase):
         # (name, cost), cheapest first — the ordering the real queue uses.
         queue = [("a", 10), ("b", 20), ("c", 30), ("d", 60), ("e", 90)]
 
-        def budget(done):
+        def budget(done, error=None):
             if done is not None:
                 committed["total"] -= done[1]
             if not queue:
@@ -320,7 +353,7 @@ class TestBudgetPolicy(unittest.TestCase):
         committed = {"total": 0}
         queue = [("huge", 500)]
 
-        def budget(done):
+        def budget(done, error=None):
             if done is not None:
                 committed["total"] -= done[1]
             if not queue:
@@ -369,7 +402,7 @@ class TestConcurrency(unittest.TestCase):
         lock = threading.Lock()
         queue = list(range(80))
 
-        def policy(done):
+        def policy(done, error=None):
             with lock:
                 inside["now"] += 1
                 inside["max"] = max(inside["max"], inside["now"])

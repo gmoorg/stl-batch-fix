@@ -220,20 +220,23 @@ each one is the part worth not repeating.
 
 ```python
 class Pool[T]:
-    def __init__(self, n_workers, item_selector, item_handler,
-                 item_error_handler=None)
+    def __init__(self, n_workers, item_selector, item_handler)
     def stop(self)
     def start(self)
 
-item_selector(done) -> T | None    # next item, or None to shut this worker down
-item_handler(item)                 # do the work
-item_error_handler(item, exc)      # optional; called if the handler raises
+item_selector(done, error) -> T | None   # next item, or None to shut this
+                                         # worker down
+item_handler(item)                       # do the work
 ```
 
 **The pool owns the loop.** There is no `get_next`: the caller supplies work,
-not control flow. `item_selector` runs with the lock held, `item_error_handler`
-too (cheap bookkeeping, so the caller's log needs no lock); `item_handler` runs
+not control flow. `item_selector` runs with the lock held; `item_handler` runs
 without it, or every worker would serialise and the pool would be pointless.
+
+**One call, one place, one outcome.** A separate `item_error_handler` existed
+briefly and was removed: the failed item reached both it and the selector, so a
+caller releasing in both freed twice and a budget drifted upward. `error` is
+the exception itself rather than a flag, so nothing is lost by collapsing them.
 
 **The pool owns nothing but a lock and a shutdown flag.** Not the items, not
 the ordering, not the admission rule, and not even which item each thread

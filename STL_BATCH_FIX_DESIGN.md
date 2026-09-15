@@ -740,23 +740,26 @@ rule, not even which item each thread holds — the worker passes its finished
 item back, because the worker is the only thing that knows.
 
 ```python
-Pool(n_workers, item_selector, item_handler, item_error_handler=None).start()
+Pool(n_workers, item_selector, item_handler).start()
 
-item_selector(done) -> T | None   # next item, or None to shut this worker down
-item_handler(item)                # do the work
-item_error_handler(item, exc)     # optional; called if the handler raises
+item_selector(done, error) -> T | None   # next item, or None to shut this
+                                         # worker down
+item_handler(item)                       # do the work
 ```
 
 **The pool owns the loop.** The caller supplies work, not control flow —
 there is no `get_next` and nothing to write a `while` around.
 
+**One call, one place, one outcome.** The selector learns what finished
+(`done`), whether it succeeded (`error` is the exception or `None`), and
+decides what runs next. `error` carries the exception rather than a flag, so
+the diagnostic detail survives.
+
 `item_selector` runs **with the lock held**, so the caller's queue and
 accounting need no locks of their own; serialising those calls is the pool's
-entire contribution. `item_error_handler` runs under the lock too, for the same
-reason — it is cheap bookkeeping, so the caller's error log needs no lock
-either. `item_handler` runs **without** it, concurrently: that is where a
-subprocess is spawned and a mesh repaired, and holding the lock across it would
-serialise every worker and make the pool pointless.
+entire contribution. `item_handler` runs **without** it, concurrently: that is
+where a subprocess is spawned and a mesh repaired, and holding the lock across
+it would serialise every worker and make the pool pointless.
 
 **One call does two jobs**: it reports the item a worker just finished (`done`,
 `None` on the first call) and returns the next one. That is what makes resource
@@ -775,13 +778,14 @@ try/except, so an item whose handler raised comes back to the selector exactly
 like one that succeeded — whether a failure should release its resources is the
 policy's business, and it sees the item either way.
 
-**Which means `item_error_handler` must not release the item.** It is called
-with the failed item *and* the selector receives that same item as `done` on
-the next call, so a caller that frees resources in both places frees them
-twice. For a budget policy the running total then drifts upward until the pool
-admits work there is no memory for. Log in the error handler; release in the
-selector, which sees every item regardless of outcome.
-`test_a_failed_item_is_reported_once_not_twice` pins it.
+**There is deliberately no separate error callback.** An earlier version had
+one, and it created a trap: the failed item reached both the error handler and
+the selector, so a caller that released resources in both freed them twice, and
+a budget policy drifted upward until it admitted work there was no memory for.
+The fix was not to document the hazard but to remove it — collapsing the two
+into `item_selector(done, error)` leaves one place that can release, so double
+release is not expressible. `test_a_failed_item_is_released_exactly_once` pins
+the behaviour.
 
 Two earlier shapes were tried and dropped:
 
