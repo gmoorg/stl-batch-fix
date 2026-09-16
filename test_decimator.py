@@ -1,12 +1,11 @@
 """Tests for libs.decimator — the ladder, not the algorithms.
 
-The three rungs are third-party quadric edge collapse; testing *that* would be
+Both rungs are third-party quadric edge collapse; testing *that* would be
 testing fast_simplification. What is ours is the ladder: which rung runs, what
-happens when one fails, that a mesh already within budget is left alone, and
-that the Blender rung's temporary files do not survive it.
+happens when one fails, and that a mesh already within budget is left alone.
 
 Rungs are forced by patching the module's availability flags, so a test can
-walk to the second or third rung without needing a rung to genuinely break.
+reach the second rung without needing the first to genuinely break.
 """
 
 import os
@@ -108,18 +107,24 @@ class TestAvailability(DecimatorCase):
         self.assertTrue(is_available())
 
     def test_is_available_is_false_with_nothing_at_all(self):
-        """Decimation is a deliverable: a false here means do not start."""
+        """Decimation is a deliverable: a false here means do not start.
+
+        There is no Blender fallback any more (D19), so both Python rungs
+        missing means the run cannot produce its deliverable at all.
+        """
         with mock.patch.object(decimator, '_FASTSIMP', False), \
-             mock.patch.object(decimator, '_PYMESHLAB', False), \
-             mock.patch.object(decimator.blender, 'is_available',
-                               return_value=False):
+             mock.patch.object(decimator, '_PYMESHLAB', False):
             self.assertFalse(is_available())
 
     def test_available_rungs_reports_what_is_missing(self):
-        with mock.patch.object(decimator, '_FASTSIMP', False), \
-             mock.patch.object(decimator.blender, 'is_available',
-                               return_value=False):
+        with mock.patch.object(decimator, '_FASTSIMP', False):
             self.assertEqual(available_rungs(), (Rung.PYMESHLAB,))
+
+    def test_there_is_no_blender_rung(self):
+        """D19: removed. A mesh defeating both rungs is marked, not handed to
+        a subprocess — Bambu Studio's own simplify is the manual fallback."""
+        self.assertFalse(hasattr(Rung, 'BLENDER'))
+        self.assertNotIn('blender', [r.value for r in available_rungs()])
 
 
 class TestNotNeeded(DecimatorCase):
@@ -220,76 +225,6 @@ class TestPyMeshLabRung(DecimatorCase):
         self.assertEqual(set(os.listdir(self.dir)), before)
 
 
-class TestBlenderRung(DecimatorCase):
-    """The forced-disk rung, with Blender itself faked.
-
-    Blender is a separate process; what is tested here is our side of the
-    boundary — that a temp gets written, the result read back, and nothing left
-    behind.
-    """
-
-    def _fake_run(self, ok=True, timed_out=False, write_output=True):
-        """Stand in for blender.Runner.run, writing a decimated file itself."""
-        verts, faces = self.verts, self.faces
-
-        def run(script, timeout):
-            # The script carries the paths; pull the destination back out of it
-            # the same way Blender would receive it.
-            dst = None
-            for line in script.splitlines():
-                if line.startswith('dst'):
-                    dst = line.split('=', 1)[1].strip().strip("'\"")
-            if write_output and dst:
-                _write_stl(dst, verts, faces[:500])
-            return mock.Mock(
-                exit_code=0 if ok else 1,
-                stdout_capture='BLENDER_DECIMATE_OK' if ok else 'boom',
-                stderr_capture='' if ok else 'blender failed',
-                is_timed_out=timed_out,
-                second_elapsed=1.0)
-        return run
-
-    def _no_python_rungs(self):
-        return mock.patch.multiple(decimator, _FASTSIMP=False, _PYMESHLAB=False)
-
-    def test_it_runs_when_both_python_rungs_are_gone(self):
-        with self._no_python_rungs(), \
-             mock.patch.object(decimator.blender, 'Runner') as Runner:
-            Runner.return_value.run = self._fake_run()
-            result = decimate(self.loaded(), max_faces=1000)
-        self.assertIs(result.rung, Rung.BLENDER)
-        self.assertEqual(result.faces_out, 500)
-        self.assertTrue(result.mesh.is_loaded)
-
-    def test_its_temporary_files_do_not_survive(self):
-        """Scratch, not a step output — nothing downstream may read them."""
-        import glob
-        with self._no_python_rungs(), \
-             mock.patch.object(decimator.blender, 'Runner') as Runner:
-            Runner.return_value.run = self._fake_run()
-            decimate(self.loaded(), max_faces=1000)
-        leftover = glob.glob(os.path.join(tempfile.gettempdir(), 'decimate-*'))
-        self.assertEqual(leftover, [], f"temp dirs left behind: {leftover}")
-
-    def test_a_timeout_is_recorded_as_a_failed_attempt(self):
-        with self._no_python_rungs(), \
-             mock.patch.object(decimator.blender, 'Runner') as Runner:
-            Runner.return_value.run = self._fake_run(timed_out=True,
-                                                     write_output=False)
-            result = decimate(self.loaded(), max_faces=1000, timeout=5)
-        self.assertIs(result.rung, Rung.FAILED)
-        self.assertIn('timed out', result.attempts[-1][1])
-
-    def test_a_missing_output_file_is_a_failure_not_a_crash(self):
-        """Blender can report success and write nothing."""
-        with self._no_python_rungs(), \
-             mock.patch.object(decimator.blender, 'Runner') as Runner:
-            Runner.return_value.run = self._fake_run(write_output=False)
-            result = decimate(self.loaded(), max_faces=1000)
-        self.assertIs(result.rung, Rung.FAILED)
-        self.assertIn('no file', result.attempts[-1][1])
-
-
 class TestEveryRungFails(DecimatorCase):
 
     def test_the_input_is_returned_unchanged(self):
@@ -299,9 +234,7 @@ class TestEveryRungFails(DecimatorCase):
         with mock.patch.object(decimator, '_decimate_fastsimp',
                                side_effect=RuntimeError("a")), \
              mock.patch.object(decimator, '_decimate_pymeshlab',
-                               side_effect=RuntimeError("b")), \
-             mock.patch.object(decimator, '_decimate_blender',
-                               side_effect=RuntimeError("c")):
+                               side_effect=RuntimeError("b")):
             result = decimate(mesh, max_faces=1000)
         self.assertIs(result.rung, Rung.FAILED)
         self.assertIs(result.mesh, mesh)
@@ -313,13 +246,10 @@ class TestEveryRungFails(DecimatorCase):
         with mock.patch.object(decimator, '_decimate_fastsimp',
                                side_effect=RuntimeError("a")), \
              mock.patch.object(decimator, '_decimate_pymeshlab',
-                               side_effect=RuntimeError("b")), \
-             mock.patch.object(decimator, '_decimate_blender',
-                               side_effect=RuntimeError("c")):
+                               side_effect=RuntimeError("b")):
             result = decimate(self.loaded(), max_faces=1000)
         self.assertEqual([r for r, _ in result.attempts],
-                         [Rung.FAST_SIMPLIFICATION, Rung.PYMESHLAB,
-                          Rung.BLENDER])
+                         [Rung.FAST_SIMPLIFICATION, Rung.PYMESHLAB])
 
 
 if __name__ == '__main__':

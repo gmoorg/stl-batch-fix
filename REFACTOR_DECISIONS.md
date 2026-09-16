@@ -1965,6 +1965,23 @@ that whole category. Declining it because it only helps six files would apply a
 standard applied nowhere else in this refactor; the "do it when the scripts are
 touched anyway" trigger was deferral dressed as discipline.
 
+> **Superseded in part, 2026-09-16.** The justification above is
+> `decimate.blender`'s hand-packed `struct.pack_into` loop — and D19 deleted
+> that file outright when it removed the Blender decimation rung. The ~100
+> lines of untestable byte assembly are gone, not replaced, so the reason
+> recorded here no longer exists in the form stated.
+>
+> What remains is `convert.blender`, which is a weaker case: it already uses
+> `bpy.ops.export_mesh.stl`, Blender's own C exporter, with no hand-packing at
+> all. Switching it to PLY swaps one operator for another and saves a weld on
+> ASCII/OBJ conversions — real, but not the "delete byte assembly nobody can
+> test" argument that justified the work.
+>
+> **Still open, reconsidered when `repairer` lands**, since that is where
+> Blender will next be used heavily and where the boundary's cost is felt
+> again. The verification below stands regardless: the vertex table does
+> survive a Blender round trip.
+
 **Scope is the scratch boundary and nothing else.** A wider version was
 proposed and dropped the same evening: supporting PLY as an *input* format, the
 way OBJ is supported. It was rejected on the only ground that matters — there
@@ -2224,6 +2241,34 @@ an orderly exit.
 Open sub-questions: where the root lives (a fixed subdirectory of the output
 tree, or of the system temp directory), and whether a sweep must avoid deleting
 scratch belonging to a *concurrently running* second instance.
+
+#### Correction 2026-09-16 — the input file is not garbage
+
+**The entry above frames every temp as a leak to be swept away. That is wrong
+for half of them**, and the distinction matters more than the sweep does:
+
+- **The file we hand Blender** — keep it when Blender is killed. It is a valid
+  mesh in durable form; producing it cost a weld and a write. It is what a
+  retry continues from and what a manual rescue opens. Deleting it on failure
+  means re-reading and re-welding the source just to try again, and throws away
+  the exact reproducer for whatever killed Blender.
+- **The file Blender wrote** — this one *is* garbage on failure. Truncated or
+  half-written, with no value, and dangerous precisely because something later
+  could mistake it for a real result.
+
+So `keep_temp_on_failure=False` had it backwards: keeping the input should be
+what normally happens on failure, not an opt-in.
+
+**This also undermines the startup sweep as described.** A blind sweep would
+delete exactly the file that was deliberately kept. If a kept input is meant to
+be resumed from, it is not scratch at all — it wants a known, predictable path
+that a retry can find, which is a different thing from a temp directory nobody
+outside the function knows about.
+
+**Deferred to `repairer`**, because after D19 removed the Blender decimation
+rung the only Blender left is `convert.blender`, and conversion has the same
+shape: an input worth keeping, an output worthless if it failed. The question
+is better settled once `repairer` shows what resuming actually needs.
 
 ### Decided — drop the Blender decimation rung; mark the failure instead
 
@@ -2705,3 +2750,64 @@ Third instance in two days of a confident claim built from pattern-matching
 rather than looking, after `shells()` "nearly free" and the split-upfront
 reversal. Each was caught by the user asking a question rather than by any
 check of mine.
+
+
+### D19 — Done: the Blender decimation rung is removed
+
+**Implemented 2026-09-16**, completing the decision recorded above. The log
+recheck it was conditional on has been done: **104 of 104 decimate rows in the
+step log took fast_simplification**, no failures, no fallbacks; the preserved
+collection run shows the same on the 4 files it decimated. Consistent — but it
+is still only the meshes fast_simplification happened to handle, which is why
+that record is not the justification. The justification is the manual fallback:
+Bambu Studio's own simplify.
+
+**What went:**
+
+- `Rung.BLENDER`, `_decimate_blender`, `_decimate_script`, `_SCRIPT_CACHE`,
+  `_remove_tree`
+- the `timeout`, `blender_executable` and `keep_temp_on_failure` parameters —
+  `decimate(mesh, max_faces)` is now the whole signature
+- the `blender` import, and `os`/`tempfile` with it
+- `libs/blender_fx/decimate.blender`, deleted
+- `TestBlenderRung` in the suite (22 tests → 19)
+
+**What arrived:** `Indicator.UNDECIMATED` and the `.undecimated.stl` marker, a
+full copy of the source like every other signal file — and a particularly good
+fallback print, being a complete model that simply was not reduced.
+
+**The consequence worth naming: decimation no longer touches the disk.** Both
+remaining rungs are array-native, so the module has no file boundary at all.
+Two tests assert this directly.
+
+#### Two earlier entries this invalidates
+
+Both were written assuming the Blender decimation rung exists, and both are now
+annotated in place rather than deleted:
+
+**The PLY deferral** rested on `decimate.blender`'s hand-packed
+`struct.pack_into` loop — *"~100 lines of untestable in-Blender serialisation"*
+that `wm.ply_export` would replace with one C call. That file is now deleted
+outright, so those lines are gone rather than improved, and the stated
+justification no longer exists. What remains is `convert.blender`, which
+already uses Blender's own C exporter and needs no hand-packing — a much weaker
+case. Reconsidered when `repairer` lands.
+
+**The scratch-sweep entry** describes `_decimate_blender`'s `tempfile.mkdtemp`
+and `finally`, which no longer exist. The concern survives and moves to
+`convert.blender` and `repairer`.
+
+#### And a correction to that scratch entry, from the user
+
+It framed every temp file as a leak to be swept away. **That is wrong for half
+of them.** The file handed *to* Blender is not garbage: it is a valid mesh in
+durable form that cost a weld and a write to produce, it is what a retry
+continues from, and it is the reproducer for whatever killed Blender. Deleting
+it on failure means re-reading and re-welding the source just to try again.
+Only Blender's *output* is worthless on failure — truncated, and dangerous
+because something later could mistake it for a result.
+
+So `keep_temp_on_failure=False` had the default backwards, and a blind startup
+sweep would delete exactly the file that was deliberately kept. A kept input is
+not scratch at all; it wants a known path a retry can find. Deferred to
+`repairer`, which is where resuming will show what it actually needs.

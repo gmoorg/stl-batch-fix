@@ -67,7 +67,8 @@ class TestOutputMarkers(IndicatorCase):
                                  ('.failed.stl', Indicator.FAILED),
                                  ('.unrepaired.stl', Indicator.UNREPAIRED),
                                  ('.open.stl', Indicator.OPEN_EDGES),
-                                 ('.timeout.stl', Indicator.TIMED_OUT)):
+                                 ('.timeout.stl', Indicator.TIMED_OUT),
+                                 ('.undecimated.stl', Indicator.UNDECIMATED)):
             with self.subTest(suffix=suffix):
                 self.setUp()
                 marker = self._marker(suffix)
@@ -95,6 +96,21 @@ class TestOutputMarkers(IndicatorCase):
         found = self._check()
         self.assertIs(found.indicator, Indicator.BROKEN)
         self.assertEqual(found.path, first)
+
+    def test_undecimated_marks_a_file_that_kept_its_face_count(self):
+        """D19: with no Blender fallback, a mesh that defeats both decimators
+        is written out marked rather than shipped as finished.
+
+        Decimation is a deliverable — an undecimated mesh gets re-decimated by
+        the printer, which reintroduces the non-manifold edges this tool
+        exists to remove — so 'not decimated' has to be a state the filesystem
+        records, not a line in a log nobody reads.
+        """
+        marker = self._marker('.undecimated.stl')
+        found = self._check()
+        self.assertIs(found.indicator, Indicator.UNDECIMATED)
+        self.assertEqual(found.path, marker)
+        self.assertTrue(found.found)
 
     def test_original_stl_is_not_an_indicator(self):
         """It sits beside a SUCCESSFUL output as bbox-drift evidence.

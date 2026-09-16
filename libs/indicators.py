@@ -46,6 +46,7 @@ class Indicator(Enum):
     UNREPAIRED = 'unrepaired'        # non-manifold edges remained
     OPEN_EDGES = 'open_edges'        # nm clean, open edges remained
     TIMED_OUT = 'timed_out'          # killed by the watchdog
+    UNDECIMATED = 'undecimated'      # every decimator failed; still oversized
 
 
 #: Output-tree markers, checked in this order.  `.original.stl` is deliberately
@@ -58,6 +59,7 @@ _OUTPUT_MARKERS: tuple[tuple[str, Indicator], ...] = (
     ('.unrepaired.stl', Indicator.UNREPAIRED),
     ('.open.stl', Indicator.OPEN_EDGES),
     ('.timeout.stl', Indicator.TIMED_OUT),
+    ('.undecimated.stl', Indicator.UNDECIMATED),
 )
 
 EXPORT_DIRNAME = 'stl-exported'

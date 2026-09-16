@@ -552,6 +552,7 @@ mesh, just a large one, and printing it slowly beats not printing it.
 | `<stem>.failed.stl`     | copy of source    | Transient error (crash, or the repair died)    | Delete to retry |
 | `<stem>.timeout.stl`    | copy of source    | Exceeded `TIMEOUT`; written by the parent, since a killed worker never reaches its own cleanup | Delete to retry |
 | `<stem>.unrepaired.stl` | copy of source    | Repair ran, non-manifold edges remain          | Delete to retry |
+| `<stem>.undecimated.stl` | copy of source   | Every decimator failed; the mesh is still over `MAX_FACES`. A complete, printable model that simply was not reduced — run it through Bambu Studio's own simplify | Delete to retry |
 | `<stem>.open.stl`       | repaired output   | nm=0 but open edges remain (slicers cope), **or** a partial split merge — what repaired, with the failed parts left out | Delete to retry |
 | `<stem>.original.stl`   | copy of source    | Kept beside a real output whose repair moved the bounding box | Not a retry marker |
 
@@ -940,7 +941,7 @@ hole's *span* against the layer height. Keeping those apart is what stopped the
 pipeline destroying a model to close pinholes no printer could express.
 
 `libs/decimator.py` — reduce a mesh to a face budget, by whichever library is
-available. One entry point, three implementations behind it:
+available. One entry point, two implementations behind it:
 
 ```python
 is_available()                  # startup: can anything decimate?
@@ -948,44 +949,40 @@ available_rungs()               # startup report: what is missing
 decimate(mesh, max_faces) -> Result(mesh, rung, faces_in, faces_out, attempts)
 ```
 
-All three rungs run the same Garland-Heckbert quadric edge collapse and differ
-only in how much machinery sits around it. Measured, 2.55M triangles → 900k:
+Both rungs run the same Garland-Heckbert quadric edge collapse and differ only
+in how much machinery sits around it. Measured, 2.55M triangles → 900k:
 
 | rung | time | peak | works on |
 |---|---|---|---|
 | fast_simplification | ~5.6s | ~915 MB | numpy arrays |
 | pymeshlab | 42.0s | 1557 MB | numpy arrays |
-| blender | 43s | OOM'd under a worker RLIMIT_AS | **files** |
 
 **Size does not select the decimator.** fast_simplification handles a 2.55M
 mesh in less memory than PyMeshLab needs for 1.2M, so there is no band where a
-mesh is too big for Python and has to go out to Blender. Blender is a last
-resort for when the other two *fail*, not for when the mesh is large — and the
-collection run bears that out: 88 of 88 decimations were fast_simplification,
-and Blender ran on 6 files out of 768 (0.8%, 4.1% of wall time) for repair
-rather than decimation.
+mesh is too big for one and must go to the other. PyMeshLab is for when
+fast_simplification *fails*, not for when the mesh is large.
 
-**Mesh in, mesh out, whichever rung ran.** The first two work on the arrays and
-never touch the disk; PyMeshLab takes numpy directly
-(`pymeshlab.Mesh(vertex_matrix=, face_matrix=)`), so `load_new_mesh` /
-`save_current_mesh` would round trip through the disk for nothing. Blender is a
-separate process with its own interpreter and mesh database — there is no
-channel for numpy arrays — so that rung writes a temp, runs, loads the result
-back, and deletes both inside the module. The caller cannot tell which ran.
+**Nothing here touches the disk.** Both rungs work on the arrays directly —
+PyMeshLab takes numpy in (`Mesh(vertex_matrix=, face_matrix=)`) and gives it
+back, so `load_new_mesh`/`save_current_mesh` would be a filesystem round trip
+inside our own process for no reason. Two tests assert that decimation writes
+no files at all; that is the claim the in-memory design rests on.
 
-**Temporaries are scratch, not step outputs.** The old code wrote
-`dst + '.decimate.stl'` into the output tree and kept it until the end of the
-pipeline, because `working` was a path and the next step read it back. With the
-mesh in memory that reason is gone: the temps live in a `tempfile.mkdtemp` and
-are removed in a `finally`, so a Blender timeout cannot leak them and no step
-downstream can read one. `keep_temp_on_failure` optionally keeps the input,
-which is the exact reproducer for a mesh that already defeated two decimators.
+**There was a third rung, Blender, and D19 removed it.** It never ran: 104 of
+104 decimations in the step log took fast_simplification, with no failure and
+no fallback. But that record is only the meshes fast_simplification happened to
+handle, and is not what justified the removal. What justified it is that a
+manual fallback exists — Bambu Studio's own simplify — so a mesh defeating both
+rungs is a file to mark and handle by hand, not a lost model. The Blender rung
+bought one manual step on a case that has not occurred, against a script, a
+subprocess, temp files and a format boundary. `blender_fx/decimate.blender` is
+deleted with it.
 
-**Failure returns the input unchanged**, with every attempt recorded. Decimation
-is a deliverable, so a caller must be able to tell *not decimated* from
-*decimated badly* and mark the file rather than ship it; `attempts` exists
-because a silent fallback is indistinguishable from a first-choice success at
-the call site.
+**Failure returns the input unchanged**, with every attempt recorded, and the
+caller writes `.undecimated.stl`. Decimation is a deliverable, so a caller must
+be able to tell *not decimated* from *decimated badly* and mark the file rather
+than ship it; `attempts` exists because a silent fallback is indistinguishable
+from a first-choice success at the call site.
 
 `libs/mesh_io.py` — what a mesh file says about itself, and the mesh itself
 when a step actually needs it. The two are deliberately separated: everything
@@ -1160,14 +1157,14 @@ raised on every mesh with a seam candidate, 200 of 200 trials. It was caught
 because the differential check ran *before* any unit tests were written; tests
 written first would have encoded the broken behaviour.
 
-`test_decimator.py` — 22 tests for `libs/decimator.py`, ~0.5 s. The three rungs
-are third-party quadric edge collapse, so what is tested is the *ladder*, not
-the algorithms: which rung runs, that a failure falls through to the next, that
-a mesh already within budget is returned untouched, and that the Blender rung
-leaves no temporary files behind. Rungs are forced by patching the module's
-availability flags, so a test can reach the second or third without needing one
-to genuinely break. Two tests assert that the common path writes **no files at
-all** — the claim the in-memory design rests on.
+`test_decimator.py` — 19 tests for `libs/decimator.py`, ~0.4 s. Both rungs are
+third-party quadric edge collapse, so what is tested is the *ladder*, not the
+algorithms: which rung runs, that a failure falls through to the next, and that
+a mesh already within budget is returned untouched. Rungs are forced by
+patching the module's availability flags, so a test can reach the second
+without needing the first to genuinely break. Two tests assert that decimation
+writes **no files at all** — the claim the in-memory design rests on — and one
+pins that no Blender rung exists (D19).
 
 `test_mesh_io.py` — 44 tests for `libs/mesh_io.py`, ~0.7 s. Every file is
 generated by the test that needs it, because the interesting cases are the ones
@@ -1184,7 +1181,7 @@ untouched. Bad data is a result and only a bad request raises: loading a
 truncated file returns an invalid `Mesh`, while loading an ASCII STL or writing
 an unloaded mesh raises `ValueError`.
 
-`test_indicators.py` — 13 tests for `libs/indicators.py`, ~0.01 s. Every file
+`test_indicators.py` — 21 tests for `libs/indicators.py`, ~0.01 s. Every file
 is an empty touch, since the module tests for existence and never opens
 anything.
 
