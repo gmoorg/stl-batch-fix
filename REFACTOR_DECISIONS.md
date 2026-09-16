@@ -2935,3 +2935,80 @@ it.
 tree rather than `/tmp`, so it does not vanish on reboot. That is the point —
 it is visible to the next run — but it does mean cleanup is deliberate rather
 than something the OS eventually does.
+
+### D22 — Shells are edge-connected, not vertex-connected
+
+**Fixed 2026-09-16.** `scanner.shells()` joins two faces only when they share
+an **edge** (two vertices). Surfaces meeting at a single point are separate
+shells. The previous behaviour was documented, tested, and wrong for the job.
+
+**Why it matters.** A vertex where two surfaces touch is non-manifold by
+construction, and PyMeshFix rebuilds *one* manifold surface and discards the
+rest. Handing it a vertex-joined pair as a single component gives it exactly
+the input that makes it delete geometry — the failure the split exists to
+prevent.
+
+**The evidence**, on `Mandy_Body_Dinamuuu3D.stl` raw:
+
+| criterion | components | largest |
+|---|---|---|
+| vertex-connected (was) | 39 | 1,315,986 |
+| **edge-connected (now)** | **40** | 941,571 + 374,415 |
+| PyMeshLab `generate_splitting_by_connected_components` | 40 | 941,571 + 374,415 |
+
+The edge-connected answer matches PyMeshLab component for component and face
+for face. Mandy's largest shell is two surfaces touching at one vertex.
+
+**A detail worth not glossing**: after decimation the count is **39** again —
+quadric collapse removes the single-vertex join. So the old behaviour was
+accidentally right for the mesh the pipeline sees and wrong for the raw one.
+That is a coincidence, not a defence.
+
+**The cost of being correct**: edge connectivity needs a lexsort over
+`3 * faces` rows to find which faces share an edge.
+
+| | union-find | scipy vertex | scipy edge |
+|---|---|---|---|
+| raw | 12.75s | 0.42s | 2.52s |
+| decimated | 5.72s | 0.14s | 0.92s |
+
+Still 5x faster than the loop it replaced, and still cheaper than `scan()`
+(2.58s) on the mesh that matters.
+
+#### The third time a green suite agreed with itself
+
+`test_faces_sharing_only_a_vertex_are_one_shell` **asserted the wrong
+behaviour**, and the union-find oracle in `TestShellsAgainstUnionFind` unioned
+vertices too — so 500 random meshes agreed, and all three of implementation,
+test and oracle were wrong together.
+
+This is now the third instance in this refactor:
+
+1. `winding_seams` — self-edges counted as closed loops; the original had the
+   same flaw, so the differential test could not see it.
+2. `shells` pointer-jumping — 500/500 differential trials passed on an
+   implementation that was 2x slower than what it replaced on real geometry.
+3. `shells` vertex connectivity — implementation, test and oracle all agreed.
+
+Every one was caught by running against a real model, never by the suite. The
+oracle is now edge-connected, and PyMeshLab stands as the independent check.
+
+**The rule**: an oracle derived from the same assumption as the implementation
+tests consistency, not correctness. Where an independent implementation exists
+— PyMeshLab here — check against that, on real geometry, at least once.
+
+### Decided — scan the merged mesh as the final step
+
+**Raised by the user 2026-09-16.** After parts are repaired and merged, run
+`scanner.scan()` on the result before writing it out.
+
+This is not re-checking work already checked. Repairing parts independently and
+reassembling can introduce defects **no individual part had**: two parts
+sharing a boundary can be re-wound differently from each other, and the merge
+itself can leave the seam between them open. The merged mesh is geometry that
+nothing has yet inspected.
+
+It extends the principle `_post_verify` already encodes — *"PyMeshFix (and
+Blender) self-report unreliably, so nothing is written out as 'ok' on a
+library's word alone"* — to the one step that currently has no verification at
+all.

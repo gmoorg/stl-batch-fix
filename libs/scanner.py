@@ -357,56 +357,75 @@ def seam_edges(mesh: Mesh) -> np.ndarray:
 def shells(mesh: Mesh) -> tuple[np.ndarray, ...]:
     """Connected components, as face-index arrays, largest first.
 
-    Two faces are in the same shell when they share a vertex.  Returned as
-    indices into the original face array rather than as meshes, so a caller
-    that only wants a count pays nothing for geometry it will not use.
+    **Two faces are in the same shell when they share an EDGE** — two vertices,
+    not one.  Surfaces that meet at a single point are separate shells.
 
-    PyMeshLab does this today via `generate_splitting_by_connected_components`,
-    which writes every component to its own file.  Here nothing is written, so
-    counting shells no longer costs a split.
+    That distinction is not pedantic, it is the one that matters here.  A vertex
+    where two surfaces touch is non-manifold by construction, and PyMeshFix
+    rebuilds *one* manifold surface and discards the rest — so handing it a
+    vertex-joined pair as a single component gives it exactly the input that
+    makes it delete geometry, which is the failure the split exists to prevent.
 
-    **Why scipy.**  The predecessor was a per-face Python `find()` loop —
-    correct, and 5-10x the cost of loading the mesh.  Measured on
-    `Mandy_Body_Dinamuuu3D.stl`:
+    Measured on `Mandy_Body_Dinamuuu3D.stl`: vertex connectivity reports 39
+    components with a largest of 1,315,986 faces; edge connectivity reports 40,
+    splitting that one into 941,571 + 374,415 joined at a single vertex.  The
+    edge-connected answer matches PyMeshLab's
+    `generate_splitting_by_connected_components` exactly, component for
+    component and face for face — which is the behaviour the pipeline was built
+    around.
 
-        mesh                      union-find   scipy
-        raw, 2,061,994 faces         12.75s     0.42s    30x
-        decimated, 900,000 faces      5.72s     0.14s    41x
+    Returned as indices into the original face array rather than as meshes, so
+    a caller that only wants a count pays nothing for geometry it will not use.
 
-    At 0.14s on the mesh the pipeline actually sees — decimation runs first,
-    D13 — shell counting is cheaper than `scan()` itself, so it can be asked
-    on every file without thought.
+    **Why scipy.**  The predecessor was a per-face Python `find()` loop, and
+    5-10x the cost of loading the mesh.  Measured on the same model:
+
+        union-find (vertex-connected)   12.75s raw    5.72s decimated
+        scipy, vertex-connected          0.42s        0.14s
+        scipy, edge-connected            2.52s        0.92s   <- this code
+
+    Edge connectivity costs more than vertex connectivity — it needs a lexsort
+    over `3 * faces` edge rows to find which faces share one — and that is the
+    price of the correct answer.  Still 5x faster than the loop it replaced,
+    and at 0.92s on the mesh the pipeline actually sees (decimation runs first,
+    D13) it remains cheaper than `scan()` itself at 2.58s.
 
     **A pure-numpy replacement was tried first and was slower on real
-    geometry.**  Pointer-jumping label propagation (push the smaller label
-    across every edge, then collapse chains by indexing the array into itself)
-    is 15-24x faster than union-find on synthetic meshes and **2x slower** on
-    Mandy: it converges in O(log diameter) passes only when chains actually
-    collapse, and a 1.3M-face organic shell took **194 passes** at 0.13s each.
-    The synthetic benchmark that endorsed it — a long thin strip — has only
-    three components and converges in 11.  Do not retry it without a fixture
-    whose component structure resembles a real model.
+    geometry.**  Pointer-jumping label propagation is 15-24x faster than
+    union-find on synthetic meshes and **2x slower** on Mandy: it converges in
+    O(log diameter) passes only when chains actually collapse, and a 1.3M-face
+    organic shell took **194 passes** at 0.13s each.  The synthetic benchmark
+    that endorsed it — a long thin strip — has three components and converges
+    in 11.  Do not retry it without a fixture whose component structure
+    resembles a real model.
     """
     _require_geometry(mesh)
     faces = mesh.geometry.faces
     if len(faces) == 0:
         return ()
 
-    # Each face contributes its three edges; `connected_components` treats the
-    # graph as undirected, so one direction per edge is enough.
-    n_verts = int(faces.max()) + 1
-    a = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2]])
-    b = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0]])
-    graph = coo_matrix((np.ones(len(a), dtype=np.int8), (a, b)),
-                       shape=(n_verts, n_verts))
+    # Build face-to-face adjacency through shared edges.  Sorting each edge
+    # low-high makes an edge's identity independent of traversal direction, so
+    # two faces that walk it in opposite directions still count as adjacent.
+    edges = _edges_of(faces)
+    owner = np.tile(np.arange(len(faces)), 3)
+    order = np.lexsort((edges[:, 1], edges[:, 0]))
+    edges, owner = edges[order], owner[order]
+
+    # Adjacent rows after the sort are the same edge, so consecutive pairs name
+    # two faces sharing it.  A run of three or more (a non-manifold edge) links
+    # each face to the next, which still places them all in one component.
+    shared = np.all(edges[1:] == edges[:-1], axis=1)
+    left, right = owner[:-1][shared], owner[1:][shared]
+
+    graph = coo_matrix((np.ones(len(left), dtype=np.int8), (left, right)),
+                       shape=(len(faces), len(faces)))
     _, labels = connected_components(graph, directed=False)
 
-    # A face belongs to the component of any of its corners; they agree by
-    # construction, so the first is enough.  Group by sorting the face labels
-    # and cutting where they change — vectorised, unlike a dict of lists.
-    face_label = labels[faces[:, 0]]
-    order = np.argsort(face_label, kind='stable')
-    groups = np.split(order, np.flatnonzero(np.diff(face_label[order])) + 1)
+    # Group by sorting the labels and cutting where they change — vectorised,
+    # unlike a dict of lists.
+    order = np.argsort(labels, kind='stable')
+    groups = np.split(order, np.flatnonzero(np.diff(labels[order])) + 1)
     groups.sort(key=len, reverse=True)
     return tuple(groups)
 

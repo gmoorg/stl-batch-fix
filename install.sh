@@ -68,9 +68,9 @@ fi
 # ── scipy ─────────────────────────────────────────────────────────────────────
 # Connected-component analysis (shell detection) via scipy.sparse.csgraph.
 # Measured on Mandy_Body_Dinamuuu3D.stl against the per-face Python union-find
-# it replaced: 12.75s -> 0.42s raw (2.06M faces), 5.72s -> 0.14s decimated.
-# At 0.14s shell counting costs less than the edge scan itself, so it can be
-# asked on every file. A pure-numpy replacement was tried and was SLOWER on
+# it replaced: 12.75s -> 2.52s raw (2.06M faces), 5.72s -> 0.92s decimated.
+# At 0.92s shell counting costs less than the edge scan itself (2.58s), so it
+# can be asked on every file. A pure-numpy replacement was tried and was SLOWER on
 # real geometry -- see D20 in REFACTOR_DECISIONS.md before attempting one.
 echo "→ scipy"
 if "$PYTHON" -c "import scipy" 2>/dev/null; then

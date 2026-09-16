@@ -933,15 +933,16 @@ scipy is a hard requirement in `install.sh`. Measured on
 `Mandy_Body_Dinamuuu3D.stl`, against the per-face Python union-find it
 replaced:
 
-| mesh | union-find | scipy |
-|---|---|---|
-| raw, 2,061,994 faces | 12.75s | **0.42s** |
-| decimated, 900,000 faces | 5.72s | **0.14s** |
+| mesh | union-find | scipy (vertex) | scipy (edge) |
+|---|---|---|---|
+| raw, 2,061,994 faces | 12.75s | 0.42s | **2.52s** |
+| decimated, 900,000 faces | 5.72s | 0.14s | **0.92s** |
 
-At 0.14s on the mesh the pipeline actually sees — decimation runs first, D13 —
-shell counting costs less than `scan()` itself, so it can be asked on every
-file without thought. A pure-numpy replacement was tried first and rejected:
-see D20.
+The shipped code is the edge-connected column — see D22 for why vertex
+connectivity was wrong. At 0.92s on the mesh the pipeline actually sees
+(decimation runs first, D13) shell counting still costs less than `scan()`
+itself at 2.58s, so it can be asked on every file without thought. A pure-numpy
+replacement was tried first and rejected: see D20.
 
 **An unloaded mesh raises rather than reporting clean.** This is the same
 hazard `_post_verify`'s three-valued return was added to kill: an unscannable

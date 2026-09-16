@@ -416,27 +416,39 @@ class TestShellsAgainstUnionFind(unittest.TestCase):
 
     @staticmethod
     def _union_find(faces):
-        parent = np.arange(int(faces.max()) + 1, dtype=np.int64)
+        """Union-find over faces joined by a shared EDGE.
+
+        An earlier version of this oracle unioned vertices, which made two
+        surfaces meeting at a point one component. The implementation did the
+        same, so 500 random meshes agreed and both were wrong — the third time
+        in this suite that a differential test confirmed self-consistency
+        rather than correctness. It is only ever real geometry that catches
+        that: PyMeshLab split Mandy's largest shell in two where we did not.
+        """
+        parent = list(range(len(faces)))
 
         def find(x):
             while parent[x] != x:
                 parent[x] = parent[parent[x]]
                 x = parent[x]
-            return int(x)
+            return x
 
         def union(a, b):
             ra, rb = find(a), find(b)
             if ra != rb:
                 parent[ra] = rb
 
-        for a, b, c in faces:
-            union(int(a), int(b))
-            union(int(b), int(c))
-        roots = np.fromiter((find(int(f[0])) for f in faces),
-                            dtype=np.int64, count=len(faces))
-        groups = {}
-        for i, r in enumerate(roots):
-            groups.setdefault(int(r), []).append(i)
+        owners = defaultdict(list)
+        for i, (a, b, c) in enumerate(faces):
+            for u, w in ((a, b), (b, c), (c, a)):
+                owners[(min(int(u), int(w)), max(int(u), int(w)))].append(i)
+        for sharers in owners.values():
+            for other in sharers[1:]:
+                union(sharers[0], other)
+
+        groups = defaultdict(list)
+        for i in range(len(faces)):
+            groups[find(i)].append(i)
         return {frozenset(v) for v in groups.values()}
 
     def test_it_agrees_on_random_meshes(self):
@@ -497,11 +509,24 @@ class TestShells(unittest.TestCase):
         found = shells(mesh(verts, faces))
         self.assertEqual([len(s) for s in found], [4, 1])
 
-    def test_faces_sharing_only_a_vertex_are_one_shell(self):
-        """Touching at a point still makes them connected for this purpose."""
+    def test_faces_sharing_only_a_vertex_are_separate_shells(self):
+        """A point contact is NOT a connection — and this is load-bearing.
+
+        An earlier version of this test asserted the opposite, and the
+        implementation agreed with it. Both were wrong for the job. A vertex
+        where two surfaces touch is non-manifold by construction, and PyMeshFix
+        rebuilds one manifold surface and discards the rest — so treating a
+        vertex-joined pair as a single component hands it exactly the input
+        that makes it delete geometry.
+
+        Measured on Mandy_Body_Dinamuuu3D.stl: vertex connectivity gives 39
+        components with a largest of 1,315,986 faces; edge connectivity gives
+        40, splitting that into 941,571 + 374,415. PyMeshLab, which the
+        pipeline was built around, reports the edge-connected answer.
+        """
         verts = TETRA_VERTS + [[5, 5, 5], [6, 5, 5]]
-        faces = TETRA_FACES + [[0, 4, 5]]          # shares vertex 0
-        self.assertEqual(len(shells(mesh(verts, faces))), 1)
+        faces = TETRA_FACES + [[0, 4, 5]]          # shares vertex 0 only
+        self.assertEqual(len(shells(mesh(verts, faces))), 2)
 
     def test_shell_count_ignores_specks_below_the_floor(self):
         """A collection mesh carries hundreds of few-face specks; treating
