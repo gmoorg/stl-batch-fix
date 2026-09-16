@@ -2038,3 +2038,96 @@ pass, accepting the cascade risk.
 **Also agreed but not yet built**: `scanner` should own `volume(mesh)`.
 `_mesh_volume` is already an `einsum` over `verts[faces]`; today it pays a full
 weld from a path every time it is asked, twice per volume comparison.
+
+---
+
+## Splitting and debris — discussed 2026-09-15, partly settled
+
+### Settled — the split moves from recovery to planning
+
+**Decided in discussion.** Detection runs upfront on every file; the split
+happens when detection calls for it, not after a repair has already failed.
+
+**The reasoning that changed my objection.** I argued for split-on-failure on
+runtime: 6 files of 768 ever needed it, and paying detection on all 768 looked
+like doubling the run to help six. Two counters, both better than the argument
+they answered:
+
+- **Closed seam loops make the split unavoidable.** PyMeshFix deletes a region
+  when regions disagree about winding, and that was learned the hard way. So
+  split-on-failure does not avoid the split — it pays for a doomed PyMeshFix
+  pass first, then splits anyway. Upfront removes the wasted pass, not work.
+- **Detection makes the work orderable.** The pool already sorts by triangle
+  count for memory admission. A file that needs splitting currently looks
+  identical to one that does not until it fails; known upfront, it is
+  schedulable rather than discovered.
+
+And the cost is partly refunded: splitting lets debris shells be dropped rather
+than repaired. On `whole-costume01` that is 443 of 444 shells under 100 faces —
+work that was being spent on fragments nobody would print.
+
+**The shape**: detect (`scan` + `winding_seams`, both cheap) -> split when
+seams or multiple shells say so -> drop debris, recorded -> repair each part ->
+merge. Volume-loss-then-seam-split stays as the backstop for what detection
+misses.
+
+### Idea, not yet designed — debris by bounding box, not face count
+
+**Recorded as an idea. Not decided, not built.**
+
+`_MIN_SHELL_FACES = 100` is a triangle count standing in for physical size. It
+was measured honestly — the smallest real shell seen was 750 faces, so 100
+keeps every real part with 7.5x margin — but a dense speck carries thousands of
+faces in a sub-millimetre box. That is exactly the Leia shape: a million
+triangles per millimetre of extent. A high-detail sculpt's debris sails past a
+face floor.
+
+**The insight that dissolves it**: after the split, each part *is* its own
+mesh, so its bounding box can be measured directly — `mesh_io.dimensions()`
+already exists. No fraction-of-the-parent arithmetic, no constant meaning
+different things at different scales, because the measurement is on the part
+itself.
+
+Sketch, to be worked out later: drop a part whose bounding box is under some
+small multiple of `MIN_LAYER` in **every** dimension. Open question whether
+that multiple is a constant with its reasoning written down (something near
+"under 2 mm in all three axes") or a per-run setting.
+
+**Whatever is dropped must be recorded as dropped** — count, largest extent,
+total volume. Two reasons. The volume guard exists to catch deleted geometry
+and would otherwise see a deliberate drop as loss, sending the file down the
+seam-split recovery path for something that was chosen. And a speck at 5 mm may
+matter at 300%: "dropped 443 shells, largest 47 faces, total 0.02 mm^3" is
+checkable later, "the volume changed" is not.
+
+### Measured — `scanner.shells()` is too slow, and that is my bug
+
+Timed on surviving collection meshes, load versus shell count:
+
+| triangles | load | shell count | count as share of load |
+|---|---|---|---|
+| 309,555 | 0.20s | 2.03s | 1015% |
+| 2,061,994 | 1.91s | 12.51s | 657% |
+| 5,081,319 | 6.42s | 33.86s | 527% |
+
+**Counting shells costs 5-10x the entire load.** I had claimed in discussion
+that counting was "nearly free" now that it no longer goes through PyMeshLab's
+file-writing split — reasoning from "it is just union-find" without measuring.
+Wrong by an order of magnitude.
+
+The synthetic curve shows it is linear, about 2x `scan()`, so it is not
+pathological — just a Python-level `find()` loop over every face, which is the
+same class of thing `_build_edge_counts` was criticised for and which `scan()`
+avoids by being vectorised. **`shells()` needs a vectorised rewrite before any
+ordering decision is argued from its numbers**; a proper implementation should
+be near `scan()`, order 1s on a 2M mesh rather than 12.5s.
+
+One real finding survives regardless: `Mandy_Body_Dinamuuu3D.stl` has **39
+shells, all 39 above the 100-face floor** — matching the design doc's note
+exactly, so the floor behaves as recorded on real data.
+
+### Not yet measured
+
+How many files in the collection carry **closed seam loops**. Detection being
+upfront is settled, so this does not gate that — but if the answer is 200
+rather than 6, the splitting stage needs a different design than if it is rare.
