@@ -10,6 +10,7 @@ import shutil
 import struct
 import tempfile
 import threading
+import time
 import unittest
 
 from libs.converter import Summary, prepare
@@ -248,6 +249,34 @@ class TestConversion(ConverterCase):
         self.assertEqual(len(self.seen), 20)
         self.assertEqual(summary.converted, 20)
         self.assertEqual(summary.emitted, 20)
+
+    def test_emit_is_never_called_concurrently(self):
+        """The guarantee the caller relies on — a deliberately unsafe consumer.
+
+        Without this, nothing in the suite would fail if the lock were removed:
+        the count tests only check totals, which a racing emit usually still
+        gets right.
+        """
+        for n in range(40):
+            _ascii_stl(self.s(f'p{n}.stl'))
+
+        inside = {'now': 0, 'max': 0}
+        guard = threading.Lock()
+
+        def unsafe_consumer(mesh):
+            with guard:
+                inside['now'] += 1
+                inside['max'] = max(inside['max'], inside['now'])
+            time.sleep(0.002)              # widen the window for an overlap
+            with guard:
+                inside['now'] -= 1
+
+        prepare(self.src, self.out, unsafe_consumer,
+                copy_extensions=COPY_EXTS,
+                convert=self._fake_convert(), workers=8)
+        self.assertEqual(inside['max'], 1,
+                         "emit ran concurrently — the consumer would need its "
+                         "own lock, which the contract says it does not")
 
     def test_counts_are_exact_under_concurrency(self):
         """The counters are touched from worker threads; they must not race."""

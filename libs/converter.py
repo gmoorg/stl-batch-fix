@@ -8,12 +8,25 @@ them — is not this module's business.
     prepare(source_root, output_root, emit,
             copy_extensions=..., convert=..., workers=4)
 
-`emit(mesh)` is called once per file that resolved to a mesh, in whatever order
-the work finished.  **Order is not promised**: binary files arrive during the
-walk and converted ones afterwards, so a consumer that needs them sorted sorts
-what it collects.  That is no loss — the repair queue has to be sorted by
-triangle count for memory admission regardless (D13), and only the consumer
-knows that.
+`emit(mesh)` is called once per file that resolved to a mesh, **one at a time**
+— `prepare` serialises it, so a consumer needs no locking of its own even
+though the conversion phase runs several workers.  The lock is uncontended
+during the walk and costs microseconds across a whole collection, which beats a
+contract reading "serial here, concurrent there, lock accordingly": a caller
+cannot forget a lock that is not theirs to take.
+
+**Order is not promised**: binary files arrive during the walk and converted
+ones afterwards, so a consumer that needs them sorted sorts what it collects.
+That is no loss — the repair queue has to be sorted by triangle count for
+memory admission regardless (D13), and only the consumer knows that.
+
+Returning a `queue.Queue` instead was considered and rejected.  It would be
+thread-safe for free and would let a consumer start work before the walk
+finished — but nothing *can* start early, because the queue has to be complete
+before it can be sorted, and `Pool`'s selector shuts a worker down rather than
+waiting, so a queue that filled gradually would shed every worker and end the
+run.  The overlap a queue buys is overlap this pipeline cannot use, against a
+sentinel protocol and a thread for the caller to manage.
 
 Failures are emitted too, as a `Mesh` with `is_valid=False` and a `problem`.
 A file that simply cannot be converted would otherwise be the one thing in the
@@ -98,6 +111,16 @@ def prepare(source_root: str,
     summary = Summary()
     pending: list[tuple[str, str]] = []          # (source, export destination)
 
+    # One lock for both the consumer and the counters.  The conversion phase
+    # runs several workers and `Pool` serialises only its selector, so
+    # everything shared goes through here.  Uncontended during the walk.
+    emit_lock = threading.Lock()
+
+    def emit_one(mesh: Mesh) -> None:
+        with emit_lock:
+            summary.emitted += 1
+            emit(mesh)
+
     for source in _walk(source_root):
         summary.scanned += 1
         destination = _output_for(source, source_root, output_root)
@@ -116,8 +139,7 @@ def prepare(source_root: str,
 
         if found.indicator is Indicator.EXPORT_READY:
             # Converted on an earlier run; measure the conversion, not the source.
-            summary.emitted += 1
-            emit(mesh_io.probe(found.path))
+            emit_one(mesh_io.probe(found.path))
             continue
 
         if found.indicator is not Indicator.PROCESS:
@@ -129,29 +151,17 @@ def prepare(source_root: str,
             pending.append((source, indicators.export_path(source, source_root)))
             continue
 
-        summary.emitted += 1
-        emit(probed)
+        emit_one(probed)
 
     if not pending:
         return summary
 
     if convert is None:
         for source, _ in pending:
-            summary.emitted += 1
             summary.conversion_failed += 1
-            emit(Mesh(source, mesh_io.kind(source), None, False,
-                      "needs conversion but no converter was supplied"))
+            emit_one(Mesh(source, mesh_io.kind(source), None, False,
+                          "needs conversion but no converter was supplied"))
         return summary
-
-    # The handler runs concurrently, so the counters need a lock of their own.
-    # Two cleverer arrangements were tried and both were wrong: counting inside
-    # the selector looks free, since the pool serialises that call — but the
-    # selector is told only *that* an item finished, not which result it
-    # produced, so pairing a completion with its outcome meant popping a shared
-    # list and four workers finishing out of order attributed the wrong ones.
-    # A plain lock needs no reasoning about which call the pool happens to
-    # serialise.
-    counts_lock = threading.Lock()
 
     def next_item(done, error):
         return pending.pop(0) if pending else None
@@ -162,16 +172,20 @@ def prepare(source_root: str,
         result = (mesh_io.probe(path) if ok
                   else Mesh(source, mesh_io.kind(source), None, False,
                             "conversion failed"))
-        with counts_lock:
+        # Everything shared goes through emit_one's lock, including these
+        # counters.  Two cleverer arrangements were tried first and both were
+        # wrong: counting inside the pool's selector looks free, since the pool
+        # serialises that call — but the selector is told only *that* an item
+        # finished, not which result it produced, so pairing a completion with
+        # its outcome meant popping a shared list, and workers finishing out of
+        # order attributed the wrong ones.  One lock needs no reasoning about
+        # which call the pool happens to serialise.
+        with emit_lock:
             if ok:
                 summary.converted += 1
             else:
                 summary.conversion_failed += 1
-            summary.emitted += 1
-        # Runs in a worker thread and concurrently with other handlers.  A
-        # consumer that is not thread safe must do its own locking — stated in
-        # prepare's contract.
-        emit(result)
+        emit_one(result)
 
     Pool(workers, next_item, convert_one).start()
     return summary

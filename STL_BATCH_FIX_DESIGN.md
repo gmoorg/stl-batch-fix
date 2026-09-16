@@ -876,8 +876,19 @@ is the gateway, and it can filter.
 **Copies run inline during the walk**, not in the pool. They are fast enough
 not to matter and keeping them inline is less machinery.
 
-**`emit` is called from worker threads** during the conversion phase, so a
-consumer that is not thread safe must do its own locking.
+**`emit` is called one at a time**, in both phases. `prepare` serialises it, so
+a consumer needs no locking of its own even though the conversion phase runs
+several workers. The lock is uncontended during the walk and costs microseconds
+across a collection — a better trade than a contract reading "serial here,
+concurrent there, lock accordingly", since a caller cannot forget a lock that
+is not theirs to take.
+
+Returning a `queue.Queue` instead was considered: thread-safe for free, and a
+consumer could start before the walk finished. Rejected because nothing *can*
+start early — the queue has to be complete before it can be sorted — and
+`Pool`'s selector sheds a worker rather than waiting, so a gradually-filling
+queue would end the run. The overlap a queue buys is overlap this pipeline
+cannot use, against a sentinel protocol and a thread for the caller to manage.
 
 > The counters needed a plain `threading.Lock`, and two cleverer arrangements
 > were wrong first. Counting inside the pool's selector looks free, since the
