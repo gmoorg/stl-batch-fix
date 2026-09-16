@@ -11,6 +11,24 @@ The one rule worth stating up front: **an unknown count is None, never zero.**
 An ASCII STL has no triangle count in its header and an OBJ has no header at
 all, so the honest answer is "ask Blender". Returning 0 would make those files
 sort as the cheapest work in the queue when they may be the most expensive.
+
+Geometry — the expensive half — lives behind an explicit step:
+
+    loaded = load(mesh)            # a NEW Mesh, with .geometry attached
+    write(loaded, destination)
+
+`Mesh` is frozen and every operation returns a new one, so a mesh in a queue
+can never quietly have become a 400 MB object while it sat there.  The two
+sizes are worth keeping in mind: a probed `Mesh` is a couple of hundred bytes,
+a loaded one is the whole welded mesh in RAM (measured 383 MB for 2.55M
+triangles).  That is the reason loading is a separate call and not a property
+that quietly happens on first access — a worker's memory budget is decided
+before it starts, and an implicit load would blow it from inside an attribute
+lookup.
+
+One writer, deliberately.  `write` takes a `Mesh`, so a caller never assembles
+a header itself, and there is exactly one place that knows an STL facet is 50
+bytes with a real normal in the first 12.
 """
 
 from __future__ import annotations
@@ -43,8 +61,24 @@ class Kind(Enum):
 
 
 @dataclass(frozen=True)
+class Geometry:
+    """A welded mesh: shared vertices, and faces indexing into them.
+
+    This is the expensive thing.  A binary STL on disk stores no vertex
+    sharing — each triangle carries its own three coordinate triples, so a
+    vertex touched by six faces appears six times (measured: exactly 6.0x on
+    real models).  Recovering that sharing is what `load` does, and it is a
+    precondition of edge-based algorithms rather than an optimisation: quadric
+    edge collapse works on edges, so it must know which faces meet where.
+    """
+
+    verts: np.ndarray                 # (n_verts, 3) float32
+    faces: np.ndarray                 # (n_faces, 3) int64, indices into verts
+
+
+@dataclass(frozen=True)
 class Mesh:
-    """What a file says about itself.
+    """What a file says about itself, and optionally the mesh itself.
 
     path        the file asked about
     kind        binary STL, ASCII STL, OBJ, or unknown
@@ -52,6 +86,13 @@ class Mesh:
                 without parsing** — ASCII STL and OBJ always report None
     is_valid    False when the file cannot be read as what it claims to be
     problem     why, when is_valid is False; None otherwise
+    geometry    the welded mesh, once `load` has been called; None before that
+
+    Frozen, and every operation returns a new one.  `load` does not fill in
+    geometry on the mesh you hand it — it gives you back a second mesh that has
+    it.  That is what keeps the cheap object cheap: a `Mesh` sitting in a queue
+    stays a couple of hundred bytes no matter what a worker does with its own
+    copy elsewhere.
     """
 
     path: str
@@ -59,11 +100,29 @@ class Mesh:
     triangles: int | None
     is_valid: bool
     problem: str | None = None
+    geometry: Geometry | None = None
 
     @property
     def needs_conversion(self) -> bool:
         """True when this must become a binary STL before it can be measured."""
         return self.kind in (Kind.ASCII_STL, Kind.OBJ)
+
+    @property
+    def is_loaded(self) -> bool:
+        """True when the geometry is in memory and this object is large."""
+        return self.geometry is not None
+
+    def with_geometry(self, geometry: Geometry) -> Mesh:
+        """A copy carrying `geometry`, with `triangles` re-derived from it.
+
+        This is how a step that changes the mesh — decimation, repair — reports
+        its result: it returns a new `Mesh` rather than writing a file, so the
+        caller decides whether the result is worth keeping.  The triangle count
+        is taken from the faces rather than carried over, because the whole
+        point of those steps is that it changed.
+        """
+        return Mesh(self.path, self.kind, len(geometry.faces), self.is_valid,
+                    self.problem, geometry)
 
 
 def kind(path: str) -> Kind:
@@ -171,6 +230,122 @@ def probe(path: str) -> Mesh:
     if problem is not None:
         return Mesh(path, file_kind, None, False, problem)
     return Mesh(path, file_kind, count, True)
+
+
+def load(mesh: Mesh) -> Mesh:
+    """Weld `mesh` into memory and return a **new** Mesh carrying it.
+
+    Only binary STL can be loaded; anything else must be converted first, and
+    asking is a programming error rather than a data problem, so it raises.
+
+    The sort is done on the raw coordinate *bits* viewed as three uint32
+    columns rather than on float rows.  Identical float32 values have identical
+    bit patterns, so `np.lexsort` over the integer columns is exact and about
+    4x faster than `np.unique(axis=0)` while allocating less (measured
+    6.9s/461 MB -> 1.75s/383 MB on a 2.55M-triangle mesh).
+
+    Negative zero is normalised first: -0.0 and 0.0 compare equal as floats but
+    have different bits, so without this a shared vertex would split in two and
+    leave a crack that quadric edge collapse cannot close.
+    """
+    if mesh.kind is not Kind.BINARY_STL:
+        raise ValueError(
+            f"only a binary STL can be loaded, not {mesh.kind.value} "
+            f"({mesh.path}) — convert it first")
+
+    count, problem = triangle_count(mesh.path)
+    if problem is not None:
+        return Mesh(mesh.path, mesh.kind, None, False, problem)
+
+    # Each intermediate is released the moment it is no longer needed.  On a
+    # 7M-triangle mesh holding them all to the end peaks at 1000 MB against
+    # 667 MB when freed eagerly — and that mesh was OOM-killed at 2.5 GB once
+    # the decimator's own structures were added on top.
+    try:
+        with open(mesh.path, 'rb') as f:
+            f.seek(HEADER_BYTES)
+            raw = np.frombuffer(f.read(count * BYTES_PER_TRIANGLE),
+                                dtype=np.uint8)
+    except OSError as exc:
+        return Mesh(mesh.path, mesh.kind, None, False,
+                    f"{type(exc).__name__}: {exc}")
+    if len(raw) < count * BYTES_PER_TRIANGLE:
+        return Mesh(mesh.path, mesh.kind, None, False,
+                    f"short read: expected {count * BYTES_PER_TRIANGLE:,} "
+                    f"bytes, got {len(raw):,}")
+    raw = raw.reshape(count, BYTES_PER_TRIANGLE)
+
+    # Bytes 12:48 of each record are the three vertices (9 float32).
+    #
+    # `.copy()`, not `ascontiguousarray`: the buffer from `frombuffer` is
+    # read-only, and when the slice is already contiguous — which it is for a
+    # single-triangle mesh — `ascontiguousarray` returns that read-only view
+    # unchanged, and the -0.0 fold below then fails on it.  A mesh small enough
+    # to hit that is a degenerate-face test case, not a model, so the bug would
+    # have surfaced only on the strangest input.
+    coords = raw[:, 12:48].copy().reshape(-1, 12)
+    del raw
+    fview = coords.view(np.float32).reshape(-1, 3)
+    # Fold -0.0 to 0.0 in place; adding 0.0 leaves every other value untouched.
+    np.add(fview, np.float32(0.0), out=fview)
+    del fview
+
+    bits = coords.view(np.uint32).reshape(-1, 3)
+    order = np.lexsort((bits[:, 2], bits[:, 1], bits[:, 0]))
+    srt = bits[order]
+    new = np.empty(len(srt), dtype=bool)
+    new[0] = True
+    np.any(srt[1:] != srt[:-1], axis=1, out=new[1:])
+    ids = np.cumsum(new) - 1
+    inv = np.empty(len(srt), dtype=np.int64)
+    inv[order] = ids
+    del order, ids
+    verts = srt[new].view(np.float32).reshape(-1, 3).copy()
+    del srt, new, bits, coords
+
+    return mesh.with_geometry(Geometry(verts, inv.reshape(count, 3)))
+
+
+def write(mesh: Mesh, path: str) -> None:
+    """Write a loaded `mesh` out as a binary STL, with real facet normals.
+
+    The one writer.  Every step that produces geometry ends here, so there is a
+    single place that knows the byte layout.
+
+    The normals used to be left zeroed, on the reasoning that slicers recompute
+    them from the winding.  Slicers do, but viewers do not all agree: given a
+    zero normal some fall back to the winding and some to a guess, so the same
+    file could render inside-out in one program and correctly in another.  That
+    made a genuine comparison between two outputs impossible — one file with
+    normals and one without are not being drawn the same way.  Computing them
+    is a cross product over the face array, negligible beside the repair that
+    produced the mesh.
+    """
+    if mesh.geometry is None:
+        raise ValueError(f"{mesh.path} has no geometry to write — load it first")
+
+    verts, faces = mesh.geometry.verts, mesh.geometry.faces
+    n = len(faces)
+    tv = verts[faces].astype(np.float32)               # (n, 3, 3)
+    nrm = np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0])
+    ln = np.linalg.norm(nrm, axis=1)
+    # Degenerate faces have no normal to speak of; leave those zeroed rather
+    # than dividing by zero and writing NaNs into the file.
+    ok = ln > 1e-20
+    nrm[ok] /= ln[ok][:, None]
+    nrm[~ok] = 0.0
+
+    buf = np.zeros((n, BYTES_PER_TRIANGLE), dtype=np.uint8)
+    buf[:, 0:12] = nrm.astype(np.float32).view(np.uint8)
+    buf[:, 12:48] = tv.reshape(n, 9).view(np.uint8)
+
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, 'wb') as f:
+        f.write(b'\0' * 80)
+        f.write(struct.pack('<I', n))
+        f.write(buf.tobytes())
 
 
 def bounds(path: str) -> tuple[tuple[float, float, float],

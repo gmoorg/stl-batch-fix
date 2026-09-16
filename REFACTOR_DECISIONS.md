@@ -35,6 +35,14 @@ triangles, and memory is already the binding constraint (`_BYTES_PER_TRIANGLE`,
 arrays would double peak memory at every handoff. Vertex arrays are loaded and
 discarded inside each operation, as they are today.
 
+> **Amended by D15.** The type became `mesh_io.Mesh` and it *can* carry
+> geometry, in an optional field filled only by an explicit `load()`. The
+> constraint above still holds and is what D15 is built to satisfy — it is met
+> by "every operation returns a new mesh" rather than by "the type cannot hold
+> arrays". The handoff this paragraph feared does not happen: what sits in the
+> queue is always the probed mesh, and the loaded one is a different value that
+> a worker creates and drops.
+
 Values are overwritten as newer data arrives. Where a step genuinely needs the
 prior value, the DTO simply holds both — `volume` and `volume_before`, `bounds`
 and `bounds_before`. Two decisions need that: volume loss after repair (the
@@ -1659,6 +1667,80 @@ cleverest thing in the file and should survive the refactor intact.
 **Priority if any of this is acted on:** #1 and #4. The first is a real
 corruption path however narrow; the second is two files disagreeing about what
 "too small to matter" means.
+
+---
+
+## Mesh data
+
+### D15 — One `Mesh`, geometry optional, every operation returns a new one
+
+**Decided.** `mesh_io.Mesh` carries both the cheap facts and — after an
+explicit `load()` — the welded geometry. There is one writer, `mesh_io.write`.
+
+**The requirement this answers**, in the words it was set in: *"I just want
+data in one place and somehow uniformly, so we would not need to create 3
+different `write_stl` methods."*
+
+#### What was rejected, and why
+
+**A separate `writer` module** was the first proposal and was rejected on
+inspection: there is only ever one `write_binary_stl(path, verts, faces)`
+whether the arrays arrive loose or on an object, so a module for it would have
+been a module containing one function that every other module imports. The
+three call sites in the old script already called one function; they were never
+three methods.
+
+**A mutable DTO updated as work progresses** was the second, and was rejected
+for two reasons. It recreates the `_process_file_impl` shared-mutable-state
+pattern — the "state baton" that is the hardest thing in the old script to
+follow. And it couples cost to identity: the object in the queue and the object
+holding 383 MB would be the same object, so nothing could be said about what a
+queue costs.
+
+#### The shape
+
+```python
+mesh   = mesh_io.probe(path)              # ~200 bytes
+loaded = mesh_io.load(mesh)               # a NEW Mesh, geometry attached
+small  = decimator.decimate(loaded, cap)  # a NEW Mesh, via with_geometry()
+mesh_io.write(small, destination)
+```
+
+`Mesh` stays `frozen=True`. `load` does not fill geometry in on the mesh it is
+given; it returns a second mesh that has it. `with_geometry` is how an
+operation reports a changed mesh, and it re-derives `triangles` from the faces
+rather than carrying the old count over — the whole point of decimation and
+repair is that the count changed, so carrying it would be carrying a lie.
+
+**This satisfies the Target section's memory constraint rather than abandoning
+it.** That section says the DTO must hold no geometry, because "an immutable
+value carrying arrays would double peak memory at every handoff". The handoff
+it feared does not occur: what sits in the queue is always the probed mesh, and
+the loaded one is a different value a worker creates and drops. The constraint
+is met by *every operation returning a new mesh*, not by *the type being unable
+to hold arrays*.
+
+**Loading is a call, never a property.** Measured: 174 MB peak for 1M
+triangles, 383 MB for 2.55M. A worker's memory budget is decided before it
+starts, so a geometry that materialised on first attribute access could blow
+that budget from inside what reads as a field access.
+
+**Bad data is a result; only a bad request raises.** `load` on a truncated file
+returns an invalid `Mesh` with a `problem`, because a corrupt file is expected
+input for this tool. `load` on an ASCII STL raises, and so does `write` on an
+unloaded mesh — those are programming errors, the caller having skipped the
+conversion stage or the load.
+
+#### What the tests caught
+
+Porting `_weld_binary_stl` introduced a read-only-buffer bug that the original
+did not have. `np.frombuffer` returns a read-only array; the original wrapped
+the vertex slice in `np.ascontiguousarray`, which copies — *except* when the
+slice is already contiguous, which happens only for a single-triangle mesh, and
+then it returns the read-only view unchanged and the `-0.0` fold fails on it.
+The fix is a plain `.copy()`. Worth recording because of which input exposed
+it: the degenerate-face test, a one-triangle mesh no real model contains. The
+bug would otherwise have waited for the strangest file in a collection.
 
 ---
 
