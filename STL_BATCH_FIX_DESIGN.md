@@ -899,6 +899,53 @@ cannot use, against a sentinel protocol and a thread for the caller to manage.
 > attributed the wrong ones. A lock needs no reasoning about which call the
 > pool happens to serialise.
 
+`libs/meshfix.py` — repair a mesh with PyMeshFix, on the arrays:
+
+```python
+is_available()  -> bool
+repair(mesh, fill_holes=True) -> Result(mesh, ok, problem,
+                                        stdout_capture, stderr_capture,
+                                        second_elapsed)
+```
+
+Peer of `libs/blender.py`: one tool, no policy. Named `meshfix` so it does not
+shadow the library it imports. Arrays in, arrays out via `PyTMesh.load_array` /
+`return_arrays`, so there is no file boundary — the library works in
+float64/int32 and `Geometry` is float32/int64, so both directions convert.
+
+**`remove_smallest_components` is deliberately not called, and not exposed.**
+It sits in `MeshFix.repair()`'s default sequence and it is the documented
+head-deletion behaviour rather than an edge case. Measured on two disjoint
+tetrahedra, 8 faces in:
+
+| sequence | faces out |
+|---|---|
+| `remove_smallest_components()` alone | 4 |
+| the full default `repair()` | 4 |
+| fill + clean, without it | **8** |
+
+Under this pipeline `splitter.by_shells()` runs first, so every mesh arriving
+here is a single shell and the call would be a no-op at best. Omitted rather
+than offered as an off-by-default flag: a parameter that must always be False
+is one somebody eventually sets to True.
+
+**Output is captured at file-descriptor level, on both 1 and 2**, because
+PyMeshFix writes from C++ straight to the descriptors —
+`contextlib.redirect_stdout` swaps a Python object and catches none of it
+(measured: empty string). Both descriptors, and that was measured too: progress
+goes to fd 1 but every diagnostic goes to fd 2, so capturing only stdout left
+`WARNING- Some cuts were necessary to cope with non manifold configuration` and
+`WARNING- 29 double-triangles have been removed` escaping to the terminal —
+which under the TUI is the alternate screen. On a real Mandy shell: 7,193 chars
+on stdout, 123 on stderr.
+
+Captured rather than discarded for the reason `blender.Result` carries the same
+fields: PyMeshFix can run for 3,000 seconds holding the GIL, and this is the
+only sign of life.
+
+**`ok` means the tool ran, not that the mesh is clean.** PyMeshFix reports
+success on meshes that still have defects; `scanner` gives the verdict.
+
 `libs/splitter.py` — cut a mesh into independently-repairable pieces, and put
 them back:
 
@@ -1196,6 +1243,16 @@ test needs — no Blender. Covers the walk's exclusions (`stl-exported/`,
 AppleDouble sidecars), companions copied but never emitted, an existing export
 reused without reconverting, failures emitted rather than dropped, and exact
 counts with 8 workers on 40 files.
+
+`test_meshfix.py` — 23 tests for `libs/meshfix.py`, ~0.02 s. The library's
+repair quality is the library's business; what is tested is the boundary —
+arrays converted both ways, the input returned untouched on failure, identity
+carried through, and output captured off both descriptors with the descriptors
+restored afterwards (including after an exception, since a capture that does
+not restore leaves the process writing to a closed temp file and silently
+swallowing every log line). `TestShellsAreNotDeleted` pins the behaviour the
+module exists to avoid, and `test_python_level_redirect_would_not_have_worked`
+pins the reason the fd dance is there at all.
 
 `test_splitter.py` — 27 tests for `libs/splitter.py`, ~0.02 s. Index arrays
 built by hand, no files and no libraries: a tetrahedron is four faces, two
