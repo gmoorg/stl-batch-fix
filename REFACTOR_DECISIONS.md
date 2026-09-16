@@ -1926,13 +1926,38 @@ assembly; `bpy.ops.wm.ply_export` would replace it with one C call and delete
 ~100 lines of untestable in-Blender serialisation. The win is removing
 hand-rolled byte packing from a script no unit test can reach, not the seconds.
 
-**Verify before committing to it** — three things, none assumed:
+**Verified 2026-09-15** — the two measurable preconditions hold.
 
-1. that `wm.ply_export` writes **binary little-endian** PLY, not ASCII;
-2. that a PLY round trip through Blender **preserves vertex count** — Blender
-   may split vertices on import for normals or UVs, which would defeat the
-   entire point and must be measured, not hoped;
-3. whether `mesh_io` grows PLY support or it stays private to `decimator`.
+Tested on a 2562-vertex / 5120-face icosphere written as binary PLY with a real
+vertex table, round-tripped through Blender 4.0.2:
+
+| | verts | faces | v/f |
+|---|---|---|---|
+| written by us | 2562 | 5120 | 0.500 |
+| round trip, no modifier | 2562 | 5120 | 0.500 |
+| after decimate to 30% | 770 | 1536 | **0.501** |
+
+A welded closed mesh sits at v/f ~ 0.5; fully split would be 3.0. **The vertex
+table survives, decimation included** — no splitting even at the new creases
+decimation creates, which was the case most likely to break it. `wm.ply_export`
+writes binary little-endian, and the header it emits is bare (`x, y, z` plus a
+face list, no normals, no UVs), which is *why* nothing splits: there are no
+per-face attributes to disagree about, so no reason to duplicate a corner.
+
+The concern was originally stated badly — as being about mapping new vertices
+to old ones, which never happens, since Blender's output is loaded as fresh
+geometry. The real risk was narrower: if Blender split vertices, its output
+would need the same lexsort weld an STL needs, and PLY would buy nothing. It
+does not split, so the weld genuinely disappears rather than getting faster.
+
+One implementation note: Blender exports `property list uchar uint
+vertex_indices` while the test wrote `int`. Both are legal PLY — a reader must
+handle the type it finds rather than assume one.
+
+**Still open**: whether `mesh_io` grows PLY support or it stays private to
+`decimator`.
+
+**Unchanged**: this is still the 0.8% path, so the trigger below still governs.
 
 **Trigger**: do it when the Blender scripts are being touched anyway. That is
 expected during `repairer`, which uses Blender far more than decimation does
