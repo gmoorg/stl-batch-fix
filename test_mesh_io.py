@@ -143,7 +143,7 @@ class TestTriangleCount(MeshIOCase):
 class TestProbe(MeshIOCase):
 
     def test_binary_stl_reports_its_count(self):
-        found = probe(_binary_stl(self.path('a.stl')))
+        found = probe(_binary_stl(self.path('a.stl')), self.path('out.stl'))
         self.assertIs(found.kind, Kind.BINARY_STL)
         self.assertEqual(found.triangles, 4)
         self.assertTrue(found.is_valid)
@@ -157,7 +157,7 @@ class TestProbe(MeshIOCase):
         first as the cheapest work in the queue — when they may be the most
         expensive. None forces the caller to decide.
         """
-        found = probe(_ascii_stl(self.path('a.stl')))
+        found = probe(_ascii_stl(self.path('a.stl')), self.path('out.stl'))
         self.assertIs(found.kind, Kind.ASCII_STL)
         self.assertIsNone(found.triangles, "an unknown count must not be 0")
         self.assertTrue(found.is_valid)
@@ -166,7 +166,7 @@ class TestProbe(MeshIOCase):
     def test_obj_count_is_unknown_not_zero(self):
         with open(self.path('a.obj'), 'w') as f:
             f.write("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
-        found = probe(self.path('a.obj'))
+        found = probe(self.path('a.obj'), self.path('out.stl'))
         self.assertIs(found.kind, Kind.OBJ)
         self.assertIsNone(found.triangles)
         self.assertTrue(found.is_valid)
@@ -174,18 +174,19 @@ class TestProbe(MeshIOCase):
 
     def test_empty_obj_is_invalid(self):
         open(self.path('a.obj'), 'w').close()
-        found = probe(self.path('a.obj'))
+        found = probe(self.path('a.obj'), self.path('out.stl'))
         self.assertFalse(found.is_valid)
         self.assertIn('empty', found.problem)
 
     def test_truncated_binary_is_invalid(self):
-        found = probe(_binary_stl(self.path('a.stl'), declared=10_000))
+        found = probe(_binary_stl(self.path('a.stl'), declared=10_000),
+                      self.path('out.stl'))
         self.assertFalse(found.is_valid)
         self.assertIsNone(found.triangles)
         self.assertIsNotNone(found.problem)
 
     def test_missing_file_is_invalid(self):
-        found = probe(self.path('nope.stl'))
+        found = probe(self.path('nope.stl'), self.path('out.stl'))
         self.assertIs(found.kind, Kind.UNKNOWN)
         self.assertFalse(found.is_valid)
 
@@ -194,11 +195,11 @@ class TestProbe(MeshIOCase):
         many = _TETRA * 25_000                       # 100k triangles, ~5 MB
         path = _binary_stl(self.path('big.stl'), triangles=many)
         self.assertGreater(os.path.getsize(path), 4_000_000)
-        found = probe(path)
+        found = probe(path, self.path('out.stl'))
         self.assertEqual(found.triangles, 100_000)
 
     def test_mesh_is_immutable(self):
-        found = Mesh('/a/b.stl', Kind.BINARY_STL, 4, True)
+        found = Mesh('/a/b.stl', '/out/b.stl', Kind.BINARY_STL, 4, True)
         with self.assertRaises(Exception):
             found.triangles = 9
 
@@ -246,12 +247,12 @@ class TestLoad(MeshIOCase):
 
     def test_a_probed_mesh_has_no_geometry(self):
         """The cheap object must stay cheap — this is the whole split."""
-        found = probe(_binary_stl(self.path('a.stl')))
+        found = probe(_binary_stl(self.path('a.stl')), self.path('out.stl'))
         self.assertIsNone(found.geometry)
         self.assertFalse(found.is_loaded)
 
     def test_load_returns_a_new_mesh_and_leaves_the_original_alone(self):
-        probed = probe(_binary_stl(self.path('a.stl')))
+        probed = probe(_binary_stl(self.path('a.stl')), self.path('out.stl'))
         loaded = load(probed)
         self.assertIsNot(loaded, probed)
         self.assertTrue(loaded.is_loaded)
@@ -260,14 +261,14 @@ class TestLoad(MeshIOCase):
 
     def test_vertices_are_welded_not_duplicated(self):
         """A tetrahedron has 12 corner slots on disk but only 4 vertices."""
-        loaded = load(probe(_binary_stl(self.path('a.stl'))))
+        loaded = load(probe(_binary_stl(self.path('a.stl')), self.path('out.stl')))
         self.assertEqual(len(loaded.geometry.faces), 4)
         self.assertEqual(len(loaded.geometry.verts), 4,
                          "the vertices were not welded")
 
     def test_faces_index_the_right_vertices(self):
         """Welding must preserve the geometry, not just the counts."""
-        loaded = load(probe(_binary_stl(self.path('a.stl'))))
+        loaded = load(probe(_binary_stl(self.path('a.stl')), self.path('out.stl')))
         g = loaded.geometry
         rebuilt = {tuple(sorted(tuple(round(c, 6) for c in g.verts[i])
                                 for i in face)) for face in g.faces}
@@ -286,26 +287,29 @@ class TestLoad(MeshIOCase):
             ((-0.0, -0.0, -0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
         )
         loaded = load(probe(_binary_stl(self.path('z.stl'),
-                                        triangles=triangles)))
+                                        triangles=triangles),
+                            self.path('out.stl')))
         self.assertEqual(len(loaded.geometry.verts), 4,
                          "-0.0 did not weld with 0.0")
 
     def test_triangle_count_comes_from_the_geometry(self):
         many = _TETRA * 1000
-        loaded = load(probe(_binary_stl(self.path('m.stl'), triangles=many)))
+        loaded = load(probe(_binary_stl(self.path('m.stl'), triangles=many),
+                            self.path('out.stl')))
         self.assertEqual(loaded.triangles, 4000)
 
     def test_a_truncated_file_loads_as_invalid_not_an_exception(self):
         """Bad data is a result; only a bad request raises."""
         path = _binary_stl(self.path('a.stl'), declared=10_000)
-        result = load(Mesh(path, Kind.BINARY_STL, 10_000, True))
+        result = load(Mesh(path, self.path('out.stl'), Kind.BINARY_STL,
+                           10_000, True))
         self.assertFalse(result.is_valid)
         self.assertIsNone(result.geometry)
         self.assertIsNotNone(result.problem)
 
     def test_loading_a_non_binary_mesh_raises(self):
         """Asking is a programming error — it should have been converted."""
-        ascii_mesh = probe(_ascii_stl(self.path('a.stl')))
+        ascii_mesh = probe(_ascii_stl(self.path('a.stl')), self.path('out.stl'))
         with self.assertRaises(ValueError):
             load(ascii_mesh)
 
@@ -314,10 +318,10 @@ class TestWrite(MeshIOCase):
 
     def _round_trip(self, triangles=_TETRA):
         src = _binary_stl(self.path('in.stl'), triangles=triangles)
-        loaded = load(probe(src))
         dst = self.path('out.stl')
-        write(loaded, dst)
-        return loaded, probe(dst)
+        loaded = load(probe(src, dst))
+        write(loaded)
+        return loaded, probe(dst, dst)
 
     def test_round_trip_preserves_the_triangle_count(self):
         loaded, written = self._round_trip()
@@ -355,7 +359,7 @@ class TestWrite(MeshIOCase):
         """A zero-area face has no normal; NaNs in the file break slicers."""
         degenerate = (((0, 0, 0), (1, 0, 0), (1, 0, 0)),)
         src = _binary_stl(self.path('d.stl'), triangles=degenerate)
-        write(load(probe(src)), self.path('out.stl'))
+        write(load(probe(src, self.path('out.stl'))))
         with open(self.path('out.stl'), 'rb') as f:
             f.seek(HEADER_BYTES)
             normal = _struct.unpack_from('<3f', f.read(BYTES_PER_TRIANGLE), 0)
@@ -363,23 +367,23 @@ class TestWrite(MeshIOCase):
         self.assertFalse(any(math.isnan(c) for c in normal))
 
     def test_write_creates_the_parent_directory(self):
-        loaded = load(probe(_binary_stl(self.path('in.stl'))))
         dst = self.path(os.path.join('deep', 'deeper', 'out.stl'))
-        write(loaded, dst)
+        loaded = load(probe(_binary_stl(self.path('in.stl')), dst))
+        write(loaded)
         self.assertTrue(os.path.exists(dst))
 
     def test_writing_an_unloaded_mesh_raises(self):
         """Rather than silently writing a zero-triangle file."""
-        probed = probe(_binary_stl(self.path('in.stl')))
+        probed = probe(_binary_stl(self.path('in.stl')), self.path('out.stl'))
         with self.assertRaises(ValueError):
-            write(probed, self.path('out.stl'))
+            write(probed)
 
 
 class TestWithGeometry(MeshIOCase):
     """How a decimator or repairer reports a changed mesh."""
 
     def test_with_geometry_recounts_the_triangles(self):
-        loaded = load(probe(_binary_stl(self.path('a.stl'))))
+        loaded = load(probe(_binary_stl(self.path('a.stl')), self.path('out.stl')))
         fewer = Geometry(loaded.geometry.verts, loaded.geometry.faces[:2])
         changed = loaded.with_geometry(fewer)
         self.assertEqual(changed.triangles, 2,
@@ -388,7 +392,7 @@ class TestWithGeometry(MeshIOCase):
 
     def test_the_path_is_carried_over(self):
         """A changed mesh still knows which file it came from."""
-        loaded = load(probe(_binary_stl(self.path('a.stl'))))
+        loaded = load(probe(_binary_stl(self.path('a.stl')), self.path('out.stl')))
         changed = loaded.with_geometry(loaded.geometry)
         self.assertEqual(changed.path, loaded.path)
 

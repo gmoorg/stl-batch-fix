@@ -93,12 +93,12 @@ class DecimatorCase(unittest.TestCase):
         """A loaded Mesh built from the shared sphere."""
         path = _write_stl(os.path.join(self.dir, 'sphere.stl'),
                           self.verts, self.faces)
-        return load(probe(path))
+        return load(probe(path, path + '.out'))
 
     def probed(self):
         path = _write_stl(os.path.join(self.dir, 'sphere.stl'),
                           self.verts, self.faces)
-        return probe(path)
+        return probe(path, path + '.out')
 
 
 class TestAvailability(DecimatorCase):

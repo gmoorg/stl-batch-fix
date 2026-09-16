@@ -5,7 +5,7 @@ welds a mesh or builds connectivity.  That is deliberate: these answers decide
 whether a file is queued at all and in what order, so they must be cheap enough
 to ask about every file in a collection before any work starts.
 
-    probe(path) -> Mesh(path, kind, triangles, is_valid, problem)
+    probe(path, destination) -> Mesh(path, destination, kind, triangles, ...)
 
 The one rule worth stating up front: **an unknown count is None, never zero.**
 An ASCII STL has no triangle count in its header and an OBJ has no header at
@@ -15,7 +15,7 @@ sort as the cheapest work in the queue when they may be the most expensive.
 Geometry — the expensive half — lives behind an explicit step:
 
     loaded = load(mesh)            # a NEW Mesh, with .geometry attached
-    write(loaded, destination)
+    write(loaded)                  # to its own destination
 
 `Mesh` is frozen and every operation returns a new one, so a mesh in a queue
 can never quietly have become a 400 MB object while it sat there.  The two
@@ -80,7 +80,12 @@ class Geometry:
 class Mesh:
     """What a file says about itself, and optionally the mesh itself.
 
-    path        the file asked about
+    path        the file this mesh came from
+    destination where its repaired result belongs.  **Required**, because the
+                marker names the indicator scan looks for are derived from it
+                (`<base>.failed.stl` and friends) — two derivations would mean
+                two spellings, and a rerun would silently reprocess everything.
+                One field, one source of truth.
     kind        binary STL, ASCII STL, OBJ, or unknown
     triangles   count from the header, or **None when it cannot be known
                 without parsing** — ASCII STL and OBJ always report None
@@ -96,6 +101,7 @@ class Mesh:
     """
 
     path: str
+    destination: str
     kind: Kind
     triangles: int | None
     is_valid: bool
@@ -121,8 +127,21 @@ class Mesh:
         is taken from the faces rather than carried over, because the whole
         point of those steps is that it changed.
         """
-        return Mesh(self.path, self.kind, len(geometry.faces), self.is_valid,
-                    self.problem, geometry)
+        return Mesh(self.path, self.destination, self.kind,
+                    len(geometry.faces), self.is_valid, self.problem, geometry)
+
+
+    def with_destination(self, destination: str) -> Mesh:
+        """A copy bound for a different output.
+
+        `with_geometry` is for a step that *transforms* a mesh — same file,
+        changed geometry — so it carries the destination across unchanged.
+        A split is the other shape: one input becomes several outputs, and each
+        needs its own destination or their markers collide.  This is how a
+        part gets one.
+        """
+        return Mesh(self.path, destination, self.kind, self.triangles,
+                    self.is_valid, self.problem, self.geometry)
 
 
 def kind(path: str) -> Kind:
@@ -198,8 +217,13 @@ def triangle_count(path: str) -> tuple[int, str | None]:
     return count, None
 
 
-def probe(path: str) -> Mesh:
+def probe(path: str, destination: str) -> Mesh:
     """Everything a queue needs to know about a file, cheaply.
+
+    `destination` is where the repaired result belongs.  It is required rather
+    than derived here because deriving it is the caller's policy — the output
+    tree layout, the OBJ-becomes-STL rule — and `indicators` must look for
+    markers at exactly the same spelling this mesh will be written to.
 
     Reads at most a few hundred bytes.  Never parses geometry, so the cost is
     the same for a 5 MB file and a 700 MB one — which is what makes it usable
@@ -208,28 +232,30 @@ def probe(path: str) -> Mesh:
     file_kind = kind(path)
 
     if file_kind is Kind.UNKNOWN:
-        return Mesh(path, file_kind, None, False, "unreadable or empty")
+        return Mesh(path, destination, file_kind, None, False,
+                    "unreadable or empty")
 
     if file_kind is Kind.OBJ:
         try:
             empty = os.path.getsize(path) == 0
         except OSError as exc:
-            return Mesh(path, file_kind, None, False, str(exc))
+            return Mesh(path, destination, file_kind, None, False, str(exc))
         if empty:
-            return Mesh(path, file_kind, None, False, "OBJ file is empty")
+            return Mesh(path, destination, file_kind, None, False,
+                        "OBJ file is empty")
         # No count without parsing; Blender validates at import.
-        return Mesh(path, file_kind, None, True)
+        return Mesh(path, destination, file_kind, None, True)
 
     if file_kind is Kind.ASCII_STL:
         # Counting would mean scanning the whole file for `facet` lines, which
         # is the expense this module exists to avoid.  It is converted before
         # it is queued, and the conversion's output is what gets measured.
-        return Mesh(path, file_kind, None, True)
+        return Mesh(path, destination, file_kind, None, True)
 
     count, problem = triangle_count(path)
     if problem is not None:
-        return Mesh(path, file_kind, None, False, problem)
-    return Mesh(path, file_kind, count, True)
+        return Mesh(path, destination, file_kind, None, False, problem)
+    return Mesh(path, destination, file_kind, count, True)
 
 
 def load(mesh: Mesh) -> Mesh:
@@ -255,7 +281,8 @@ def load(mesh: Mesh) -> Mesh:
 
     count, problem = triangle_count(mesh.path)
     if problem is not None:
-        return Mesh(mesh.path, mesh.kind, None, False, problem)
+        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
+                    problem)
 
     # Each intermediate is released the moment it is no longer needed.  On a
     # 7M-triangle mesh holding them all to the end peaks at 1000 MB against
@@ -267,10 +294,10 @@ def load(mesh: Mesh) -> Mesh:
             raw = np.frombuffer(f.read(count * BYTES_PER_TRIANGLE),
                                 dtype=np.uint8)
     except OSError as exc:
-        return Mesh(mesh.path, mesh.kind, None, False,
+        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
                     f"{type(exc).__name__}: {exc}")
     if len(raw) < count * BYTES_PER_TRIANGLE:
-        return Mesh(mesh.path, mesh.kind, None, False,
+        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
                     f"short read: expected {count * BYTES_PER_TRIANGLE:,} "
                     f"bytes, got {len(raw):,}")
     raw = raw.reshape(count, BYTES_PER_TRIANGLE)
@@ -306,11 +333,14 @@ def load(mesh: Mesh) -> Mesh:
     return mesh.with_geometry(Geometry(verts, inv.reshape(count, 3)))
 
 
-def write(mesh: Mesh, path: str) -> None:
-    """Write a loaded `mesh` out as a binary STL, with real facet normals.
+def write(mesh: Mesh) -> None:
+    """Write a loaded `mesh` to its own destination, as a binary STL.
 
     The one writer.  Every step that produces geometry ends here, so there is a
     single place that knows the byte layout.
+
+    There is no `path` argument: the mesh carries its destination, so a caller
+    cannot write it somewhere the indicator scan will not look for its markers.
 
     The normals used to be left zeroed, on the reasoning that slicers recompute
     them from the winding.  Slicers do, but viewers do not all agree: given a
@@ -323,6 +353,7 @@ def write(mesh: Mesh, path: str) -> None:
     """
     if mesh.geometry is None:
         raise ValueError(f"{mesh.path} has no geometry to write — load it first")
+    path = mesh.destination
 
     verts, faces = mesh.geometry.verts, mesh.geometry.faces
     n = len(faces)

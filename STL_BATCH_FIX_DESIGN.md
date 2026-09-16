@@ -899,6 +899,47 @@ cannot use, against a sentinel protocol and a thread for the caller to manage.
 > attributed the wrong ones. A lock needs no reasoning about which call the
 > pool happens to serialise.
 
+`libs/splitter.py` — cut a mesh into independently-repairable pieces, and put
+them back:
+
+```python
+by_shells(mesh, min_faces=100, name=...) -> tuple[Mesh, ...]
+by_seams(mesh,  min_faces=100, name=...) -> tuple[Mesh, ...]
+merge(parts, destination=...)            -> Mesh
+```
+
+Geometry only. `scanner` finds what could be cut, this does the cutting, and
+the caller sequences them — nothing here decides *whether* to split, repairs
+anything, or touches the filesystem.
+
+**A mesh that does not split comes back as a list of one.** That is the point
+rather than a convenience: it removes the "did it split?" branch from every
+caller, so the pipeline reads as one path with no conditionals —
+
+```python
+parts = splitter.by_shells(mesh)
+parts = [p for part in parts for p in splitter.by_seams(part)]
+parts = [repairer.repair(p) for p in parts]
+mesh  = splitter.merge(parts, destination=mesh.destination)
+```
+
+— and nothing downstream learns whether it is looking at a whole model or a
+fragment. The old code threaded an `is_part` flag through nineteen call sites
+to answer that question; there is nothing left to ask.
+
+**Shells first, then seams.** Shell components are maximal, so a shell part can
+never need shell-splitting again. Seam regions are cut on a different criterion
+— winding, not connectivity — so one shell can still hold several, which is why
+the second pass runs over the parts of the first. The reverse order would have
+seam detection reasoning across pieces that are not even touching.
+
+**Each part carries its own destination**, because a split is one input
+becoming several outputs and every marker the indicator scan looks for hangs
+off that path — parts sharing a destination would share a `.failed.stl`.
+Naming is injected (`<base>.part.N.stl` by default) since output layout is the
+caller's policy. `merge` takes the parent's destination explicitly: inheriting
+part 0's would write the whole model to a part's path.
+
 `libs/scanner.py` — count a mesh's topological defects, from the geometry in
 memory. Four questions off one edge map:
 
@@ -1155,6 +1196,23 @@ test needs — no Blender. Covers the walk's exclusions (`stl-exported/`,
 AppleDouble sidecars), companions copied but never emitted, an existing export
 reused without reconverting, failures emitted rather than dropped, and exact
 counts with 8 workers on 40 files.
+
+`test_splitter.py` — 27 tests for `libs/splitter.py`, ~0.02 s. Index arrays
+built by hand, no files and no libraries: a tetrahedron is four faces, two
+disjoint tetrahedra are two components, and every expected number is derivable
+on paper.
+
+**The seam fixture is synthetic of necessity.** No mesh in the collection
+exercises `by_seams`'s cutting path — Mandy's head turned out to be its own
+shell, and Amidara's 129 closed loops are 3-to-6 vertex rings that enclose
+nothing and disconnect nothing. So the fixture is a tube with one half's
+winding reversed, which gives 12 seam edges of degree 2 forming one closed
+loop. A flat strip will not do, and that was measured rather than assumed: it
+yields 1 seam edge with two degree-1 vertices — an open chain terminating on
+the strip's own boundary, which is noise by the module's own rule.
+`test_the_fixture_really_has_a_closed_seam_loop` guards that, and earned its
+place immediately: the first version of the fixture *was* the strip, and four
+tests passed vacuously against it.
 
 `test_scanner.py` — 46 tests for `libs/scanner.py`, ~7 s. Fixtures are built by
 hand from index arrays rather than read from files, because every expected

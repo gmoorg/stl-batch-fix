@@ -109,7 +109,7 @@ def prepare(source_root: str,
     """
     copy_set = frozenset(e.lower() for e in copy_extensions)
     summary = Summary()
-    pending: list[tuple[str, str]] = []          # (source, export destination)
+    pending: list[tuple[str, str, str]] = []   # (source, export path, destination)
 
     # One lock for both the consumer and the counters.  The conversion phase
     # runs several workers and `Pool` serialises only its selector, so
@@ -138,17 +138,20 @@ def prepare(source_root: str,
             continue
 
         if found.indicator is Indicator.EXPORT_READY:
-            # Converted on an earlier run; measure the conversion, not the source.
-            emit_one(mesh_io.probe(found.path))
+            # Converted on an earlier run; measure the conversion, not the
+            # source — but it is still bound for the output tree, not for the
+            # export folder it happens to be sitting in.
+            emit_one(mesh_io.probe(found.path, destination))
             continue
 
         if found.indicator is not Indicator.PROCESS:
             summary.skipped += 1          # already fixed, or a marker
             continue
 
-        probed = mesh_io.probe(source)
+        probed = mesh_io.probe(source, destination)
         if probed.needs_conversion:
-            pending.append((source, indicators.export_path(source, source_root)))
+            pending.append((source, indicators.export_path(source, source_root),
+                            destination))
             continue
 
         emit_one(probed)
@@ -157,9 +160,10 @@ def prepare(source_root: str,
         return summary
 
     if convert is None:
-        for source, _ in pending:
+        for source, _, destination in pending:
             summary.conversion_failed += 1
-            emit_one(Mesh(source, mesh_io.kind(source), None, False,
+            emit_one(Mesh(source, destination, mesh_io.kind(source), None,
+                          False,
                           "needs conversion but no converter was supplied"))
         return summary
 
@@ -167,11 +171,11 @@ def prepare(source_root: str,
         return pending.pop(0) if pending else None
 
     def convert_one(item):
-        source, destination = item
-        ok, path = convert(source, destination)
-        result = (mesh_io.probe(path) if ok
-                  else Mesh(source, mesh_io.kind(source), None, False,
-                            "conversion failed"))
+        source, export, destination = item
+        ok, path = convert(source, export)
+        result = (mesh_io.probe(path, destination) if ok
+                  else Mesh(source, destination, mesh_io.kind(source), None,
+                            False, "conversion failed"))
         # Everything shared goes through emit_one's lock, including these
         # counters.  Two cleverer arrangements were tried first and both were
         # wrong: counting inside the pool's selector looks free, since the pool

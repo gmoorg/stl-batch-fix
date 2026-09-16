@@ -33,8 +33,8 @@ def mesh(verts, faces, path='/test.stl'):
     """A loaded Mesh from plain lists."""
     geometry = Geometry(np.array(verts, dtype=np.float32),
                         np.array(faces, dtype=np.int64).reshape(-1, 3))
-    return Mesh(path, Kind.BINARY_STL, len(geometry.faces), True, None,
-                geometry)
+    return Mesh(path, path.replace('.stl', '.out.stl'), Kind.BINARY_STL,
+                len(geometry.faces), True, None, geometry)
 
 
 def tetra(faces=None):
@@ -42,7 +42,7 @@ def tetra(faces=None):
 
 
 def unloaded():
-    return Mesh('/test.stl', Kind.BINARY_STL, 4, True)
+    return Mesh('/test.stl', '/test.out.stl', Kind.BINARY_STL, 4, True)
 
 
 class TestScan(unittest.TestCase):
