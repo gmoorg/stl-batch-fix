@@ -1954,10 +1954,41 @@ One implementation note: Blender exports `property list uchar uint
 vertex_indices` while the test wrote `int`. Both are legal PLY — a reader must
 handle the type it finds rather than assume one.
 
-**Still open**: whether `mesh_io` grows PLY support or it stays private to
-`decimator`.
+#### Scope, settled 2026-09-15 — the Blender boundary only
 
-**Unchanged**: this is still the 0.8% path, so the trigger below still governs.
+**Do it**, and not on cost grounds. The refactor's justification has never been
+runtime; it is that the old script accumulated things nobody can verify. The
+hand-packed `struct.pack_into` loop in `decimate.blender` is exactly that —
+about 100 lines of byte assembly inside a script no unit test can reach,
+writing a format that needs re-welding on the way back. `wm.ply_export` deletes
+that whole category. Declining it because it only helps six files would apply a
+standard applied nowhere else in this refactor; the "do it when the scripts are
+touched anyway" trigger was deferral dressed as discipline.
+
+**Scope is the scratch boundary and nothing else.** A wider version was
+proposed and dropped the same evening: supporting PLY as an *input* format, the
+way OBJ is supported. It was rejected on the only ground that matters — there
+has never been a PLY in the collection, so it solves a problem that does not
+exist. Explicitly out of scope:
+
+- `indicators` learning a `.ply` extension
+- `converter` routing PLY through the conversion stage
+- `mesh_io.kind()` recognising PLY as a source format
+- parsing arbitrary PLY dialects — ASCII, big-endian, extra properties, quads
+
+**In scope**: a narrow writer and reader for one boundary. It must handle our
+own output and what Blender emits, which is now known exactly — binary
+little-endian, bare `x`/`y`/`z`, and `property list uchar uint vertex_indices`.
+Anything else may be refused rather than guessed at.
+
+**Where it lives**: probably `mesh_io`, since `repairer` needs the same
+boundary and will use Blender more than decimation does — but it is a private
+internal format there, not general PLY support.
+
+**The work**: `mesh_io` gains a PLY writer and reader; `decimate.blender` swaps
+its packing loop for `wm.ply_import` / `wm.ply_export`; `_decimate_blender`
+changes its temp extensions. Tests both sides, including a real Blender round
+trip in `test_blender` rather than only the synthetic check already run.
 
 **Trigger**: do it when the Blender scripts are being touched anyway. That is
 expected during `repairer`, which uses Blender far more than decimation does
