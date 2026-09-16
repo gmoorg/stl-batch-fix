@@ -898,6 +898,46 @@ cannot use, against a sentinel protocol and a thread for the caller to manage.
 > attributed the wrong ones. A lock needs no reasoning about which call the
 > pool happens to serialise.
 
+`libs/scanner.py` — count a mesh's topological defects, from the geometry in
+memory. Four questions off one edge map:
+
+```python
+scan(mesh)                      -> Scan(open_edges, non_manifold, faces, degenerate)
+open_loops(mesh)                -> the open boundaries, largest first, measured
+open_loops_are_printable(mesh, min_layer)
+winding_seams(mesh)             -> (seam_edges, closed_loops)
+shells(mesh) / shell_count(mesh, min_faces)
+```
+
+**Why it is one module.** A defect count is the pipeline's decision variable,
+not a report: it decides whether a repair is needed, whether one worked, and
+whether a file may be written out as finished. The old pipeline asked after
+decimation, after Blender, and twice around PyMeshFix — eight call sites, each
+re-reading the file and rebuilding the edge map. Building that map is the work;
+all four questions come off it.
+
+**The counting rule**, stated once so it cannot drift: an edge used by exactly
+one face is **open**, by exactly two is **sound**, by three or more is
+**non-manifold**.
+
+**No triangle ceiling.** `scan_mesh_errors` returned `(-1, -1)` above
+`_LARGE_MESH_TRI_LIMIT = 2_000_000` and `_post_verify` turned that into
+"UNVERIFIED" — on exactly the meshes that are hardest to scan *and* most likely
+to be broken. With welded faces the indices are the identity, so the old
+192-bit packed keys, the `-0.0` folding and the ceiling all go away together.
+
+**An unloaded mesh raises rather than reporting clean.** This is the same
+hazard `_post_verify`'s three-valued return was added to kill: an unscannable
+mesh returning `(0, 0)` reads as verified-clean at every call site, and files
+were written out as finished having been checked by nothing. Here the case
+cannot be represented.
+
+**`is_clean` stays mathematical; printability is a separate question.** No open
+edges and no non-manifold edges is the standard; whether a mesh that fails it
+is nevertheless printable is `open_loops_are_printable`, which measures each
+hole's *span* against the layer height. Keeping those apart is what stopped the
+pipeline destroying a model to close pinholes no printer could express.
+
 `libs/decimator.py` — reduce a mesh to a face budget, by whichever library is
 available. One entry point, three implementations behind it:
 
@@ -1101,6 +1141,23 @@ test needs — no Blender. Covers the walk's exclusions (`stl-exported/`,
 AppleDouble sidecars), companions copied but never emitted, an existing export
 reused without reconverting, failures emitted rather than dropped, and exact
 counts with 8 workers on 40 files.
+
+`test_scanner.py` — 31 tests for `libs/scanner.py`, ~6 s. Fixtures are built by
+hand from index arrays rather than read from files, because every expected
+count has to be derivable on paper: a tetrahedron has 4 faces and 6 edges each
+used twice; remove one face and exactly 3 edges become open. A test whose
+expected number cannot be justified without running the code is testing
+nothing. Most of the runtime is one deliberate case — a 2.1M-triangle scan,
+just past the limit where the old file-based scanner gave up.
+
+`winding_seams` additionally carries a **differential test against the original
+dict-based implementation**, kept verbatim in the test file as the oracle: 400
+random meshes, including non-manifold and degenerate ones, must agree exactly.
+That check earned its place — the first vectorised rewrite compared
+`forward[:-1] == forward[1:]` (length n-1) against a mask of length n and
+raised on every mesh with a seam candidate, 200 of 200 trials. It was caught
+because the differential check ran *before* any unit tests were written; tests
+written first would have encoded the broken behaviour.
 
 `test_decimator.py` — 22 tests for `libs/decimator.py`, ~0.5 s. The three rungs
 are third-party quadric edge collapse, so what is tested is the *ladder*, not
