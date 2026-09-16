@@ -2187,3 +2187,40 @@ exactly, so the floor behaves as recorded on real data.
 How many files in the collection carry **closed seam loops**. Detection being
 upfront is settled, so this does not gate that — but if the answer is 200
 rather than 6, the splitting stage needs a different design than if it is rare.
+
+### Open — scratch files must not outlive an interrupted run
+
+**Raised 2026-09-15, not yet built.** Applies to the Blender boundary temps
+(the PLY input we hand Blender, and the output we read back).
+
+**What is already handled.** `_decimate_blender` puts both temps in a
+`tempfile.mkdtemp` and removes the directory in a `finally`, so an ordinary
+failure — a timeout, a non-zero exit, an unreadable output — cleans up. There
+is a test asserting no `decimate-*` directory survives. This is already better
+than the old `dst + '.decimate.stl'`, which wrote into the *output tree* and
+kept the file until the end of the pipeline.
+
+**The gap: Ctrl+C.** D14 has the pool deliberately not catching
+`KeyboardInterrupt`. A `finally` normally runs on interrupt, but if it arrives
+while a thread is inside `Runner.run`, or during the `finally` itself, the
+directory survives. That is also the likeliest moment for it: the run is
+interrupted *because* something is wrong, which is when a large mesh is sitting
+in scratch. Same exposure for an OOM kill or power loss, where no `finally`
+runs at all.
+
+**Size makes it more than cosmetic**: a 5M-triangle mesh as PLY is roughly
+80 MB, and several workers interrupted mid-flight leave a few hundred MB
+orphaned. Under `/tmp` it is at least invisible to the output tree and cleared
+on reboot — but the machine has no swap and an M.2 SSD, so silently accumulating
+scratch is not free.
+
+**Candidate fix, not agreed**: a *known* scratch root rather than per-call
+`mkdtemp` — swept once at startup, before any work begins. That covers every
+exit path uniformly (interrupt, OOM kill, crash, power loss) instead of trying
+to make each one orderly. Same reasoning as `~parts` in the old code: make
+stale state structurally reachable so it can be cleaned, rather than relying on
+an orderly exit.
+
+Open sub-questions: where the root lives (a fixed subdirectory of the output
+tree, or of the system temp directory), and whether a sweep must avoid deleting
+scratch belonging to a *concurrently running* second instance.
