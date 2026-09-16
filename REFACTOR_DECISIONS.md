@@ -2435,3 +2435,56 @@ the slicer is where support is decided, and a repair tool silently deleting a
 correctly-modelled eyeball would be worse than saying "three loose shells, none
 supported, check before printing". Deleting geometry because it might need
 support is exactly the class of over-reach the volume guard exists to catch.
+
+### D18 — Self-edges are not winding seams (and what that says about oracles)
+
+**Fixed 2026-09-16.** `seam_edges` drops edges whose two endpoints are the same
+vertex. They are degenerate-face artifacts, and `scan().degenerate` is where
+they belong.
+
+**The bug.** A face with two identical corners emits an edge `(v, v)`. Two such
+faces sharing it satisfy the "exactly two faces, same direction" seam test — a
+self-edge has no direction to disagree about — and then `adjacency[v] = [v, v]`
+has length 2, which satisfies the "every vertex has exactly two seam edges"
+closed-loop test. **A single point was reported as a closed loop.**
+
+That is not a cosmetic miscount. A closed seam loop is the pipeline's strongest
+signal that a mesh must be split before PyMeshFix touches it, so zero-area
+triangles were about to route clean models down the seam-split path.
+
+**Found on real data.** A collection scan produced rows where the seam-edge
+count exactly equalled the loop count — 115/115, 106/106, 77/77. A closed loop
+needs at least three edges, so those could not be real. On
+`Hanna and Chewie/Hair.stl`: 106 seam edges, **all 106 self-edges**, 106 phantom
+loops, on a mesh with 250 degenerate faces and no winding seam at all. Of the
+rows reporting any seam, roughly half showed this 1:1 signature.
+
+#### The methodological point, which matters more than the bug
+
+**The original `find_winding_seams` has the same flaw**, so the 400-mesh
+differential test could never have caught it. Both sides agreed, and both were
+wrong.
+
+That is a limit of oracle-based testing worth stating plainly, because D17
+introduced the technique and recommended it: **a differential test proves
+agreement, not correctness.** It is the right tool for "did my rewrite change
+behaviour" and no tool at all for "was the behaviour right". When the oracle is
+a working implementation, inherited bugs are exactly the class it cannot see.
+
+Both oracle methods in `test_scanner.py` are now **deliberately corrected** to
+filter self-edges, with a comment saying so, and `TestSelfEdges` pins the
+behaviour directly rather than by comparison. Correcting the oracle rather than
+weakening the assertion keeps the differential test meaningful for everything
+else.
+
+#### A second lesson, from the fix's own test
+
+The first version of `test_a_real_seam_is_still_found_alongside_degenerate_faces`
+expected 3 seam edges and got 2 — and **the code was right, the fixture was
+wrong**. The degenerate faces had been placed on vertex 1, which the reversed
+face also touches; `[1, 1, 2]` emits the ordinary edge `(1, 2)` as well as the
+self-edge, pushing that edge to four users and legitimately out of the
+"exactly two faces" test. The mesh genuinely had two seam edges.
+
+Worth recording because the instinct on a red test is to suspect the code. Here
+the test was asserting something untrue about its own fixture.

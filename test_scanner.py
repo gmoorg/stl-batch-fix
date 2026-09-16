@@ -193,8 +193,19 @@ class TestWindingSeams(unittest.TestCase):
         for a, b, c in faces:
             for u, w in ((a, b), (b, c), (c, a)):
                 edge_dir[(min(u, w), max(u, w))].append(u < w)
-        return [k for k, dirs in edge_dir.items()
+        seam = [k for k, dirs in edge_dir.items()
                 if len(dirs) == 2 and dirs[0] == dirs[1]]
+        # The oracle is corrected here, deliberately. The original counts
+        # self-edges (u == w) as seams: a degenerate face emits (v, v), two
+        # such faces satisfy its pair test, and `adjacency[v] = [v, v]` then
+        # satisfies its closed-loop test — so one point is reported as a loop
+        # encircling a region. Measured on Hair.stl: 106 "seam edges", all 106
+        # self-edges, 106 phantom loops, on a mesh with no winding seam at all.
+        #
+        # Left uncorrected this class of bug is invisible to a differential
+        # test, because both sides share it. Agreement is not correctness.
+        # See TestSelfEdges below, which pins the corrected behaviour directly.
+        return [(a, b) for a, b in seam if a != b]
 
     @staticmethod
     def _original(faces):
@@ -209,6 +220,10 @@ class TestWindingSeams(unittest.TestCase):
                 edge_dir[(min(u, w), max(u, w))].append(u < w)
         seam = [k for k, dirs in edge_dir.items()
                 if len(dirs) == 2 and dirs[0] == dirs[1]]
+        # Corrected for self-edges, as in `_original_edges` above — see the
+        # comment there. Without this the oracle reports a phantom closed loop
+        # for every pair of degenerate faces sharing a vertex.
+        seam = [(a, b) for a, b in seam if a != b]
         if not seam:
             return 0, 0
         adj = defaultdict(list)
@@ -248,6 +263,73 @@ class TestWindingSeams(unittest.TestCase):
             with self.subTest(trial=trial):
                 self.assertEqual(winding_seams(mesh(verts, faces)),
                                  self._original(faces))
+
+
+class TestSelfEdges(unittest.TestCase):
+    """Degenerate faces must not masquerade as winding seams.
+
+    A face with two identical corners emits an edge (v, v). Two such faces
+    sharing it pass the "exactly two faces, same direction" seam test, and then
+    `adjacency[v] = [v, v]` — length 2 — passes the "every vertex has exactly
+    two seam edges" closed-loop test. So a single point is reported as a closed
+    loop, which is the pipeline's strongest signal to split a mesh.
+
+    Found on real data, not by inspection: `Hanna and Chewie/Hair.stl` reported
+    106 seam edges in 106 closed loops. All 106 were self-edges. The mesh has
+    250 degenerate faces and no winding seam.
+
+    The original implementation has the same flaw, so the differential tests
+    above cannot catch it — they are pinned against a corrected oracle instead,
+    and these tests pin the behaviour directly.
+    """
+
+    #: One tetrahedron plus two degenerate faces sharing the self-edge (1, 1).
+    DEGENERATE_FACES = TETRA_FACES + [[1, 1, 2], [1, 1, 4]]
+    VERTS = TETRA_VERTS + [[1, 1, 1]]
+
+    def mesh(self):
+        return mesh(self.VERTS, self.DEGENERATE_FACES)
+
+    def test_a_self_edge_is_not_a_seam(self):
+        self.assertEqual(len(seam_edges(self.mesh())), 0)
+
+    def test_a_self_edge_is_not_a_closed_loop(self):
+        """The consequential half: a loop means 'split this mesh'."""
+        self.assertEqual(winding_seams(self.mesh()), (0, 0))
+
+    def test_no_returned_edge_ever_joins_a_vertex_to_itself(self):
+        rng = np.random.default_rng(7)
+        for trial in range(100):
+            n_verts = int(rng.integers(3, 12))
+            faces = rng.integers(0, n_verts, size=(int(rng.integers(2, 30)), 3))
+            verts = rng.random((n_verts, 3)).astype(np.float32)
+            edges = seam_edges(mesh(verts, faces.astype(np.int64)))
+            with self.subTest(trial=trial):
+                if len(edges):
+                    self.assertTrue((edges[:, 0] != edges[:, 1]).all())
+
+    def test_degenerate_faces_are_still_counted_as_degenerate(self):
+        """Dropped from the seam count, not from the defect report — they are
+        a real defect, just a different one."""
+        self.assertEqual(scan(self.mesh()).degenerate, 2)
+
+    def test_a_real_seam_is_still_found_alongside_degenerate_faces(self):
+        """The filter must not suppress genuine seams on a messy mesh.
+
+        The degenerate pair is placed on vertex 4, which the reversed face does
+        not touch. An earlier version of this test put them on vertex 1 and
+        expected 3 seam edges; it got 2, and the code was right. A degenerate
+        face `[1, 1, 2]` also emits the ordinary edge (1, 2), which pushed that
+        edge to four users and so out of the "exactly two faces" seam test.
+        The mesh genuinely had two seam edges. The fixture was the bug.
+        """
+        verts = TETRA_VERTS + [[5, 5, 5], [6, 5, 5]]
+        faces = [list(f) for f in TETRA_FACES]
+        faces[3] = [faces[3][0], faces[3][2], faces[3][1]]   # a real seam
+        faces += [[4, 4, 5], [4, 4, 5]]        # degenerates, clear of the seam
+        edges, loops = winding_seams(mesh(verts, faces))
+        self.assertEqual(edges, 3, "the filter suppressed a genuine seam")
+        self.assertEqual(loops, 1)
 
 
 class TestSeamEdges(unittest.TestCase):

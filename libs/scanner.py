@@ -332,7 +332,24 @@ def seam_edges(mesh: Mesh) -> np.ndarray:
     # Of a pair, both forward (2) or neither (0) means they agree: a seam.
     is_seam = (counts == 2) & ((forward_per_edge == 2) | (forward_per_edge == 0))
 
-    return np.ascontiguousarray(unique[is_seam], dtype=np.int64)
+    found = unique[is_seam]
+    # Drop self-edges.  A degenerate face has two identical corners, so it
+    # emits an edge (v, v); two such faces sharing it satisfy the pair test
+    # above and it arrives here looking like a seam.  It then satisfies the
+    # closed-loop test too — `adjacency[v] = [v, v]` has length 2 — so a single
+    # point is reported as a closed loop encircling a region.
+    #
+    # Measured on `Hanna and Chewie/Hair.stl`: 106 "seam edges", all 106 of
+    # them self-edges, reported as 106 closed loops.  The mesh has 250
+    # degenerate faces and no winding seam at all.  That is the pipeline's
+    # strongest "split this mesh" signal, fired by zero-area triangles.
+    #
+    # The original `find_winding_seams` has the same flaw, so the differential
+    # test in `test_scanner.py` cannot catch it — agreement is not correctness
+    # when both sides share a mistake.  Degenerate faces are counted by
+    # `scan().degenerate`, which is where they belong.
+    found = found[found[:, 0] != found[:, 1]]
+    return np.ascontiguousarray(found, dtype=np.int64)
 
 
 def shells(mesh: Mesh) -> tuple[np.ndarray, ...]:
