@@ -21,7 +21,7 @@ from libs import scanner
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.scanner import (
     Loop, Scan, largest_open_loop, open_loops, open_loops_are_printable, scan,
-    shell_count, shells, winding_seams,
+    seam_edges, shell_count, shells, winding_seams,
 )
 
 #: A unit tetrahedron, consistently wound: 4 faces, 6 edges, every edge shared.
@@ -182,6 +182,21 @@ class TestWindingSeams(unittest.TestCase):
     # -- differential test against the original implementation --------------
 
     @staticmethod
+    def _original_edges(faces):
+        """The oracle's seam EDGES, as (min, max) tuples.
+
+        Same edge-direction logic as `_original` below, stopping before the
+        loop counting — so the edge list and the counts are checked against one
+        implementation rather than two that could drift apart.
+        """
+        edge_dir = defaultdict(list)
+        for a, b, c in faces:
+            for u, w in ((a, b), (b, c), (c, a)):
+                edge_dir[(min(u, w), max(u, w))].append(u < w)
+        return [k for k, dirs in edge_dir.items()
+                if len(dirs) == 2 and dirs[0] == dirs[1]]
+
+    @staticmethod
     def _original(faces):
         """`find_winding_seams` from stl_batch_fix.py, verbatim.
 
@@ -233,6 +248,74 @@ class TestWindingSeams(unittest.TestCase):
             with self.subTest(trial=trial):
                 self.assertEqual(winding_seams(mesh(verts, faces)),
                                  self._original(faces))
+
+
+class TestSeamEdges(unittest.TestCase):
+    """The edge list itself — what `split_at_seams` cuts on.
+
+    `winding_seams` now derives its count from `len(seam_edges(...))`, so the
+    differential test above proves the count is unchanged and says nothing
+    about whether the rows are right. An array with the correct length and the
+    wrong rows would pass every test in that class and cut the mesh in the
+    wrong place.
+    """
+
+    def test_a_clean_mesh_has_an_empty_array(self):
+        edges = seam_edges(tetra())
+        self.assertEqual(edges.shape, (0, 2))
+
+    def test_the_shape_and_dtype_are_what_split_expects(self):
+        faces = [list(f) for f in TETRA_FACES]
+        faces[3] = [faces[3][0], faces[3][2], faces[3][1]]
+        edges = seam_edges(mesh(TETRA_VERTS, faces))
+        self.assertEqual(edges.ndim, 2)
+        self.assertEqual(edges.shape[1], 2)
+        self.assertEqual(edges.dtype, np.int64)
+
+    def test_rows_are_sorted_low_index_first(self):
+        """`split_at_seams` tests membership with (min, max) keys."""
+        faces = [list(f) for f in TETRA_FACES]
+        faces[3] = [faces[3][0], faces[3][2], faces[3][1]]
+        edges = seam_edges(mesh(TETRA_VERTS, faces))
+        self.assertTrue((edges[:, 0] < edges[:, 1]).all())
+
+    def test_the_edges_are_the_reversed_face_s_own_edges(self):
+        """Reversing face 3 (vertices 1,2,3) must flag exactly its edges."""
+        faces = [list(f) for f in TETRA_FACES]
+        faces[3] = [faces[3][0], faces[3][2], faces[3][1]]
+        edges = seam_edges(mesh(TETRA_VERTS, faces))
+        got = {tuple(int(v) for v in row) for row in edges}
+        self.assertEqual(got, {(1, 2), (1, 3), (2, 3)})
+
+    def test_count_matches_winding_seams(self):
+        """The two functions must not drift apart."""
+        faces = [list(f) for f in TETRA_FACES]
+        faces[3] = [faces[3][0], faces[3][2], faces[3][1]]
+        m = mesh(TETRA_VERTS, faces)
+        self.assertEqual(len(seam_edges(m)), winding_seams(m)[0])
+
+    def test_it_agrees_with_the_original_edge_set(self):
+        """400 random meshes: the same EDGES, not merely the same count.
+
+        The oracle returns (min, max) tuples; compare as sets so ordering
+        differences between the two implementations do not register as
+        disagreement while a genuinely wrong edge would.
+        """
+        rng = np.random.default_rng(1)
+        for trial in range(400):
+            n_verts = int(rng.integers(4, 20))
+            n_faces = int(rng.integers(2, 40))
+            verts = rng.random((n_verts, 3)).astype(np.float32)
+            faces = rng.integers(0, n_verts, size=(n_faces, 3)).astype(np.int64)
+            with self.subTest(trial=trial):
+                got = {tuple(int(v) for v in row)
+                       for row in seam_edges(mesh(verts, faces))}
+                expected = set(TestWindingSeams._original_edges(faces))
+                self.assertEqual(got, expected)
+
+    def test_unloaded_raises(self):
+        with self.assertRaises(ValueError):
+            seam_edges(unloaded())
 
 
 class TestShells(unittest.TestCase):

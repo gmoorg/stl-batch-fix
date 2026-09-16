@@ -905,7 +905,8 @@ memory. Four questions off one edge map:
 scan(mesh)                      -> Scan(open_edges, non_manifold, faces, degenerate)
 open_loops(mesh)                -> the open boundaries, largest first, measured
 open_loops_are_printable(mesh, min_layer)
-winding_seams(mesh)             -> (seam_edges, closed_loops)
+winding_seams(mesh)             -> (seam_edge_count, closed_loops)
+seam_edges(mesh)                -> the edges themselves, (n, 2) int64
 shells(mesh) / shell_count(mesh, min_faces)
 ```
 

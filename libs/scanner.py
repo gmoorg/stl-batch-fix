@@ -256,10 +256,58 @@ def winding_seams(mesh: Mesh) -> tuple[int, int]:
     A closed loop encircles something, and PyMeshFix will delete what it
     encircles unless the mesh is split at the seam first.
     """
+    edges = seam_edges(mesh)
+    if len(edges) == 0:
+        return 0, 0
+    return len(edges), _count_closed_loops(edges)
+
+
+def _count_closed_loops(seam: np.ndarray) -> int:
+    """How many of these seam edges form closed rings.
+
+    A closed loop is a connected run where every vertex has exactly two seam
+    edges — no ends, no branches.  That is the distinction that matters: a few
+    seam edges with dangling ends are local noise that stops on its own, while
+    a closed loop encircles a region PyMeshFix will delete.
+    """
+    adjacency: dict[int, list[int]] = {}
+    for a, b in seam:
+        adjacency.setdefault(int(a), []).append(int(b))
+        adjacency.setdefault(int(b), []).append(int(a))
+
+    seen: set[int] = set()
+    loops = 0
+    for start in list(adjacency):
+        if start in seen:
+            continue
+        stack, group = [start], []
+        while stack:
+            x = stack.pop()
+            if x in seen:
+                continue
+            seen.add(x)
+            group.append(x)
+            stack.extend(adjacency[x])
+        if all(len(adjacency[x]) == 2 for x in group):
+            loops += 1
+    return loops
+
+
+def seam_edges(mesh: Mesh) -> np.ndarray:
+    """The seam edges themselves, as an `(n, 2)` array of vertex indices.
+
+    Separate from `winding_seams` on purpose.  Counting runs on every file;
+    the edge list is needed only by the few that are actually split, so the
+    common path does not pay to materialise an array it discards.  The old
+    `find_winding_seams` always built the list and took `len()` of it.
+
+    Each row is sorted low-index first, which is what `split_at_seams` needs to
+    test membership without worrying about direction.
+    """
     _require_geometry(mesh)
     faces = mesh.geometry.faces
     if len(faces) == 0:
-        return 0, 0
+        return np.zeros((0, 2), dtype=np.int64)
 
     # Keep each edge's traversal direction: `forward` says whether this face
     # walked the edge low-index to high-index.
@@ -284,34 +332,7 @@ def winding_seams(mesh: Mesh) -> tuple[int, int]:
     # Of a pair, both forward (2) or neither (0) means they agree: a seam.
     is_seam = (counts == 2) & ((forward_per_edge == 2) | (forward_per_edge == 0))
 
-    seam_edges = unique[is_seam]
-    if len(seam_edges) == 0:
-        return 0, 0
-
-    # A closed loop is a connected run of seam edges where every vertex has
-    # exactly two of them — no ends, no branches.
-    adjacency: dict[int, list[int]] = {}
-    for a, b in seam_edges:
-        adjacency.setdefault(int(a), []).append(int(b))
-        adjacency.setdefault(int(b), []).append(int(a))
-
-    seen: set[int] = set()
-    loops = 0
-    for start in list(adjacency):
-        if start in seen:
-            continue
-        stack, group = [start], []
-        while stack:
-            x = stack.pop()
-            if x in seen:
-                continue
-            seen.add(x)
-            group.append(x)
-            stack.extend(adjacency[x])
-        if all(len(adjacency[x]) == 2 for x in group):
-            loops += 1
-
-    return len(seam_edges), loops
+    return np.ascontiguousarray(unique[is_seam], dtype=np.int64)
 
 
 def shells(mesh: Mesh) -> tuple[np.ndarray, ...]:
