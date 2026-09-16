@@ -1835,6 +1835,69 @@ Not built: it is one mesh's arrays on a 0.8% path, and the pool's admission
 control already refuses work that does not fit in free memory. If a measurement
 ever shows the overlap mattering, `take()` is the answer.
 
+### Deferred — PLY for the Blender boundary
+
+**Not a decision yet.** Recorded with its trigger so it is not rediscovered
+from scratch. Extends D16's closing note; the reasoning for *why* the boundary
+exists at all is there, this is about what crosses it.
+
+**The change**: use binary PLY instead of binary STL for the temporary files
+that go to and from Blender. Only the scratch boundary — the deliverable the
+slicer opens is a separate question (see below).
+
+**Why it is better**, on the merits:
+
+| | STL | PLY |
+|---|---|---|
+| write | expand welded arrays back to 6x duplicated triangles | `verts.tobytes()` + `faces.tobytes()` |
+| read back | `frombuffer` + lexsort weld (~1.75s / 2.55M tris) | `frombuffer`, reshape, done |
+| size | 50 bytes/triangle | ~12/vertex + 13/face, roughly a third |
+
+PLY carries a vertex table, so the weld on the way back does not get faster —
+it *disappears*, because the sharing is already in the file. `Geometry` is
+already PLY's model: a vertex block and a face-index block.
+
+**Why it is not worth doing for the speed.** ~2s on 0.8% of files — about 12
+seconds across a 768-file collection. That is not a reason.
+
+**The reason that would justify it.** `blender_fx/decimate.blender` does not
+use Blender's STL exporter on the path that matters: it hand-packs the bytes in
+a per-polygon Python loop (`struct.pack_into`, three calls per face, 900k
+iterations on a large mesh). `bpy.ops.export_mesh.stl` appears only in the
+"already within limit" branch. That loop exists *because* STL needs manual
+assembly; `bpy.ops.wm.ply_export` would replace it with one C call and delete
+~100 lines of untestable in-Blender serialisation. The win is removing
+hand-rolled byte packing from a script no unit test can reach, not the seconds.
+
+**Verify before committing to it** — three things, none assumed:
+
+1. that `wm.ply_export` writes **binary little-endian** PLY, not ASCII;
+2. that a PLY round trip through Blender **preserves vertex count** — Blender
+   may split vertices on import for normals or UVs, which would defeat the
+   entire point and must be measured, not hoped;
+3. whether `mesh_io` grows PLY support or it stays private to `decimator`.
+
+**Trigger**: do it when the Blender scripts are being touched anyway. That is
+expected during `repairer`, which uses Blender far more than decimation does
+(6 files of 768 invoked Blender, none of them as a decimator).
+
+**Not to be confused with the output-format question.** What the slicer opens
+is a different decision on a different path: Bambu Studio's import dialog lists
+`.3mf .stl .oltp .stp .step .svg .amf .obj .gltf .glb .fbx` — **no PLY**. So
+PLY can never be the deliverable. If the deliverable is ever revisited, 3MF is
+the candidate (vertex table, zip-compressed, carries units explicitly — which
+the Leia model, authored in non-mm units, would have benefited from), weighed
+against STL being what every slicer and sharing site accepts and what the
+sources already are.
+
+**One correction worth keeping**, because it was believed briefly and would
+have distorted this decision: writing float32 does **not** drift. The bytes we
+hold are the bytes we write are the bytes we read back, bit-identical —
+asserted by `test_a_written_mesh_reloads_identically`. STL's weakness is the
+missing vertex table, not precision. Drift enters only when some *other* tool
+nudges a coordinate between writes, which splits one vertex into two that no
+longer weld. See also "Float drift was tested and ruled out (2026-09-14)".
+
 ---
 
 ## Evidence that has not been gathered
