@@ -45,6 +45,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 from .mesh_io import Mesh
 
@@ -360,40 +362,53 @@ def shells(mesh: Mesh) -> tuple[np.ndarray, ...]:
     that only wants a count pays nothing for geometry it will not use.
 
     PyMeshLab does this today via `generate_splitting_by_connected_components`,
-    which writes every component to its own file.  Here it is a union-find over
-    the faces, so counting shells no longer costs a split.
+    which writes every component to its own file.  Here nothing is written, so
+    counting shells no longer costs a split.
+
+    **Why scipy.**  The predecessor was a per-face Python `find()` loop —
+    correct, and 5-10x the cost of loading the mesh.  Measured on
+    `Mandy_Body_Dinamuuu3D.stl`:
+
+        mesh                      union-find   scipy
+        raw, 2,061,994 faces         12.75s     0.42s    30x
+        decimated, 900,000 faces      5.72s     0.14s    41x
+
+    At 0.14s on the mesh the pipeline actually sees — decimation runs first,
+    D13 — shell counting is cheaper than `scan()` itself, so it can be asked
+    on every file without thought.
+
+    **A pure-numpy replacement was tried first and was slower on real
+    geometry.**  Pointer-jumping label propagation (push the smaller label
+    across every edge, then collapse chains by indexing the array into itself)
+    is 15-24x faster than union-find on synthetic meshes and **2x slower** on
+    Mandy: it converges in O(log diameter) passes only when chains actually
+    collapse, and a 1.3M-face organic shell took **194 passes** at 0.13s each.
+    The synthetic benchmark that endorsed it — a long thin strip — has only
+    three components and converges in 11.  Do not retry it without a fixture
+    whose component structure resembles a real model.
     """
     _require_geometry(mesh)
     faces = mesh.geometry.faces
     if len(faces) == 0:
         return ()
 
-    parent = np.arange(int(faces.max()) + 1, dtype=np.int64)
+    # Each face contributes its three edges; `connected_components` treats the
+    # graph as undirected, so one direction per edge is enough.
+    n_verts = int(faces.max()) + 1
+    a = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2]])
+    b = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0]])
+    graph = coo_matrix((np.ones(len(a), dtype=np.int8), (a, b)),
+                       shape=(n_verts, n_verts))
+    _, labels = connected_components(graph, directed=False)
 
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return int(x)
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    for a, b, c in faces:
-        union(int(a), int(b))
-        union(int(b), int(c))
-
-    roots = np.fromiter((find(int(f[0])) for f in faces),
-                        dtype=np.int64, count=len(faces))
-    groups: dict[int, list[int]] = {}
-    for index, root in enumerate(roots):
-        groups.setdefault(int(root), []).append(index)
-
-    components = [np.array(v, dtype=np.int64) for v in groups.values()]
-    components.sort(key=len, reverse=True)
-    return tuple(components)
+    # A face belongs to the component of any of its corners; they agree by
+    # construction, so the first is enough.  Group by sorting the face labels
+    # and cutting where they change — vectorised, unlike a dict of lists.
+    face_label = labels[faces[:, 0]]
+    order = np.argsort(face_label, kind='stable')
+    groups = np.split(order, np.flatnonzero(np.diff(face_label[order])) + 1)
+    groups.sort(key=len, reverse=True)
+    return tuple(groups)
 
 
 def shell_count(mesh: Mesh, min_faces: int = 0) -> int:

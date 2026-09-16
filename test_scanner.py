@@ -400,6 +400,86 @@ class TestSeamEdges(unittest.TestCase):
             seam_edges(unloaded())
 
 
+class TestShellsAgainstUnionFind(unittest.TestCase):
+    """`shells()` delegates to scipy; this pins it to a known-correct oracle.
+
+    The oracle is a textbook union-find — the implementation `shells()` used
+    before scipy replaced it. Unlike the `winding_seams` oracle it carries no
+    inherited flaw, so agreement here is meaningful rather than merely mutual.
+
+    It earns its place: a pure-numpy replacement tried before scipy passed 500
+    random meshes and was still wrong for the job, being 2x SLOWER than
+    union-find on a real 2M-face model while 15-24x faster on synthetic ones.
+    Correctness and fitness are different questions; this class covers the
+    first.
+    """
+
+    @staticmethod
+    def _union_find(faces):
+        parent = np.arange(int(faces.max()) + 1, dtype=np.int64)
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return int(x)
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for a, b, c in faces:
+            union(int(a), int(b))
+            union(int(b), int(c))
+        roots = np.fromiter((find(int(f[0])) for f in faces),
+                            dtype=np.int64, count=len(faces))
+        groups = {}
+        for i, r in enumerate(roots):
+            groups.setdefault(int(r), []).append(i)
+        return {frozenset(v) for v in groups.values()}
+
+    def test_it_agrees_on_random_meshes(self):
+        rng = np.random.default_rng(11)
+        for trial in range(500):
+            n_verts = int(rng.integers(3, 25))
+            n_faces = int(rng.integers(1, 40))
+            faces = rng.integers(0, n_verts, size=(n_faces, 3)).astype(np.int64)
+            verts = rng.random((n_verts, 3)).astype(np.float32)
+            with self.subTest(trial=trial):
+                got = {frozenset(int(i) for i in g)
+                       for g in shells(mesh(verts, faces))}
+                self.assertEqual(got, self._union_find(faces))
+
+    def test_groups_come_back_largest_first(self):
+        """The contract callers rely on to take the main shell."""
+        rng = np.random.default_rng(12)
+        for trial in range(100):
+            n_verts = int(rng.integers(3, 25))
+            faces = rng.integers(0, n_verts,
+                                 size=(int(rng.integers(1, 40)), 3)).astype(np.int64)
+            verts = rng.random((n_verts, 3)).astype(np.float32)
+            sizes = [len(g) for g in shells(mesh(verts, faces))]
+            with self.subTest(trial=trial):
+                self.assertEqual(sizes, sorted(sizes, reverse=True))
+
+    def test_awkward_meshes(self):
+        """Cases where implementations diverge if they are going to."""
+        for name, faces in (
+                ('single face', [[0, 1, 2]]),
+                ('degenerate face', [[0, 0, 0]]),
+                ('two disjoint', [[0, 1, 2], [3, 4, 5]]),
+                ('repeated face', [[0, 1, 2], [0, 1, 2]]),
+                ('chain', [[0, 1, 2], [2, 3, 4], [4, 5, 6]]),
+        ):
+            faces = np.array(faces, dtype=np.int64)
+            verts = np.zeros((int(faces.max()) + 1, 3), dtype=np.float32)
+            with self.subTest(case=name):
+                got = {frozenset(int(i) for i in g)
+                       for g in shells(mesh(verts, faces))}
+                self.assertEqual(got, self._union_find(faces))
+
+
 class TestShells(unittest.TestCase):
 
     def test_one_connected_mesh_is_one_shell(self):

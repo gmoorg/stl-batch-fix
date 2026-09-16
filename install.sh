@@ -65,6 +65,25 @@ else
     }
 fi
 
+# ── scipy ─────────────────────────────────────────────────────────────────────
+# Connected-component analysis (shell detection) via scipy.sparse.csgraph.
+# Measured on Mandy_Body_Dinamuuu3D.stl against the per-face Python union-find
+# it replaced: 12.75s -> 0.42s raw (2.06M faces), 5.72s -> 0.14s decimated.
+# At 0.14s shell counting costs less than the edge scan itself, so it can be
+# asked on every file. A pure-numpy replacement was tried and was SLOWER on
+# real geometry -- see D20 in REFACTOR_DECISIONS.md before attempting one.
+echo "→ scipy"
+if "$PYTHON" -c "import scipy" 2>/dev/null; then
+    ver=$("$PYTHON" -c "import scipy; print(scipy.__version__)" 2>/dev/null || echo "unknown")
+    ok "scipy $ver already installed"
+else
+    warn "scipy not found — installing..."
+    "$PYTHON" -m pip install scipy && ok "scipy installed" || {
+        fail "scipy install failed — it is REQUIRED (shell detection has no fallback)"
+        exit 1
+    }
+fi
+
 # ── fast-simplification ───────────────────────────────────────────────────────
 # Primary decimator. Same quadric edge collapse as PyMeshLab/Blender, but
 # operating on numpy arrays instead of a full mesh database: measured ~7.5s /
