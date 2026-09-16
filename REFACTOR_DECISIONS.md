@@ -1742,6 +1742,99 @@ The fix is a plain `.copy()`. Worth recording because of which input exposed
 it: the degenerate-face test, a one-triangle mesh no real model contains. The
 bug would otherwise have waited for the strangest file in a collection.
 
+### D16 — Steps pass meshes, not paths; only Blender round-trips
+
+**Decided.** Every processing step is `Mesh -> Mesh`. The mesh is read once at
+the start of a file's pipeline and written once at the end.
+
+#### What this replaces
+
+The old pipeline threaded a *path* between steps. Each one wrote
+`dst + '.<step>.stl'`, reassigned `working`, and the next read it back; the
+`temps` list existed to clean up that trail at the end. The file was not an
+output — it was the only carrier of the mesh between two in-process steps.
+
+With geometry in the DTO (D15) that reason is gone. `working` is a value.
+
+#### Why not validate by writing and re-reading between steps
+
+Considered seriously, because a round trip *sounds* like the safer option, and
+rejected on two grounds:
+
+**It costs CPU, not just I/O.** A binary STL has no vertex table, so writing
+means expanding welded arrays back to 6x duplicated triangles and reading means
+re-welding them — the lexsort that costs 1.75s on a 2.55M-triangle mesh. The
+SSD is not the bottleneck; the weld is. On a collection where 763 of 768 files
+do nothing but decimate, that is the whole run.
+
+**It validates less, not more.** Edge counting is what validation means here,
+and it is strictly better on welded faces than on raw bytes:
+`_build_edge_counts` packs each vertex into a 192-bit int in a per-triangle
+Python loop *because* it has no vertex sharing to work with; with `faces` in
+hand the same answer is two vectorised numpy calls. And `scan_mesh_errors`
+returns `(-1, -1)` above `_LARGE_MESH_TRI_LIMIT` — so disk validation silently
+gives up on exactly the meshes that most need checking.
+
+So validation stays, and moves in-memory. It is the round trip that goes.
+
+#### The one forced boundary
+
+Blender is a separate process with its own interpreter and its own mesh
+database. Our numpy arrays do not exist in its address space and there is no
+shared-memory channel, so the only way to hand it geometry is to serialise it —
+which is what a file is. That rung writes a temp, runs, loads the result back,
+and deletes both, inside the module.
+
+**The measurement that made this a small problem.** From the preserved
+collection logs (768 files finished):
+
+| | count | share |
+|---|---|---|
+| files invoking Blender at all | 6 | 0.8% |
+| Blender wall time | 163s of 3974s | 4.1% |
+| decimations taking the first rung | 88 of 88 | 100% |
+| files needing no repair path at all | 763 of 768 | 99.3% |
+
+Blender never ran as a *decimator* in that run. The asymmetry is real but it is
+on a path taken by fewer than one file in a hundred.
+
+**PyMeshLab does not need the boundary**, which was checked rather than
+assumed: `pymeshlab.Mesh(vertex_matrix=, face_matrix=)` takes numpy in and
+`vertex_matrix()` / `face_matrix()` give it back, so the middle rung stays
+array-native. The old code's `load_new_mesh` / `save_current_mesh` was a disk
+round trip inside our own process for no reason.
+
+#### On a better interchange format
+
+Raised: if we must write a file for Blender, STL is a poor choice — no vertex
+table, 6x duplication, a re-weld on every read. Correct, and **PLY is the right
+answer if this is ever worth changing**: binary, a real vertex table, natively
+imported and exported by Blender (verified on 4.0.2: `wm.ply_import`,
+`import_mesh.ply`, `wm.ply_export` all present), and it maps almost exactly onto
+`Geometry` — a vertex block and a face-index block, which is what `verts` and
+`faces` already are.
+
+Not done now: it is a 0.8% path, and the format must be one Blender already
+parses, which rules out anything custom. Revisit if Blender's share rises.
+
+**Where a custom format would actually pay**, recorded so it is not confused
+with the above: `.npy` for *caching a welded mesh between runs* —
+`np.save`/`np.load`, memory-mappable, no parsing at all. That is a
+resume-a-run feature, not an interchange one, and nothing has asked for it.
+
+#### On releasing memory before the Blender call
+
+Python is refcounted, so clearing the last reference frees the arrays
+immediately — but the callee cannot release the *caller's* reference, and
+`Mesh` is frozen so it cannot empty its own field. Rebinding
+`mesh = decimate(mesh, ...)` does free the old geometry, but only when the call
+*returns* — which is after Blender has finished allocating its own copy.
+
+A `take()` returning `(facts_only_mesh, geometry)` would be the explicit move.
+Not built: it is one mesh's arrays on a 0.8% path, and the pool's admission
+control already refuses work that does not fit in free memory. If a measurement
+ever shows the overlap mattering, `take()` is the answer.
+
 ---
 
 ## Evidence that has not been gathered
