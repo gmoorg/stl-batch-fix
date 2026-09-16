@@ -3070,3 +3070,70 @@ re-reading rather than by a test.
 **A consequence worth noting**: a part with its own destination gets its own
 `.failed.stl` for free, so the old `~<name>` pending-rename protocol becomes
 unnecessary — the destination's existence *is* the commit.
+
+### Measured — stored STL normals DO disagree with winding, on 62 files
+
+**Scanned 2026-09-16**, all 665 readable binary STLs in `Fixing`, `Boris` and
+`Done`, comparing each triangle's stored facet normal against one computed from
+its winding.
+
+| | |
+|---|---|
+| files scanned | 665 |
+| files with at least one disagreement | **62** (9.3%) |
+| total disagreeing faces | **1,107,820** |
+
+Worst offenders, all from one set:
+
+| faces | share | file |
+|---|---|---|
+| 118,760 | **22.6%** | `Fae/Aine Noon Fae/.../platform_supported.stl` |
+| 271,455 | 14.2% | `Fae/Aine Noon Fae/.../UMesh_mushrooms.stl` |
+| 19,895 | 12.2% | `.../upperPart_supported.stl` |
+| 242,835 | 10.5% | `.../mushrooms1.stl` |
+
+The Daki set disagrees consistently too, at 0.1-0.44% per file.
+
+**Why this was measured.** `normal_vote` in `stl_batch_fix.blender` — which the
+script review calls *"the cleverest thing in the file"* and says should survive
+the refactor intact — uses the STL's **stored per-facet normals** as ground
+truth for winding: it flood-fills per connected component and flips a component
+when more of its faces disagree than agree. That only does anything when the
+stored normals carry information the winding does not.
+
+**A correction to record.** I checked three large files (Mandy body, Amidara
+base, Mandy clothed head), found 100% stored normals and **zero** disagreement,
+and concluded the signal "carries no independent information" and that
+`normal_vote` could be dropped. That was wrong. Three files chosen for size are
+not a sample; the clean ones are simply the common case. Fourth instance today
+of generalising from an unrepresentative sample — after `shells()` "nearly
+free", the pointer-jumping benchmark, and vertex-vs-edge connectivity.
+
+#### What it does to the PLY-at-the-Blender-boundary plan
+
+`wm.ply_export`'s normals are **per-vertex** — the RNA description is *"Export
+specific vertex normals if available, export calculated normals otherwise"* —
+so PLY cannot carry a per-face stored normal. Routing repair through PLY would
+silently discard the winding evidence on 62 files, and `normal_vote` would
+degrade to comparing winding against itself: it can then only ever report
+`agree: N, disagree: 0` and flip nothing, while still printing as though it
+ran.
+
+So the boundary question splits, and the two halves are no longer one decision:
+
+- **Decimation's boundary** — already gone with D19; no normals involved.
+- **Repair's boundary** — three options, none obviously right:
+  1. the script keeps parsing STL itself, retaining review problems #1-#3
+     (buffer sized before filling, triangles assumed, header trusted);
+  2. the normals travel separately alongside the PLY;
+  3. **`normal_vote` moves to our side entirely** — it is flood-fill over
+     connected components plus a per-component majority vote, and
+     `scanner.shells()` already does the flood-fill. `mesh_io.load` would keep
+     the stored normals beside the geometry, and the vote becomes an array
+     function with no Blender involvement, testable like everything else.
+
+Option 3 is the larger change and the only one that makes the boundary clean
+rather than working around it. Not yet decided.
+
+Raw scan output kept at
+`scratchpad/keep_normalscan.tsv` (tris, stored%, disagreeing faces, %, path).
