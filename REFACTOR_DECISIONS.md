@@ -3137,3 +3137,62 @@ rather than working around it. Not yet decided.
 
 Raw scan output kept at
 `scratchpad/keep_normalscan.tsv` (tris, stored%, disagreeing faces, %, path).
+
+### Survey — most geometric repair runs on 0.8% of files
+
+**Asked 2026-09-16**: *"who checks for inverted normals when Blender is not
+involved?"*, then the same question for T-junctions and degenerate faces.
+Answered by grep, not by memory.
+
+| capability | Python side | in the Blender script | actually runs on |
+|---|---|---|---|
+| inverted normals (`normal_vote`) | **nothing** | yes | 6 files of 768 |
+| T-junction split | `MERGE_DIST` constant only | 6 references | 6 of 768 |
+| wire edges / fin vertices | **nothing** | 8 references | 6 of 768 |
+| merge doubles | constant only | 5 references | 6 of 768 |
+| degenerate faces | `scanner` **counts** them | 3 references | counted always, fixed on 6 |
+| hole filling | `meshfix.repair()` | 5 references | wherever repair runs |
+
+`grep -rn 'normal_vote\|inverted\|flip' --include='*.py'` returns **nothing**.
+
+**Two of these are worse than absent.** `scanner.scan()` reports a `degenerate`
+count on every file and nothing acts on it. `MERGE_DIST` exists in the config,
+in the TUI, and is passed into the Blender script — no Python code uses it.
+Both look like working features from the outside.
+
+**`find_winding_seams` is not a substitute for `normal_vote`.** It finds edges
+where two faces disagree *with each other*. A region that is internally
+consistent and uniformly backwards has **zero** seam edges, because no two
+neighbours disagree. The stored facet normals are the only evidence for that
+case, and nothing on the Python side reads them.
+
+**And the clean-copy shortcut makes it concrete:**
+
+```python
+if (nm_src == 0 and open_src == 0 and not _seam_loops
+        and (MAX_FACES == 0 or n_tris <= MAX_FACES)):
+    shutil.copy2(src, dst)
+    L("result: ok (clean copy — no repair needed)")
+```
+
+A file with inverted normals, T-junctions, wire edges or degenerate faces — but
+no holes and no non-manifold edges — is copied through, reported `ok`, and
+never opened by Blender. The design doc names the symptom already: *"a region
+renders black in viewers and in Bambu while every defect count reads zero."*
+
+#### What this does to the repair design
+
+The question was framed as "how does `normal_vote` survive the PLY boundary".
+That framing was too small. The real finding is that **a whole class of
+geometric repair is gated behind a door that opens for 0.8% of files**, and the
+boundary question is downstream of deciding whether that should change.
+
+Every one of these operates on arrays and would be testable on our side:
+`scanner.shells()` already does the flood-fill `normal_vote` needs, degenerate
+faces are already detected, and T-junction splitting and doubles-merging are
+vertex-distance work of the kind `mesh_io.load` already does.
+
+But that converts "port a Blender script" into "reimplement six BMesh
+operations in numpy", which is a different size of commitment and a different
+shape of project. **Not decided.** Recorded so the choice is made deliberately
+rather than by porting momentum.
