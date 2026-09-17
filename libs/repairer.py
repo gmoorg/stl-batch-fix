@@ -447,19 +447,24 @@ def blender_part(part: Mesh, timeout: float = 600) -> tuple[Mesh, str]:
     can tell "not repaired" from "repaired badly".
     """
     with tempfile.TemporaryDirectory(prefix='repairer-blender-') as folder:
-        source = os.path.join(folder, 'part.stl')
-        target = os.path.join(folder, 'fixed.stl')
-        mesh_io.write(part.with_destination(source))
+        source = os.path.join(folder, 'part.ply')
+        target = os.path.join(folder, 'fixed.ply')
+        mesh_io.write_ply(part, source)
         ok, result = blender.repair(source, target, timeout=timeout)
         if not ok:
             why = ('timed out' if result.is_timed_out
                    else f"exit {result.exit_code}")
             return part, f"blender failed: {why}"
-        repaired = mesh_io.load(mesh_io.probe(target, part.destination))
+        # `read_ply` rather than `load`: the vertex table survived the round
+        # trip, so there is nothing to weld — which is the whole reason this
+        # boundary is PLY.  It also carries `part`'s identity across, so the
+        # repaired geometry comes back attached to the part rather than to a
+        # temp file.
+        repaired = mesh_io.read_ply(target, part)
 
     marker = next((line for line in result.stdout_capture.splitlines()
                    if line.startswith('BLENDER_')), 'BLENDER_OK')
-    return (repaired.with_destination(part.destination),
+    return (repaired,
             f"blender {len(part.geometry.faces)}f -> "
             f"{repaired.triangles}f ({marker.split(':')[0]})")
 

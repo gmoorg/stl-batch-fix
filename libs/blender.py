@@ -240,10 +240,20 @@ def convert(source: str, destination: str, timeout: float = 600,
     return ok, destination
 
 
-def repair(source: str, destination: str, merge_dist: float = 0.01,
+def repair(source: str, destination: str,
            timeout: float = 600, executable: str = 'blender',
            ) -> tuple[bool, Result]:
-    """Repair the binary STL at `source`, writing the result to `destination`.
+    """Repair the binary PLY at `source`, writing the result to `destination`.
+
+    **PLY, not STL, and both ends must be** — see `REPAIR_SCRIPT`.  Write the
+    input with `mesh_io.write_ply` and read the output with `mesh_io.read_ply`;
+    handing this an STL produces no output and an exit code of 0, which reads
+    as a silent failure.
+
+    `merge_dist` used to be a parameter here and is gone with the weld step it
+    configured.  An absolute 0.01 mm, it was measured deleting sub-millimetre
+    detail — the point of the format change was to remove the guess, not to
+    calibrate it.
 
     Returns `(ok, result)`.  `ok` means the script ran to completion and wrote
     a file — **not** that the mesh is clean: the script exits 2 with
@@ -261,9 +271,7 @@ def repair(source: str, destination: str, merge_dist: float = 0.01,
     must be written out and read back.  That is the cost `meshfix` does not
     pay, and the reason PyMeshFix is step 4's default.
     """
-    script = REPAIR_SCRIPT.format(src=source, dst=destination,
-                                  merge_dist=merge_dist,
-                                  is_ascii=False, is_obj=False)
+    script = REPAIR_SCRIPT.format(src=source, dst=destination)
     result = Runner(executable).run(script, timeout=timeout)
     ok = (not result.is_timed_out
           and result.exit_code in (0, 2)
