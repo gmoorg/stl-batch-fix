@@ -55,6 +55,23 @@ from .mesh_io import Geometry, Mesh
 #: near rather than on, so the tolerance must absorb float error without
 #: splitting faces that merely pass close by.
 #:
+#: **KNOWN BUG (2026-09-17): this is an absolute distance and it breaks with
+#: model scale.**  Measured on one T-junction injected into the same sphere at
+#: seven radii — the junction's distance from the edge grows with the model,
+#: because float32 carries ~7 significant digits:
+#:
+#:     r=1     1.9e-08   found
+#:     r=10    2.6e-23   found
+#:     r=50    1.2e-06   MISSED
+#:     r=100   2.5e-06   MISSED
+#:     r=200   5.0e-06   MISSED
+#:     r=500   0.0       found
+#:
+#: A 100-200 mm print is an ordinary size, so this is a live gap.  A tolerance
+#: of `radius * 1e-4` finds it at all seven.  The fix is to scale by the
+#: bounding-box diagonal, as `repairer.CLEAN_FILTERS` already does — see the
+#: OPEN BUG entry in REFACTOR_DECISIONS.md.
+#:
 #: **Not calibrated on real data.**  The fixtures are exact, so any value from
 #: 1e-12 upward passes them; this is a starting point, not a measured one.
 DEFAULT_TOLERANCE = 1e-6

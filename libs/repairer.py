@@ -157,6 +157,13 @@ CLEAN_FILTERS: tuple[tuple[str, dict], ...] = (
 #: geometry still report it: 6 on the all-defects sphere, 3 on `fin`.  The gap
 #: between float noise (1e-5) and a real deletion (8.0, the sphere's radius) is
 #: five orders of magnitude, so the threshold is not a fine judgement.
+#:
+#: **KNOWN BUG (2026-09-17): this is an absolute distance and will break with
+#: model scale**, the same way `welder.DEFAULT_TOLERANCE` was measured to —
+#: both the noise floor and the real-deletion distance scale with the model,
+#: and every fixture here is r=10.  Untested above that.  The fix is to scale
+#: by the bounding-box diagonal, as `CLEAN_FILTERS` already does.  See the OPEN
+#: BUG entry in REFACTOR_DECISIONS.md.
 LOST_VERTEX_TOLERANCE = 1e-4
 
 DO_NOT_RETRY = {

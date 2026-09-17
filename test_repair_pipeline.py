@@ -370,5 +370,66 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
                                    f"no fixture exercises {stage}")
 
 
+@unittest.skipUnless(HAVE_TOOLS, "pymeshlab and pymeshfix are both needed")
+class TestToleranceScaling(unittest.TestCase):
+    """**OPEN BUG, recorded 2026-09-17 — these tests fail and are skipped.**
+
+    `welder.DEFAULT_TOLERANCE` is an absolute distance, so it breaks with model
+    scale: the T-junction's distance from its edge grows with the model (float32
+    carries ~7 significant digits), crossing the fixed 1e-6 threshold somewhere
+    between r=10 and r=50.
+
+    Every other fixture in this suite is r=10, which is why nothing caught it.
+
+    Remove the skip when the tolerances are made relative to the bounding-box
+    diagonal, as `repairer.CLEAN_FILTERS` already is. See REFACTOR_DECISIONS.md.
+    """
+
+    RADII = (1.0, 10.0, 50.0, 100.0, 200.0, 1000.0)
+
+    def sphere_with_junction(self, radius):
+        sys.path.insert(0, os.path.join(HERE, 'tools'))
+        from make_probe_meshes import build_tjunction, sphere
+        from libs.mesh_io import Geometry, Kind, Mesh
+        verts, faces = sphere(r=radius)
+        verts, faces = build_tjunction(verts.copy(), faces.copy())
+        return Mesh('/generated', '/out.stl', Kind.BINARY_STL, len(faces),
+                    True, None, Geometry(verts, faces))
+
+    @unittest.skip("OPEN BUG: absolute tolerance, fails at r=50, 100, 200")
+    def test_a_tjunction_is_found_at_every_scale(self):
+        """One junction, one sphere, six sizes. Measured distances:
+
+            r=1     1.9e-08   found
+            r=10    2.6e-23   found
+            r=50    1.2e-06   MISSED
+            r=100   2.5e-06   MISSED
+            r=200   5.0e-06   MISSED
+            r=1000  0.0       found
+        """
+        from libs import welder
+        for radius in self.RADII:
+            with self.subTest(radius=radius):
+                mesh = self.sphere_with_junction(radius)
+                self.assertEqual(len(welder.find(mesh)), 1,
+                                 f"junction missed at radius {radius}")
+
+    def test_a_relative_tolerance_would_find_it_at_every_scale(self):
+        """The proposed fix, demonstrated. This one passes today.
+
+        Kept unskipped so the evidence for the fix stays live: if scaling by
+        the model size ever stops working, that is worth knowing before the
+        change is made.
+        """
+        from libs import welder
+        for radius in self.RADII:
+            with self.subTest(radius=radius):
+                mesh = self.sphere_with_junction(radius)
+                found = welder.find(mesh, tolerance=radius * 1e-4)
+                self.assertEqual(len(found), 1,
+                                 f"junction missed at radius {radius} even "
+                                 f"with a scaled tolerance")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
