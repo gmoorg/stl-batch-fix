@@ -379,6 +379,158 @@ def write(mesh: Mesh) -> None:
         f.write(buf.tobytes())
 
 
+#: The PLY header this module writes, and the only dialect `read_ply` accepts.
+#:
+#: Deliberately bare: `x, y, z` as float32 and a face list of uint32, nothing
+#: else.  No normals — `write` derives STL's from the winding, so they carry no
+#: information (measured: Blender's old normal vote reported "agree: 801,
+#: disagree: 0") — and no colour, UVs or custom properties.
+#:
+#: **This is not a general PLY reader and must not become one.**  It reads back
+#: what Blender's `wm.ply_export` writes at this one boundary, and that is a
+#: two-party agreement, not a format.  Supporting arbitrary dialects — ASCII,
+#: big-endian, double precision, per-vertex colour, variable property order —
+#: is the parsing burden the original PLY discussion explicitly ruled out of
+#: scope.  A file that does not match raises.
+_PLY_MAGIC = b'ply\n'
+_PLY_HEADER_END = b'end_header\n'
+
+
+def write_ply(mesh: Mesh, path: str) -> None:
+    """Write a loaded `mesh` to `path` as a binary little-endian PLY.
+
+    **For the Blender scratch boundary only.**  PLY is never a deliverable —
+    Bambu Studio's import dialog does not list it — and never an input format;
+    it exists so a mesh can cross into Blender and back *with its vertex table
+    intact*.
+
+    That is a correctness matter, not a convenience.  STL stores no vertex
+    sharing, so a mesh written as STL arrives as loose triangles and has to be
+    welded back by proximity — and Blender's `remove_doubles` did that at
+    0.01 mm absolute, which was measured deleting sub-millimetre detail: a
+    0.2 mm bead on a 20 mm sphere lost 22 of its 389 vertices, a 0.1 mm bead
+    lost 49, while the large sphere was untouched.  PLY carries the table, so
+    nothing is reconstructed and nothing is guessed.
+
+    **Takes an explicit `path`, unlike `write`.**  `write` deliberately has no
+    path argument, because its output is the deliverable and must land where
+    the indicator scan looks for markers.  This writes a temp file that is read
+    back moments later and deleted, so it has no destination in that sense —
+    binding it to `mesh.destination` would let a scratch file be mistaken for a
+    result.
+    """
+    if mesh.geometry is None:
+        raise ValueError(f"{mesh.path} has no geometry to write — load it first")
+
+    verts = np.ascontiguousarray(mesh.geometry.verts, dtype=np.float32)
+    faces = np.ascontiguousarray(mesh.geometry.faces, dtype=np.uint32)
+
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {len(verts)}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        f"element face {len(faces)}\n"
+        "property list uchar uint vertex_indices\n"
+        "end_header\n"
+    ).encode('ascii')
+
+    # One record per face: a uchar count of 3, then three uint32 indices.
+    # Built as a structured array rather than a Python loop, which on a
+    # 900k-face mesh is the difference between milliseconds and seconds.
+    records = np.zeros(len(faces), dtype=[('n', 'u1'), ('v', '<u4', 3)])
+    records['n'] = 3
+    records['v'] = faces
+
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, 'wb') as f:
+        f.write(header)
+        f.write(verts.tobytes())
+        f.write(records.tobytes())
+
+
+def read_ply(path: str, mesh: Mesh) -> Mesh:
+    """Read a binary PLY at `path` and return `mesh` carrying that geometry.
+
+    The counterpart of `write_ply`, and it takes the `Mesh` whose identity the
+    result should have — normally the part that was sent to Blender — so the
+    repaired geometry comes back attached to the right path and destination
+    rather than to a temp file's.
+
+    **No welding step.**  `load` has to weld, because a binary STL stores each
+    triangle's corners separately and the sharing must be recovered (measured:
+    exactly 6.0x duplication).  A PLY already has the table, so the faces index
+    straight into the vertices as written — which is the whole reason this
+    format is used here.
+
+    Raises `ValueError` on anything that is not the narrow dialect `write_ply`
+    emits and Blender's exporter produces.  That is deliberate: a silent
+    fallback would turn an unreadable scratch file into a plausible-looking
+    mesh, and this sits in the middle of a repair.
+    """
+    with open(path, 'rb') as f:
+        data = f.read()
+
+    if not data.startswith(_PLY_MAGIC):
+        raise ValueError(f"{path} is not a PLY file")
+    end = data.find(_PLY_HEADER_END)
+    if end < 0:
+        raise ValueError(f"{path} has no PLY header terminator")
+    end += len(_PLY_HEADER_END)
+    header = data[:end].decode('ascii', 'replace').splitlines()
+
+    if 'format binary_little_endian 1.0' not in header:
+        raise ValueError(
+            f"{path} is not binary little-endian PLY — this reader handles "
+            f"only what write_ply and Blender's exporter produce")
+
+    n_verts = n_faces = None
+    element = None
+    vertex_properties = []
+    for line in header:
+        if line.startswith('element vertex '):
+            element, n_verts = 'vertex', int(line.split()[-1])
+        elif line.startswith('element face '):
+            element, n_faces = 'face', int(line.split()[-1])
+        elif line.startswith('property ') and element == 'vertex':
+            vertex_properties.append(line.split()[-1])
+    if n_verts is None or n_faces is None:
+        raise ValueError(f"{path} declares no vertex or face element")
+
+    # Blender writes x, y, z first and may append nx/ny/nz or colour depending
+    # on export flags.  Extra float properties are tolerated and dropped; a
+    # non-float property in the vertex block would change the stride, so it is
+    # rejected rather than silently misread.
+    if vertex_properties[:3] != ['x', 'y', 'z']:
+        raise ValueError(
+            f"{path} vertex properties start with {vertex_properties[:3]}, "
+            f"expected ['x', 'y', 'z']")
+    if any(line.startswith('property ') and not line.startswith('property float')
+           for line in header
+           if ' vertex_indices' not in line and line != 'property list uchar uint vertex_indices'):
+        raise ValueError(f"{path} has a non-float vertex property")
+
+    width = len(vertex_properties)
+    block = np.frombuffer(data, dtype='<f4', count=n_verts * width, offset=end)
+    verts = np.ascontiguousarray(block.reshape(n_verts, width)[:, :3])
+
+    offset = end + n_verts * width * 4
+    records = np.frombuffer(data, dtype=[('n', 'u1'), ('v', '<u4', 3)],
+                            count=n_faces, offset=offset)
+    if n_faces and not np.all(records['n'] == 3):
+        raise ValueError(
+            f"{path} contains a non-triangular face — this boundary carries "
+            f"triangles only, and Blender triangulates before export")
+
+    return mesh.with_geometry(Geometry(
+        verts.astype(np.float32),
+        np.ascontiguousarray(records['v'], dtype=np.int64)))
+
+
 def bounds(path: str) -> tuple[tuple[float, float, float],
                                tuple[float, float, float]] | None:
     """Extents of a binary STL as `((minx, miny, minz), (maxx, maxy, maxz))`.

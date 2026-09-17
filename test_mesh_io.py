@@ -20,7 +20,7 @@ import numpy as np
 
 from libs.mesh_io import (
     BYTES_PER_TRIANGLE, HEADER_BYTES, Geometry, Kind, Mesh, bounds, diagonal,
-    dimensions, kind, load, probe, triangle_count, write,
+    dimensions, kind, load, probe, read_ply, triangle_count, write, write_ply,
 )
 
 #: One unit tetrahedron: four faces, enough to be a real mesh.
@@ -410,6 +410,151 @@ class TestDimensions(MeshIOCase):
     def test_unreadable_returns_none(self):
         self.assertIsNone(dimensions(self.path('nope.stl')))
         self.assertIsNone(diagonal(self.path('nope.stl')))
+
+
+class TestPly(MeshIOCase):
+    """The Blender scratch boundary.
+
+    PLY exists here for one reason: STL stores no vertex table, so a mesh
+    written as STL arrives as loose triangles and has to be welded back by
+    proximity — which was measured deleting sub-millimetre detail. These tests
+    assert the property that makes PLY worth the second format: **the vertex
+    table survives, so nothing is reconstructed.**
+    """
+
+    def loaded(self):
+        src = _binary_stl(self.path('in.stl'))
+        return load(probe(src, self.path('out.stl')))
+
+    def test_the_round_trip_is_bit_identical(self):
+        """Not merely equivalent — the same bytes back.
+
+        `load` has to weld an STL because each triangle carries its own
+        corners; a PLY needs no such step, so there is no rounding, no merge
+        and nothing to go wrong.
+        """
+        mesh = self.loaded()
+        ply = self.path('mesh.ply')
+        write_ply(mesh, ply)
+        back = read_ply(ply, mesh)
+        self.assertTrue(np.array_equal(mesh.geometry.verts,
+                                       back.geometry.verts))
+        self.assertTrue(np.array_equal(mesh.geometry.faces,
+                                       back.geometry.faces))
+
+    def test_no_vertex_is_duplicated(self):
+        """The whole point. An STL of this mesh would carry 3 vertices per
+        face; the PLY carries the welded table."""
+        mesh = self.loaded()
+        ply = self.path('mesh.ply')
+        write_ply(mesh, ply)
+        back = read_ply(ply, mesh)
+        self.assertLess(len(back.geometry.verts),
+                        3 * len(back.geometry.faces))
+        self.assertEqual(len(back.geometry.verts), len(mesh.geometry.verts))
+
+    def test_the_result_keeps_the_meshs_identity(self):
+        """The repaired geometry comes back attached to the part that was
+        sent, not to the temp file it travelled in."""
+        mesh = self.loaded()
+        ply = self.path('mesh.ply')
+        write_ply(mesh, ply)
+        back = read_ply(ply, mesh)
+        self.assertEqual(back.path, mesh.path)
+        self.assertEqual(back.destination, mesh.destination)
+
+    def test_the_triangle_count_is_rederived(self):
+        mesh = self.loaded()
+        ply = self.path('mesh.ply')
+        write_ply(mesh, ply)
+        back = read_ply(ply, mesh)
+        self.assertEqual(back.triangles, len(back.geometry.faces))
+
+    def test_writing_an_unloaded_mesh_raises(self):
+        with self.assertRaises(ValueError):
+            write_ply(probe(_binary_stl(self.path('in.stl')),
+                            self.path('out.stl')), self.path('x.ply'))
+
+    def test_a_missing_parent_directory_is_created(self):
+        mesh = self.loaded()
+        ply = self.path('nested/deeper/mesh.ply')
+        write_ply(mesh, ply)
+        self.assertTrue(os.path.exists(ply))
+
+    def test_an_stl_is_rejected(self):
+        """A silent fallback would turn an unreadable scratch file into a
+        plausible-looking mesh, in the middle of a repair."""
+        mesh = self.loaded()
+        with self.assertRaises(ValueError):
+            read_ply(_binary_stl(self.path('other.stl')), mesh)
+
+    def test_an_ascii_ply_is_rejected(self):
+        """This reader handles one dialect deliberately — what `write_ply`
+        emits and Blender's exporter produces."""
+        mesh = self.loaded()
+        path = self.path('ascii.ply')
+        with open(path, 'wb') as f:
+            f.write(b'ply\nformat ascii 1.0\nelement vertex 1\n'
+                    b'property float x\nend_header\n0.0\n')
+        with self.assertRaises(ValueError):
+            read_ply(path, mesh)
+
+    def test_a_truncated_header_is_rejected(self):
+        mesh = self.loaded()
+        path = self.path('trunc.ply')
+        with open(path, 'wb') as f:
+            f.write(b'ply\nformat binary_little_endian 1.0\nelement vertex 1\n')
+        with self.assertRaises(ValueError):
+            read_ply(path, mesh)
+
+    def test_extra_float_vertex_properties_are_dropped(self):
+        """Blender may append normals depending on export flags. Extra float
+        columns shift the stride and must be skipped, not misread as
+        coordinates."""
+        mesh = self.loaded()
+        verts = mesh.geometry.verts
+        faces = mesh.geometry.faces.astype(np.uint32)
+        path = self.path('withnormals.ply')
+        header = (
+            "ply\nformat binary_little_endian 1.0\n"
+            f"element vertex {len(verts)}\n"
+            "property float x\nproperty float y\nproperty float z\n"
+            "property float nx\nproperty float ny\nproperty float nz\n"
+            f"element face {len(faces)}\n"
+            "property list uchar uint vertex_indices\nend_header\n"
+        ).encode('ascii')
+        padded = np.hstack([verts, np.zeros_like(verts)]).astype(np.float32)
+        records = np.zeros(len(faces), dtype=[('n', 'u1'), ('v', '<u4', 3)])
+        records['n'] = 3
+        records['v'] = faces
+        with open(path, 'wb') as f:
+            f.write(header)
+            f.write(padded.tobytes())
+            f.write(records.tobytes())
+        back = read_ply(path, mesh)
+        self.assertTrue(np.array_equal(back.geometry.verts, verts))
+
+    def test_a_non_triangular_face_is_rejected(self):
+        """Blender triangulates before export, so a quad means the file did
+        not come from where it claims to have."""
+        mesh = self.loaded()
+        verts = mesh.geometry.verts
+        path = self.path('quad.ply')
+        header = (
+            "ply\nformat binary_little_endian 1.0\n"
+            f"element vertex {len(verts)}\n"
+            "property float x\nproperty float y\nproperty float z\n"
+            "element face 1\n"
+            "property list uchar uint vertex_indices\nend_header\n"
+        ).encode('ascii')
+        record = np.zeros(1, dtype=[('n', 'u1'), ('v', '<u4', 3)])
+        record['n'] = 4                       # claims a quad
+        with open(path, 'wb') as f:
+            f.write(header)
+            f.write(verts.astype(np.float32).tobytes())
+            f.write(record.tobytes())
+        with self.assertRaises(ValueError):
+            read_ply(path, mesh)
 
 
 if __name__ == '__main__':
