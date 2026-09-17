@@ -1,164 +1,104 @@
-# This script is executed by Blender in --background mode, launched by stl_batch_fix.py.
-# It is NOT meant to be run directly — it requires variables injected via str.format()
-# before it is written to a temp file and passed to Blender's --python argument:
+# Executed by Blender in --background mode, launched by libs/blender.py.
+# NOT meant to be run directly — it requires variables injected via str.format():
 #
-#   src        — input file path (str)
-#   dst        — output file path (str)
-#   merge_dist — vertex merge distance in mm (float)
-#   is_ascii   — True if source is ASCII STL (bool literal)
-#   is_obj     — True if source is OBJ (bool literal)
+#   src — input  PLY path (str)
+#   dst — output PLY path (str)
 #
 # Exit codes:
 #   0  — success (BLENDER_OK or BLENDER_OPEN printed to stdout)
 #   1  — empty / unreadable mesh (BLENDER_EMPTY)
 #   2  — non-manifold edges remain after repair (BLENDER_UNREPAIRED)
+#
+# **The boundary is PLY, not STL, and that is a correctness fix rather than a
+# preference.**  STL stores no vertex table: every triangle carries its own
+# three coordinate triples, so a mesh written out arrives as loose triangles
+# and has to be welded back by proximity.  This script used to do exactly that
+# — a hand-written parser calling bm.verts.new() three times per triangle, then
+# `remove_doubles(dist=merge_dist)` with merge_dist = 0.01 mm ABSOLUTE.
+#
+# Measured (2026-09-17), the same sphere at shrinking sizes through both paths:
+#
+#     radius    shortest edge    STL path        PLY path
+#     1.0 mm    0.049 mm         382v / 760f     382v / 760f
+#     0.2 mm    0.0098 mm        361v / 718f     382v / 760f   <- damaged
+#     0.05 mm   0.0024 mm        142v / 280f     382v / 760f   <- 63% gone
+#
+# And on a normal 20 mm sphere carrying one small bead, which is the case that
+# actually occurs — jewellery, buttons, eyes, lace on a figurine:
+#
+#     bead 0.30 mm   764v / 1520f   764v / 1520f   389/389 bead verts
+#     bead 0.20 mm   742v / 1476f   764v / 1520f   367/389   <- detail eaten
+#     bead 0.10 mm   715v / 1422f   764v / 1520f   340/389   <- detail eaten
+#
+# The large sphere is untouched; the loss lands entirely on the small feature,
+# and the model's own size (69 mm diagonal) gives no warning.  PLY carries the
+# vertex table, so the mesh arrives welded — measured: 0 open edges on import
+# and `remove_doubles` removing 0 vertices — and the merge distance disappears
+# from the pipeline rather than needing to be calibrated.
 
-import bpy, bmesh, struct, sys, os
+# `struct` and `mathutils` are gone with the hand-written STL parser and the
+# normal vote: Blender's own PLY operators do the I/O now, so nothing here
+# unpacks bytes or builds vectors by hand.
+import bpy, bmesh, sys, os
 
-# These placeholders are substituted by stl_batch_fix.py at runtime via
-# BLENDER_SCRIPT.format(...) before the script is written to a temp file
-# and passed to Blender's --python argument.  Do not replace them with
-# hard-coded values — this file is a template, not a runnable script.
-src        = {src!r}
-dst        = {dst!r}
-merge_dist = {merge_dist}
-is_ascii   = {is_ascii}
-is_obj     = {is_obj}
+# These placeholders are substituted by `libs/blender.py` at runtime via
+# `REPAIR_SCRIPT.format(...)` before the script is written to a temp file and
+# passed to Blender's --python argument.  Do not replace them with hard-coded
+# values — this file is a template, not a runnable script.
+src = {src!r}
+dst = {dst!r}
 
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete()
 
-import mathutils
+
+def load_ply(path, bm):
+    """Import a binary PLY and hand back a BMesh that is already welded.
+
+    Replaces a hand-written STL parser that called `bm.verts.new()` three times
+    per triangle — 311,187 loose vertices for a 103,729-face part — and then
+    relied on `remove_doubles` to guess the vertex table back.  PLY carries the
+    table, so nothing is guessed: measured on import, 0 open edges, 0
+    non-manifold, and `remove_doubles` afterwards removes 0 vertices.
+    """
+    bpy.ops.wm.ply_import(filepath=path)
+    imported = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+    if not imported:
+        return 0
+    obj = imported[0]
+    bm.from_mesh(obj.data)
+    n_faces = len(bm.faces)
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete()
+    return n_faces
 
 
-def load_binary_stl(path, bm):
-    import math as _math
-    normal_layer = bm.faces.layers.float_vector.get("orig_normal") or \
-                   bm.faces.layers.float_vector.new("orig_normal")
-    with open(path, 'rb') as f:
-        f.read(80)
-        n_tris = struct.unpack('<I', f.read(4))[0]
-        raw    = f.read(n_tris * 50)
-    rejected = 0
-    for i in range(n_tris):
-        base = i * 50
-        if base + 12 > len(raw):
-            break
-        floats = struct.unpack_from('<12f', raw, base)
-        if not all(_math.isfinite(x) for x in floats):
-            rejected += 1
-            continue
-        nx, ny, nz = floats[0], floats[1], floats[2]
-        coords = []
-        for j in range(3):
-            coords.append(bm.verts.new((floats[3 + j*3], floats[4 + j*3], floats[5 + j*3])))
-        try:
-            face = bm.faces.new(coords)
-            n = mathutils.Vector((nx, ny, nz))
-            if n.length_squared > 0.01:
-                face[normal_layer] = n.normalized()
-        except Exception:
-            rejected += 1
-    if rejected:
-        print("STL load: rejected " + str(rejected) + " invalid triangles")
-    return n_tris, normal_layer
+def write_ply_from_bm(path, bm):
+    """Export a BMesh as a binary PLY through Blender's own exporter.
+
+    Replaces ~15 lines of hand-packed STL bytes.  The vertex table survives, so
+    whatever reads this back does not have to reconstruct it — and no normals
+    are written, which is correct here: `mesh_io.write` derives them from the
+    winding anyway, so the 12 bytes per triangle STL spends on them carry no
+    information (measured: the old normal vote reported "agree: 801,
+    disagree: 0").
+    """
+    mesh = bpy.data.meshes.new("Repaired")
+    bm.to_mesh(mesh)
+    obj = bpy.data.objects.new("Repaired", mesh)
+    bpy.context.collection.objects.link(obj)
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.wm.ply_export(filepath=path, export_selected_objects=True,
+                          ascii_format=False, export_normals=False,
+                          export_uv=False, export_colors='NONE')
 
 
-def write_stl_from_bm(path, bm):
-    import struct as _st
-    n = len(bm.faces)
-    buf = bytearray(80 + 4 + n * 50)
-    hdr = b'Binary STL written by stl_batch_fix'
-    buf[:len(hdr)] = hdr
-    _st.pack_into('<I', buf, 80, n)
-    off = 84
-    for _face in bm.faces:
-        _n = _face.normal
-        _st.pack_into('<3f', buf, off, _n.x, _n.y, _n.z); off += 12
-        for _v in _face.verts:
-            _st.pack_into('<3f', buf, off, _v.co.x, _v.co.y, _v.co.z); off += 12
-        off += 2  # attribute bytes stay zero
-    with open(path, 'wb') as _f:
-        _f.write(buf)
-
-
-def split_t_junctions(bm):
-    # Split T-junction NM edges by inserting the opposite vertex onto the edge.
-    # Returns the number of edges split.
-    #
-    # Each split (subdivide_edges + pointmerge) invalidates BMesh element
-    # references held in any snapshot taken before that operation.  To avoid
-    # ReferenceError we process ONE split per outer iteration then re-scan.
-    # The outer loop runs until no T-junction NM edges remain or MAX_ITER.
-    MAX_ITER = 200   # one per split; most meshes have far fewer than this
-    total_splits = 0
-
-    for _outer in range(MAX_ITER):
-        bm.edges.ensure_lookup_table()
-        bm.verts.ensure_lookup_table()
-        bm.faces.ensure_lookup_table()
-
-        found = False
-        for nm_e in [e for e in bm.edges if len(e.link_faces) > 2]:
-            if not nm_e.is_valid or len(nm_e.link_faces) <= 2:
-                continue
-
-            va, vb = nm_e.verts[0], nm_e.verts[1]
-            a  = va.co.copy()
-            b  = vb.co.copy()
-            ab = b - a
-            ab_len2 = ab.dot(ab)
-            if ab_len2 < 1e-20:
-                continue
-
-            # Find a face whose opposite vertex projects onto this edge
-            split_v   = None
-            split_co  = None   # plain tuple — safe after pointmerge
-            for face in nm_e.link_faces:
-                if not face.is_valid:
-                    continue
-                opp = None
-                for v in face.verts:
-                    if v.index != va.index and v.index != vb.index:
-                        opp = v
-                        break
-                if opp is None:
-                    continue
-                t = (opp.co - a).dot(ab) / ab_len2
-                if t <= 1e-6 or t >= 1.0 - 1e-6:
-                    continue
-                proj = a + t * ab
-                if (opp.co - proj).length_squared > 1e-6:
-                    continue
-                # Capture position as plain floats before any mutation
-                split_co = (opp.co.x, opp.co.y, opp.co.z)
-                split_v  = opp
-                break
-
-            if split_v is None:
-                continue
-
-            result = bmesh.ops.subdivide_edges(bm, edges=[nm_e], cuts=1,
-                                               use_grid_fill=False)
-            new_verts = [v for v in result.get('geom_inner', [])
-                         if isinstance(v, bmesh.types.BMVert)]
-            if not new_verts:
-                continue
-            new_v = new_verts[0]
-            new_v.co.x, new_v.co.y, new_v.co.z = split_co
-
-            # split_v may have been renumbered by subdivide; check validity
-            if split_v.is_valid:
-                bmesh.ops.pointmerge(bm, verts=[split_v, new_v], merge_co=new_v.co)
-
-            total_splits += 1
-            found = True
-            break   # re-scan from scratch — all snapshots are now stale
-
-        if not found:
-            break
-
-    return total_splits
+# `split_t_junctions` was here and is DELETED.  `libs/welder.py` owns
+# T-junctions, and this implementation was wrong anyway: it scanned
+# `len(e.link_faces) > 2` — NON-MANIFOLD edges — but a T-junction produces OPEN
+# edges, so it found 0 of the 80 on `sphere_allbad`.
 
 
 def run_repair_loop(mesh, obj, label):
@@ -279,55 +219,11 @@ def run_repair_loop(mesh, obj, label):
     return nm_now, open_now, bm
 
 
-def normal_vote(bm, normal_layer):
-    bm.faces.ensure_lookup_table()
-    bm.normal_update()
-    original_faces = []
-    for face in bm.faces:
-        orig_n = mathutils.Vector(face[normal_layer])
-        if orig_n.length_squared > 0.01:
-            original_faces.append((face, orig_n.normalized()))
-    if not original_faces:
-        print("Normal vote — skipped (no stored normals)")
-        return
-    orig_normal_by_index = {{face.index: orig_n for face, orig_n in original_faces}}
-    visited = set()
-    to_flip = []
-    flipped_components = 0
-    total_agree = total_disagree = 0
-    for seed_face in bm.faces:
-        if seed_face.index in visited:
-            continue
-        component = []
-        stack = [seed_face]
-        while stack:
-            f = stack.pop()
-            if f.index in visited:
-                continue
-            visited.add(f.index)
-            component.append(f)
-            for edge in f.edges:
-                for linked_face in edge.link_faces:
-                    if linked_face.index not in visited:
-                        stack.append(linked_face)
-        agree = disagree = 0
-        for f in component:
-            orig_n = orig_normal_by_index.get(f.index)
-            if orig_n is not None:
-                if f.normal.dot(orig_n) >= 0:
-                    agree += 1
-                else:
-                    disagree += 1
-        total_agree += agree
-        total_disagree += disagree
-        if disagree > agree:
-            to_flip.extend(component)
-            flipped_components += 1
-    print("Normal vote — agree: " + str(total_agree) + ", disagree: " + str(total_disagree))
-    if to_flip:
-        print("Flipping " + str(len(to_flip)) + " faces across " + str(flipped_components) + " component(s)")
-        bmesh.ops.reverse_faces(bm, faces=to_flip)
-        bm.normal_update()
+# `normal_vote` was here and is DELETED.  It compared each face's normal
+# against the one stored in the file and voted on winding — but `mesh_io.write`
+# derives normals from the winding, so they always agreed (measured:
+# "agree: 801, disagree: 0"), and PLY carries no per-face normals at all.
+# Orientation is `repairer`'s job, unconditionally, via `by_geometry` (D26).
 
 
 def make_mesh_obj(bm, name):
@@ -341,71 +237,37 @@ def make_mesh_obj(bm, name):
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — load STL or OBJ
+# Step 1 — load the PLY
+#
+# One branch, not three.  The OBJ and ASCII-STL paths are gone: every mesh
+# reaching this script comes from `mesh_io.write`, which emits one format, and
+# `converter` handles anything else long before repair.
 # ---------------------------------------------------------------------------
 bm = bmesh.new()
-normal_layer = bm.faces.layers.float_vector.new("orig_normal")
-
-if is_obj:
-    bpy.ops.wm.obj_import(filepath=src)
-    imported = bpy.context.selected_objects
-    if not imported:
-        print("BLENDER_EMPTY: Blender imported 0 objects from OBJ")
-        sys.exit(1)
-    # Join all objects into one mesh
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.context.view_layer.objects.active = imported[0]
-    if len(imported) > 1:
-        bpy.ops.object.join()
-    obj0 = bpy.context.active_object
-    bm.from_mesh(obj0.data)
-    normal_layer = bm.faces.layers.float_vector.get("orig_normal") or \
-                   bm.faces.layers.float_vector.new("orig_normal")
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete()
-    for face in bm.faces:
-        n = face.normal
-        if n.length_squared > 0.01:
-            face[normal_layer] = n.normalized()
-    print("OBJ faces loaded: " + str(len(bm.faces)))
-elif is_ascii:
-    bpy.ops.import_mesh.stl(filepath=src)
-    imported = bpy.context.selected_objects
-    if not imported:
-        print("BLENDER_EMPTY: Blender imported 0 objects from ASCII STL")
-        sys.exit(1)
-    obj0 = imported[0]
-    bm.from_mesh(obj0.data)
-    normal_layer = bm.faces.layers.float_vector.get("orig_normal") or \
-                   bm.faces.layers.float_vector.new("orig_normal")
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete()
-    for face in bm.faces:
-        n = face.normal
-        if n.length_squared > 0.01:
-            face[normal_layer] = n.normalized()
-    print("STL triangles (ASCII): " + str(len(bm.faces)))
-else:
-    n_tris, normal_layer = load_binary_stl(src, bm)
-    print("STL triangles: " + str(n_tris))
-
+n_faces = load_ply(src, bm)
+print("PLY faces loaded: " + str(n_faces))
 print("Verts loaded: " + str(len(bm.verts)))
 if len(bm.verts) == 0:
-    print("BLENDER_EMPTY: no vertices parsed from STL")
+    print("BLENDER_EMPTY: no vertices in PLY")
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
-# Step 2 — merge doubles + dissolve degenerate.
+# Step 2 — merge doubles: DELETED, the mesh arrives welded.
+#
+# `remove_doubles(dist=merge_dist)` existed only to undo what STL did on the
+# way in, and `merge_dist` was 0.01 mm ABSOLUTE — which measurably ate detail
+# below ~0.2 mm (see the header).  PLY carries the vertex table, so there is
+# nothing to merge: measured on import, 0 open edges and `remove_doubles`
+# removing 0 vertices.
+#
+# `dissolve_degenerate` went with it.  It ran only `if removed > 0`, so on a
+# welded mesh it never executed anyway, and degenerate faces are handled
+# upstream by `repairer`'s CLEAN step (`meshing_remove_null_faces`).
+#
+# The `orig_normal` BMesh layer went too.  It stored each face's normal as read
+# from the STL, for a vote that no longer runs — and PLY does not carry
+# per-face normals at all, so there would be nothing to store.
 # ---------------------------------------------------------------------------
-vb = len(bm.verts)
-bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=merge_dist)
-removed = vb - len(bm.verts)
-normal_layer = bm.faces.layers.float_vector.get("orig_normal") or \
-               bm.faces.layers.float_vector.new("orig_normal")
-print("Merge doubles removed: " + str(removed) + " (dist=" + str(merge_dist) + ")")
-
-if removed > 0:
-    bmesh.ops.dissolve_degenerate(bm, dist=merge_dist, edges=bm.edges[:])
 
 # ---------------------------------------------------------------------------
 # Step 3 — T-junction split: DISABLED, `libs/welder.py` owns this.
@@ -452,7 +314,7 @@ if _pre_repair_nm == 0 and _pre_repair_open == 0:
         bmesh.ops.triangulate(bm, faces=non_tris, quad_method='BEAUTY', ngon_method='BEAUTY')
     bm.normal_update()
     _dst_partial = dst + ".partial"
-    write_stl_from_bm(_dst_partial, bm)
+    write_ply_from_bm(_dst_partial, bm)
     bm.free()
     os.replace(_dst_partial, dst)
     print("BLENDER_OK")
@@ -598,7 +460,7 @@ if nm_final > 0:
 # Refresh cached normals — face.normal goes stale after topology edits.
 bm_final.normal_update()
 _dst_partial = dst + ".partial"
-write_stl_from_bm(_dst_partial, bm_final)
+write_ply_from_bm(_dst_partial, bm_final)
 bm_final.free()
 os.replace(_dst_partial, dst)
 
