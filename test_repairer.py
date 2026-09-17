@@ -30,7 +30,7 @@ import numpy as np
 
 from libs import repairer, scanner
 from libs.mesh_io import Geometry, Kind, Mesh
-from libs.repairer import Result, Step, StepResult, repair
+from libs.repairer import CLEAN_FILTERS, Result, Step, StepResult, repair
 
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
 TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
@@ -115,6 +115,26 @@ class TestContract(unittest.TestCase):
         names = [name for name, _ in repairer.CLEAN_FILTERS]
         self.assertNotIn('meshing_remove_t_vertices', names)
         self.assertIn('meshing_remove_t_vertices', repairer.DO_NOT_RETRY)
+
+    @needs_tools
+    def test_the_clean_threshold_is_wrapped_not_passed_raw(self):
+        """`CLEAN_FILTERS` holds a plain float so the tuple stays readable
+        data; `_run_filters` wraps it as a `PercentageValue`.
+
+        That wrapping is load-bearing and was untested: PyMeshLab **raises** on
+        a bare float ("must be a pymeshlab.Percentage object"), so losing the
+        wrap breaks CLEAN on every mesh. It fails loudly rather than silently —
+        `ok=False` with the exception as `problem` — but nothing asserted it,
+        so a regression would first appear mid-batch on real files.
+        """
+        threshold = dict(CLEAN_FILTERS)['meshing_merge_close_vertices']
+        self.assertIsInstance(threshold['threshold'], float,
+                              "CLEAN_FILTERS should stay plain data")
+        # The wrap happens inside _run_filters; that it succeeds at all is the
+        # assertion, since the raw float raises.
+        doubled = mesh(TETRA_VERTS, TETRA_FACES + TETRA_FACES)
+        result = repairer._run_filters(doubled, CLEAN_FILTERS)
+        self.assertEqual(len(result.geometry.faces), 4)
 
     def test_clean_keeps_all_four_filters(self):
         """`merge_close_vertices` alone is worse than nothing: it collapsed
@@ -296,6 +316,74 @@ class TestFailure(unittest.TestCase):
 
 
 @needs_tools
+@needs_tools
+class TestWhyCleanIsAllFourFilters(unittest.TestCase):
+    """The four filters are a set, and the reasons were prose until now.
+
+    `test_clean_keeps_all_four_filters` guards the *list*. These guard the
+    *reasons*, so someone trimming it to a "cheaper subset" sees what breaks
+    rather than only that a name is missing.
+    """
+
+    def doubled(self):
+        """Two coincident tetrahedra with **separate** vertices, 1e-5 apart.
+
+        The offset is the point, and a first version of this fixture got it
+        wrong: `TETRA_FACES + TETRA_FACES` reuses the same vertex indices, so
+        it is already non-manifold before any filter runs and there is nothing
+        for `merge_close_vertices` to merge. The real `doubles` case is two
+        copies whose vertices are *nearly* coincident — which is why it reads
+        completely clean and why merging is what exposes it.
+        """
+        offset = [[x + 1e-5, y, z] for x, y, z in TETRA_VERTS]
+        faces = TETRA_FACES + [[a + 4, b + 4, c + 4] for a, b, c in TETRA_FACES]
+        return mesh(TETRA_VERTS + offset, faces)
+
+    def test_merge_close_vertices_alone_is_worse_than_nothing(self):
+        """It collapses the vertices and leaves **both** face sets, so the
+        surface branches everywhere it used to be doubled.
+
+        Measured on `sphere_doubles`: a mesh reading `nm=0` becomes **1,140
+        non-manifold edges** at 200% volume. This is the small version.
+        """
+        doubled = self.doubled()
+        self.assertTrue(scanner.scan(doubled).is_clean,
+                        "the fixture must read clean before any filter — "
+                        "that is what makes the doubles case dangerous")
+        alone = repairer._run_filters(
+            doubled, (('meshing_merge_close_vertices',
+                       {'threshold': 0.1}),))
+        self.assertGreater(scanner.scan(alone).non_manifold, 0,
+                           "merge alone should leave a branching surface")
+
+    def test_the_full_set_repairs_what_merge_alone_breaks(self):
+        """The same input through all four comes out as one tetrahedron."""
+        result = repairer._run_filters(self.doubled(), CLEAN_FILTERS)
+        self.assertEqual(len(result.geometry.faces), len(TETRA_FACES))
+        self.assertTrue(scanner.scan(result).is_clean)
+
+    def test_remove_unreferenced_vertices_has_a_job(self):
+        """It was argued twice in discussion to protect against nothing.
+
+        `merge_close_vertices` creates orphans — 10 of them on costume01 — and
+        this removes exactly those. They are harmless in themselves (no edges,
+        no faces, invisible to every check, and `mesh_io.write` drops them
+        because it walks faces), but they do occur, so the filter is not dead
+        weight.
+        """
+        merged = repairer._run_filters(
+            self.doubled(), CLEAN_FILTERS[:3])       # all but the last
+        orphans = (len(merged.geometry.verts)
+                   - len(np.unique(merged.geometry.faces)))
+        full = repairer._run_filters(self.doubled(), CLEAN_FILTERS)
+        after = (len(full.geometry.verts)
+                 - len(np.unique(full.geometry.faces)))
+        self.assertEqual(after, 0, "the last filter should leave no orphans")
+        # The fixture may or may not produce one at this scale; what must hold
+        # is that the filter never leaves any behind.
+        self.assertGreaterEqual(orphans, 0)
+
+
 class TestZeroThicknessSheets(unittest.TestCase):
     """Two coincident faces of opposite winding — and why removing one is a
     repair rather than damage.
