@@ -4112,3 +4112,63 @@ commercial service handles it**, keeping all 532 vertices and adding exactly
 **A hazard worth naming**: `meshing_remove_t_vertices(method='Edge Collapse')`
 at a low threshold silently reduced a 910-face mesh to zero faces with
 `nm=0 open=0` — a "clean" empty mesh. Volume is the only check that catches it.
+
+### Measured — the two orientation filters in isolation, and a correction
+
+**2026-09-16.** `meshing_re_orient_faces_coherently()` +
+`meshing_re_orient_faces_by_geometry()`, run alone on every fixture.
+
+| fixture | before | after |
+|---|---|---|
+| `inverted` | −4094.9 | **+4094.9** |
+| `seam` | +2146.2, 40 seam edges / 1 loop | **+4094.9, 0/0** |
+| `correct` | +4094.9 | unchanged |
+| `tjunction` (3 open) | 100% | unchanged, safe |
+| `tjunction_many` (450 open) | 100% | unchanged, safe |
+| `doubles` (2 shells) | 200% | unchanged, safe |
+| `degenerate` (nm=1) | — | **RAISES** |
+| `fin` (nm=1) | — | **RAISES** |
+
+**The precondition is exactly `nm == 0`.** The error says why: *"Mesh has some
+not 2-manifold faces, Orientability requires manifoldness"* — orientation is
+undefined on a non-manifold surface. Open edges and multiple shells are fine;
+only non-manifold edges block it.
+
+So these filters are safe to run unconditionally **after** non-manifold edges
+are resolved, and `scanner.scan().non_manifold` is the gate. Verified:
+PyMeshFix on `fin` gives 756f/100%, and orient then runs as a clean no-op.
+
+#### Correction — PyMeshFix fixes the seam fixture by itself
+
+Recorded this morning, in the seam comparison table: *"PyMeshFix — not
+applicable, no open edges to work on."* **Wrong.** Measured:
+
+```
+source     760f 382v vol +2146.2  seams 40/1
+pymeshfix  760f 382v vol +4094.9  seams 0/0     <- exactly the control
+same face set (ignoring winding): True
+faces re-wound: 760 of 760
+```
+
+It re-wound the entire mesh to a consistent outward orientation. One call, no
+split, no flip, no merge, no reload.
+
+**So the split → flip → merge → reload sequence recorded as "SOLVED" is
+unnecessary for this fixture.** It is correct and it reaches the control, but
+`meshfix.repair(mesh)` alone does the same thing, and so does the PyMeshLab
+pair. Three routes to the same answer, and I built the most elaborate one first
+because I had assumed PyMeshFix could not help.
+
+**The design doc's claim is not contradicted** — it says PyMeshFix *deletes a
+region* on irreconcilable winding, 562,288 faces in and 394,432 out, on a real
+model. That model evidently had something this fixture lacks (more shells, or a
+seam that re-winding cannot resolve). **The fixture does not reproduce the
+failure the seam mechanism was built for**, which is worth knowing before
+trusting it as the test case for that mechanism.
+
+#### Where this leaves the two filters
+
+They are the **only** tool that fixes a uniformly inverted mesh. For seams they
+are one of three options. Their value is therefore narrower than it first
+appeared, but not zero — and they cost nothing, PyMeshLab being already a
+dependency and in-process.
