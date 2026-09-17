@@ -3950,3 +3950,41 @@ that would justify removing the machinery:
 
 Signed volume is the only check that sees anything wrong, and it is the same
 measure that turned out to drive the repair (flip the negative-volume region).
+
+#### Both seam repairs are idempotent
+
+Re-running each repair on its own output changes nothing — checked because a
+repair that keeps "fixing" the same file is a real failure mode, and the
+pipeline reruns files.
+
+**Ours**, three passes from the source:
+
+| pass | faces | verts | seams | regions | flipped | volume |
+|---|---|---|---|---|---|---|
+| src | 760 | 382 | 40/1 | — | — | +2146.2 |
+| 1 | 760 | 382 | **0/0** | 2 | 1 | **+4094.9** |
+| 2 | 760 | 382 | 0/0 | **1** | 0 | +4094.9 |
+| 3 | 760 | 382 | 0/0 | 1 | 0 | +4094.9 |
+
+Pass 1 does the work. Passes 2 and 3 find **one** region — no seam to cut on —
+so `by_seams` returns `(mesh,)` and nothing is flipped, merged or welded. That
+is the "a mesh that does not split comes back as a list of one" contract doing
+its job: a rerun costs one scan.
+
+**The commercial service** likewise: `fixture_seam_fixed.stl` back through it
+reports 0 of everything and returns 382 verts / 760 faces unchanged.
+
+So both approaches are stable, and they agree on the answer:
+
+| | detection | mechanism | result | idempotent |
+|---|---|---|---|---|
+| service | 40 inverted normals | flip the faces in place | +4095.2 | yes |
+| **ours** | 1 closed seam loop | split → flip negative-volume region → merge → reload | **+4094.9** | yes |
+
+**A possible simplification, not taken.** The service does not split at all —
+it flips the reversed faces where they are, which is simpler than
+split-merge-reload. Ours could do the same if the reversed region could be
+identified *without* extracting it; `scanner.shells()` does not currently
+distinguish regions across a seam boundary, so that would need new work. The
+split path is built and tested, so this is recorded as an option rather than a
+plan.
