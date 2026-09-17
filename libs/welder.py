@@ -14,9 +14,17 @@ Geometrically flush — the gap is zero — and topologically unjoined.  Measure
 on `sphere_tjunction.stl`: vertex 345 lies on edge (339, 358) at t=0.500, at a
 distance of **2.6e-23**.
 
-**No vertex merge can fix it**, which is why `MERGE_DIST` and Blender's
-`remove_doubles` do not help: nothing is coincident.  M is not on top of
-another vertex, it is in the middle of somebody else's edge.
+**No vertex merge can fix a real one**, which is why `MERGE_DIST` and
+Blender's `remove_doubles` do not help: nothing is coincident.  M is not on top
+of another vertex, it is in the middle of somebody else's edge.
+
+**But a merge fixes the thing that looks like one**, and telling them apart
+matters (measured 2026-09-17).  A vertex can sit on an edge geometrically while
+belonging to a *separate piece of surface* — no shared edge, no shared face.
+That is two surfaces that should be joined and are not, and
+`meshing_merge_close_vertices` stitches them: on costume01 it took the affected
+edge from one face to two with every vertex surviving.  The topological test
+below is what keeps this module from claiming that case.
 
 **The repair is one face split.**  Cut the neighbouring face at M, and the
 single face becomes two sharing a new edge from M to the opposite corner.
@@ -47,18 +55,20 @@ import numpy as np
 
 from .mesh_io import Geometry, Mesh
 
-#: How far a vertex may sit from an edge and still count as lying on it.
+#: How far a vertex may sit from an edge and still count as lying on it,
+#: **as a fraction of that edge's own length**.
 #:
 #: Generous relative to a true T-junction, which is exact by construction — a
 #: subdivision puts the vertex *on* the edge, and the fixture measures
-#: 2.6e-23.  A junction arriving from a boolean operation or a decimation sits
-#: near rather than on, so the tolerance must absorb float error without
-#: splitting faces that merely pass close by.
+#: 2.6e-23.  A junction arriving from a boolean or a decimation sits near
+#: rather than on, so the tolerance must absorb float error without splitting
+#: faces that merely pass close by.
 #:
-#: **KNOWN BUG (2026-09-17): this is an absolute distance and it breaks with
-#: model scale.**  Measured on one T-junction injected into the same sphere at
-#: seven radii — the junction's distance from the edge grows with the model,
-#: because float32 carries ~7 significant digits:
+#: **A fraction, because an absolute distance cannot work** (fixed 2026-09-17,
+#: it was `1e-6` mm).  float32 carries ~7 significant digits, so a coordinate's
+#: own rounding error grows with the model while the ratio stays flat.  The
+#: same junction injected into the same sphere at seven radii, against the old
+#: absolute value:
 #:
 #:     r=1     1.9e-08   found
 #:     r=10    2.6e-23   found
@@ -67,29 +77,36 @@ from .mesh_io import Geometry, Mesh
 #:     r=200   5.0e-06   MISSED
 #:     r=500   0.0       found
 #:
-#: A 100-200 mm print is an ordinary size, so this is a live gap.  A tolerance
-#: of `radius * 1e-4` finds it at all seven.  The fix is to scale by the
-#: bounding-box diagonal, as `repairer.CLEAN_FILTERS` already does — see the
-#: OPEN BUG entry in REFACTOR_DECISIONS.md.
+#: A 100-200 mm print is an ordinary size, so that was a live gap.  Relative to
+#: the edge, all nine radii tested (0.5 mm to 5000 mm) find it and repair clean.
 #:
-#: **Now calibrated, on costume01** — the first real-data measurement of this
-#: constant.  A 113.7 mm model, sweeping the threshold as a fraction of the
-#: edge length:
+#: **The edge's length rather than the bounding-box diagonal**, which is what
+#: `repairer.CLEAN_FILTERS` uses and was the first candidate here.  The question
+#: this answers is "is M close enough to a-c that splitting at it is the right
+#: repair", which is naturally scaled by |ac| — and on a model with 0.0088 mm
+#: edges beside 90 mm features, a diagonal-relative value means two very
+#: different things.
 #:
-#:     fraction    junctions found    worst distance / edge
-#:     1e-7                      4                 5.2e-04
-#:     1e-6                      5                 1.5e-03   <- plateau
-#:     1e-5                      5                 1.5e-03   <- plateau
-#:     1e-4                     10                 6.1e-02   garbage
-#:     1e-3                     13                 5.4e-01   garbage
+#: **Calibrated on costume01** (113.7 mm), the first real-data measurement:
 #:
-#: **Five is the answer**, stable across two decades.  Above that it collapses
-#: sharply: a candidate 6% of an edge-length off the line is not a subdivided
-#: edge, it is a hole with a triangle fan across it.  Real junctions sit at
-#: ~1.5e-03 of the edge and false ones at 6e-02 — a 40x gap, so the value is
-#: not a fine judgement.  1e-5 sits in the middle of the plateau.
+#:     fraction    candidates found    worst distance / edge
+#:     1e-7                       4                 5.2e-04
+#:     1e-6                       5                 1.5e-03   <- plateau
+#:     1e-5                       5                 1.5e-03   <- plateau
+#:     1e-4                      10                 6.1e-02   garbage
+#:     1e-3                      13                 5.4e-01   garbage
 #:
-#: The old value was `1e-6` **absolute**, and it found **1 of those 5**.
+#: Stable across two decades, then it collapses sharply: a candidate 6% of an
+#: edge-length off the line is not a subdivided edge, it is a hole with a
+#: triangle fan across it.  1e-5 sits in the middle of the plateau, and the 40x
+#: gap between the classes means the value is not a fine judgement.
+#:
+#: **Those five are candidates, not confirmed T-junctions.**  One of them was
+#: traced by index and turned out to be a different defect — a separate piece
+#: of surface passing through nearly the same point, which
+#: `merge_close_vertices` repairs.  See the `welder` entry in
+#: REFACTOR_DECISIONS.md.  The plateau is still the right place to sit; the
+#: count should not be quoted as a T-junction total.
 DEFAULT_TOLERANCE = 1e-5
 
 #: Cap on repair rounds.  Splitting a face changes the edge map, so a vertex
@@ -160,9 +177,10 @@ def _find_in(verts: np.ndarray,
 
     So the candidate M is not "any vertex near this edge" — it is a vertex the
     connectivity already nominates.  The previous version tested **every**
-    open-boundary vertex against every open edge, which on a 900k-face model is
-    thousands of candidates per edge with the tolerance as the only thing
-    rejecting them.  That is why a loose tolerance was catastrophic: at 1e-2 of
+    open-boundary vertex against every open edge, with the tolerance as the only
+    thing rejecting them.  Measured on costume01's 20 open edges: 18 candidates
+    per edge before, **3.6 on average** after.  That is why a loose tolerance
+    was catastrophic: at 1e-2 of
     the diagonal it accepted vertices 6% of an edge-length away, tripling the
     face count on `tjunction_many`.
 
@@ -198,9 +216,9 @@ def _find_in(verts: np.ndarray,
     if not open_edges:
         return {}
 
-    # Vertices of each open edge, and the open edges each vertex belongs to.
-    # Only a vertex sharing open edges with *both* ends of (a, c) can subdivide
-    # it, which is what narrows the search from thousands to a handful.
+    # For each vertex, which other vertices it shares an open edge with.  A
+    # candidate must reach at least one end of (a, c) that way — see the note
+    # at the loop below for why one end and not both.
     open_at: dict[int, set[int]] = defaultdict(set)
     for u, w in open_edges:
         open_at[u].add(w)
