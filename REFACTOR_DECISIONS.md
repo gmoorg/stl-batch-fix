@@ -1634,6 +1634,41 @@ What remains is `convert.blender`, which already uses `bpy.ops.export_mesh.stl`
 with no hand-packing — a much weaker case. Reconsider if `repairer` makes heavy
 use of the Blender boundary.
 
+> **RE-OPENED 2026-09-17 — the user's concern, and the trigger above has
+> fired.** `repairer.blender_part` now exists: step 4 can route each part
+> through `blender_fx/repair.blender`, which means **write STL, launch Blender,
+> read STL back, per part**. On Mandy that is 38 round trips in one repair.
+>
+> **The user's position: switch to PLY for both input and output at the Blender
+> boundary.** Recorded as raised, not yet argued through.
+>
+> What has changed since this was written, beyond the volume of traffic:
+>
+> - **STL has no vertex table**, so every write splits the mesh into loose
+>   triangles and every read has to re-weld it. Measured on real models: exactly
+>   **6.0x duplication** of every vertex. PLY carries the vertex table, and the
+>   round-trip test above confirms it survives Blender intact (v/f 0.500 in,
+>   0.501 out after decimation).
+> - **Re-welding is not free and is not neutral.** `mesh_io.load` folds `-0.0`
+>   to `0.0` and welds by exact coordinate match; that is a correctness-relevant
+>   transformation applied 38 times per model, where PLY would apply it zero
+>   times.
+> - **STL normals are a liability at this boundary, not a feature.** Measured
+>   today: the Blender script's `normal_vote` reported `agree: 801, disagree: 0`
+>   because `mesh_io.write` derives normals from the winding, so the 12 bytes
+>   per triangle carry no information and cost 24% of the file. PLY's bare
+>   header (`x, y, z` plus a face list) carries exactly what is needed.
+>
+> **Scope is unchanged from the original entry**: the Blender scratch boundary
+> only. Not an input format — there has never been a PLY in the collection — and
+> never the deliverable, since Bambu Studio's import dialog lists no PLY.
+>
+> **To settle when resumed**: whether `repairer` keeps the Blender rung at all
+> (it is not the default, and it does not re-wind anything — see D26), because
+> if the rung goes, so does the boundary and the whole question. Measure the
+> round-trip cost on Mandy's 38 parts before deciding: if STL round tripping is
+> a measurable fraction of the 9s repair, that is the argument.
+
 **Both preconditions were verified** (2026-09-15, Blender 4.0.2) and hold, so
 this is a scope decision rather than a research one:
 

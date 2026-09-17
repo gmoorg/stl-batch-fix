@@ -420,6 +420,13 @@ def blender_part(part: Mesh, timeout: float = 600) -> tuple[Mesh, str]:
     is written out, Blender is launched, and the result read back.  PyMeshFix
     runs on the arrays in this process.
 
+    **And the boundary is STL, which the user has flagged as the wrong format
+    for it (2026-09-17).**  STL carries no vertex table, so each write splits
+    the mesh into loose triangles — measured at exactly **6.0x** duplication of
+    every vertex — and each read has to re-weld it.  On Mandy that is 38 round
+    trips per repair.  PLY carries the vertex table and was verified to survive
+    Blender intact; see the re-opened PLY entry in REFACTOR_DECISIONS.md.
+
     What it buys, measured on prepared single-shell parts — which is what step
     4 hands it, and is *not* what the frozen script does to a raw file:
 
