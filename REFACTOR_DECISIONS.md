@@ -3134,6 +3134,116 @@ What fixes it is `by_geometry` simply being allowed to run.
 
 ---
 
+### The T-junction pattern is topological, but topology alone is not sufficient
+
+**2026-09-17, from the user's sketch.** The defect has an exact topological
+description, and it is worth recording because it narrows the search far better
+than the current prefilter:
+
+```text
+      b            X = [a, b, c]      spans the full edge (a,c)
+     / \           L = [a, M, d]
+    a---M---c      R = [M, c, d]
+     \ /
+      d            X shares ONE vertex with L (a) and ONE with R (c);
+                   both are corners of X and together they are X's edge.
+                   L and R share TWO vertices (M, d) — an edge.
+                   M is the shared vertex that is NOT in X.
+```
+
+Verified against `sphere_tjunction`: X=[335,358,339], L=[339,345,350],
+R=[345,358,350] — a=339, c=358, M=345, d=350, and X does use edge (339,358).
+
+**Measured against `welder` on every fixture — identical, including the
+negatives:**
+
+| fixture | topological | `welder` | open edges |
+|---|---|---|---|
+| correct | 0 | 0 | 0 |
+| tjunction | 1 | 1 | 3 |
+| tjunction_many | **150** | **150** | 450 |
+| fin | 0 | 0 | 2 |
+| degenerate | 0 | 0 | 1 |
+| allbad | **160** | **160** | 484 |
+| doubles | 0 | 0 | 0 |
+
+`fin` and `degenerate` are the important rows: they *have* open edges and no
+T-junctions, and the pattern correctly finds none.
+
+**But topology alone is NOT sufficient, and this is the answer to "can we drop
+the tolerance entirely" — no.** Constructed counter-example: three faces in
+exactly that arrangement with M **5 mm off** the line a-c. The pattern fires;
+`welder` correctly does not. That is a hole with a triangle fan across it, not
+a T-junction.
+
+The reason is structural: the defect *is* the absence of any topological link
+between M and X, so only coordinates can say whether M lies on X's edge. The
+pattern is a **necessary condition**, not a sufficient one.
+
+**What this changes about the tolerance fix:** the pattern is a better
+prefilter than "any open-boundary vertex against any open edge". Narrowed to
+the three-face arrangements, the distance test is no longer scanning broadly —
+it is deciding among already-plausible matches. At that point the question is
+not "is this float noise" but "is M close enough to a-c that splitting X at it
+is the right repair", which is naturally a fraction of **|ac|**, the edge's own
+length, rather than of the bounding-box diagonal.
+
+A false positive of the earlier analysis, recorded so it is not repeated: a
+first attempt at this test searched for X sharing *exactly one* vertex with
+each of L and R without requiring (a,c) to be X's edge, and reported 3 hits on
+a defect-free sphere. Those were phantom matches from a mis-stated pattern, not
+evidence that topology is ambiguous.
+
+#### Tested at tolerance = 1000 mm, ~30x the model's own diameter
+
+The user's test, and it separates the fixtures into two groups.
+
+**Unaffected across nine orders of magnitude** — `correct`, `tjunction`,
+`degenerate`, `doubles` give *identical* answers at 1e-6 and at 1000. The
+open-edge prefilter is why: no open edges means no candidates, so the distance
+test never runs. `tjunction` finds exactly its 1 junction either way, because
+there is only one three-face arrangement to consider.
+
+**Catastrophic where open edges are many:**
+
+| fixture | faces | nm | open | volume |
+|---|---|---|---|---|
+| `tjunction_many` | 910 -> **2,834** | **524** | 79 | +2394.3 (was +4094.9) |
+| `allbad` | 1,684 -> **3,911** | **531** | 130 | **-5174.7** |
+| `fin` | 761 -> 762 | **1** | 0 | +4094.9 |
+
+`tjunction_many` finds **425 junctions instead of 150** and triples the face
+count, splitting faces at vertices nowhere near their edges — with 450 open
+edges and 532 candidates, a 1000 mm tolerance matches almost everything. `fin`
+gains a non-manifold edge where it had none.
+
+**And the topological pattern is immune to all of it:**
+
+| fixture | topological | geometric @1e-6 | geometric @1000 |
+|---|---|---|---|
+| tjunction_many | **150** | 150 | 425 |
+| allbad | **160** | 160 | 472 |
+| fin | **0** | 0 | 1 |
+
+It produces the correct answer with **no tolerance at all**, on every fixture,
+including the negative. On this evidence it is not merely a better prefilter —
+it is a strictly better detector, the one known exception being the
+constructed case where M sits 5 mm off the line and the pattern still fires.
+
+**So the tolerance fix has two candidate shapes**, and this changes which is
+preferable:
+
+1. *Scale the existing tolerance* by the edge length — fixes the unit, keeps a
+   number to calibrate.
+2. *Make the topological pattern the detector* and use a distance test only to
+   reject the M-far-off-the-line case — where the threshold is a sanity check
+   rather than the discriminator, so its exact value stops mattering.
+
+The second is more work but removes the calibration question rather than
+relocating it. Not yet decided.
+
+---
+
 ### OPEN BUG — absolute tolerances break with model scale (found 2026-09-17)
 
 **Not fixed. Found at the end of the session, recorded to resume from.**
