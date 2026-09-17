@@ -4632,6 +4632,11 @@ decimation sits *near* an edge rather than on it, and the threshold becomes a
 judgement: too tight misses them, too loose splits faces that should not be.
 That is a parameter to calibrate on real data, not a design problem.
 
-Outputs written as `sphere_tjunction_tjfix.stl` and
-`sphere_tjunction_many_tjfix.stl` for visual confirmation — numbers have been
-wrong about this fixture three times.
+**Confirmed by eye**: `sphere_tjunction_tjfix.stl` and
+`sphere_tjunction_many_tjfix.stl` both render clean, **no dents**. That check
+mattered — numbers had been wrong about this fixture three times, and both
+PyMeshFix's and Blender's outputs passed every numeric gate while being
+visibly gashed.
+
+So this is the first repair in the session that **our own code does better
+than every external tool**, verified numerically and visually.
