@@ -3844,7 +3844,16 @@ cheap first filter, with Hausdorff distance for the cases it flags.
 0.3%. Looking at it took seconds. This is the second time in one session that
 eye inspection overturned a conclusion every measurement supported.
 
-### SOLVED — the seam case: split, flip by signed volume, merge, reload
+### SOLVED (as a sequence, NOT as code) — the seam case
+
+> **Read this first.** Nothing below is implemented. The sequence was run in a
+> throwaway shell script and measured; the repo cannot do it. `splitter`,
+> `mesh_io` and `scanner` provide every piece **except the flip**, which lives
+> nowhere — the only `faces[:, ::-1]` in the tree is in `make_fixtures.py`,
+> where it *builds* the inverted fixture. `stl_batch_fix.blender` and
+> `stl_batch_fix.py` were not touched; both remain frozen. The flip belongs in
+> `repairer` when that is built, because deciding a region is backwards is
+> policy rather than geometry.
 
 **Measured 2026-09-16.** `sphere_seam.stl` — one sphere with its cap reversed,
 40 seam edges in 1 closed loop, volume **+2146.2** against a control of

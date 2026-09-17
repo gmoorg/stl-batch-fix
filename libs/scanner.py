@@ -354,6 +354,45 @@ def seam_edges(mesh: Mesh) -> np.ndarray:
     return np.ascontiguousarray(found, dtype=np.int64)
 
 
+def volume(mesh: Mesh) -> float:
+    """Signed volume enclosed by the mesh.
+
+    The divergence-theorem sum over tetrahedra from the origin to each face:
+    positive when the surface faces outward, negative when it is inside-out.
+
+    **It is the only check that sees several things nothing else does**, which
+    is why it lives here beside the topological counts rather than in a caller:
+
+    - an **inside-out mesh**.  A sphere with every face reversed is identical
+      to a correct one on nm, open edges, degenerate faces, seams and shell
+      count; only the sign differs (-4094.9 against +4094.9).  Confirmed that
+      no other tool sees it either — PyMeshFix is a no-op, a commercial repair
+      service reports "0 Inverted normals", and Bambu renders and slices it
+      normally.  On that evidence it is a non-defect *in isolation*.
+    - a **reversed region after a seam split**, which is not a non-defect at
+      all: the region comes back with negative volume, and flipping it is the
+      whole repair.  Measured on a sphere with a reversed cap: split gives
+      regions of +3120.5 and -974.3, and flipping the second reconstructs the
+      control exactly.
+    - a **repair that destroyed geometry**.  PyMeshFix turned two coincident
+      spheres into +2047.4 — half of one — while every local check, ours and a
+      commercial service's, called the result clean.  A half sphere is a
+      perfectly valid watertight mesh; only the comparison against what the
+      file was before sees the loss.
+
+    That last point is the general one: every other check here asks *is this
+    mesh self-consistent*.  This is the only one that can support *did
+    something destroy it*, and only by comparison — the number alone means
+    nothing without a before.
+    """
+    _require_geometry(mesh)
+    if len(mesh.geometry.faces) == 0:
+        return 0.0
+    tri = mesh.geometry.verts[mesh.geometry.faces].astype(np.float64)
+    return float(np.einsum('ij,ij->i', tri[:, 0],
+                           np.cross(tri[:, 1], tri[:, 2])).sum() / 6.0)
+
+
 def shells(mesh: Mesh) -> tuple[np.ndarray, ...]:
     """Connected components, as face-index arrays, largest first.
 

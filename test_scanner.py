@@ -21,7 +21,7 @@ from libs import scanner
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.scanner import (
     Loop, Scan, largest_open_loop, open_loops, open_loops_are_printable, scan,
-    seam_edges, shell_count, shells, winding_seams,
+    seam_edges, shell_count, shells, volume, winding_seams,
 )
 
 #: A unit tetrahedron, consistently wound: 4 faces, 6 edges, every edge shared.
@@ -398,6 +398,56 @@ class TestSeamEdges(unittest.TestCase):
     def test_unloaded_raises(self):
         with self.assertRaises(ValueError):
             seam_edges(unloaded())
+
+
+class TestVolume(unittest.TestCase):
+    """Signed volume — the only check that sees several things nothing else does."""
+
+    def test_a_closed_mesh_has_positive_volume(self):
+        self.assertGreater(volume(tetra()), 0)
+
+    def test_reversing_every_face_flips_the_sign(self):
+        """The inside-out case. Identical on every other check — nm, open,
+        degenerate, seams, shells — and no other tool sees it either:
+        PyMeshFix is a no-op, a commercial service reports 0 inverted normals,
+        and Bambu renders and slices it normally."""
+        faces = np.array(TETRA_FACES, dtype=np.int64)[:, ::-1]
+        forward, backward = volume(tetra()), volume(tetra(faces))
+        self.assertAlmostEqual(forward, -backward, places=4)
+        self.assertLess(backward, 0)
+
+    def test_an_empty_mesh_has_zero_volume(self):
+        self.assertEqual(volume(mesh(TETRA_VERTS,
+                                     np.zeros((0, 3), dtype=np.int64))), 0.0)
+
+    def test_it_is_the_tetrahedron_s_actual_volume(self):
+        """A corner tetrahedron with legs of 1 encloses 1/6."""
+        self.assertAlmostEqual(abs(volume(tetra())), 1.0 / 6.0, places=5)
+
+    def test_scaling_cubes_the_volume(self):
+        """Guards against an area- or length-like measure sneaking in."""
+        big = mesh([[c * 2 for c in v] for v in TETRA_VERTS], TETRA_FACES)
+        self.assertAlmostEqual(volume(big), volume(tetra()) * 8, places=4)
+
+    def test_translation_does_not_change_it(self):
+        """The sum is over tetrahedra from the origin, so a mesh far from the
+        origin must still report its own enclosed volume."""
+        far = mesh([[c + 100 for c in v] for v in TETRA_VERTS], TETRA_FACES)
+        self.assertAlmostEqual(volume(far), volume(tetra()), places=3)
+
+    def test_two_disjoint_shells_add_up(self):
+        """The doubles case: two coincident spheres read as twice one. That is
+        what showed PyMeshFix had destroyed geometry when every local check —
+        ours and a commercial service's — called its output clean."""
+        verts = TETRA_VERTS + [[10, 10, 10], [11, 10, 10],
+                               [10, 11, 10], [10, 10, 11]]
+        faces = TETRA_FACES + [[4, 6, 5], [4, 5, 7], [4, 7, 6], [5, 6, 7]]
+        self.assertAlmostEqual(volume(mesh(verts, faces)),
+                               volume(tetra()) * 2, places=4)
+
+    def test_unloaded_raises(self):
+        with self.assertRaises(ValueError):
+            volume(unloaded())
 
 
 class TestShellsAgainstUnionFind(unittest.TestCase):
