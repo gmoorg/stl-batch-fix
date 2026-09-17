@@ -4315,3 +4315,54 @@ merge(parts)
 **Not yet confirmed by eye** — and `tjunction_many` at 1000 faces is the same
 shape that was visibly dented before, so that one especially needs looking at.
 Numbers have been wrong about this fixture twice.
+
+### Measured — Blender CAN repair costume01; it missed the timeout by 16%
+
+**2026-09-16.** The original `.failed.stl` on this model was a **timeout, not a
+failure**. `fix_stl` returned `TIMEOUT after 420s` with no markers and no output
+file, which is why the caller had nothing to report.
+
+Re-run with the cap lifted to 3780s: **Blender finished in 488s** — 68 seconds
+past the 420s budget, a 16% overrun.
+
+`_blender_budget()` gives 70% of a 600s budget, reserving 30% for post-Blender
+work. That reserve is measured and justified (p95 of post-Blender PyMeshFix was
+152.6s), so the cap is not arbitrary — this model simply needs more than the
+whole budget allows.
+
+#### But finishing is not the same as winning
+
+| | faces | nm | open | shells | volume | time |
+|---|---|---|---|---|---|---|
+| decimated input | 900,000 | 2,263 | 20 | 491 | 100.0% | — |
+| **Blender** | 887,019 | **0** | **493** | 450 | 99.5% | 488s |
+| **PyMeshFix** (after split) | 835,426 | **0** | **28** | 3 | **100.0%** | 201s |
+
+Both clear all 2,263 non-manifold edges. Blender leaves **493 open edges
+against PyMeshFix's 28**, keeps 450 shells where the split reduced to 3, loses
+0.5% volume against 0.0%, and takes **2.4x as long**.
+
+Its final marker is `BLENDER_OPEN: open=493 max=0.7735mm` — and 0.7735mm
+exceeds `MIN_LAYER = 0.6`, so the print-scale gate would not accept it either.
+
+#### The pass log shows the cost
+
+```
+Repair pass  7: nm=237 boundary=392
+Repair pass  8: nm=236 boundary=389
+Repair pass  9: nm=236 boundary=389          <- stalled
+Repair pass 10: wider NM deletion (2583 faces)
+Repair pass 10: nm=26 boundary=460
+Repair pass 11: nm=14 boundary=425
+Repair pass 12: nm=14 boundary=419           <- loop limit, not success
+```
+
+Twelve passes, the stall counter firing at 9, the wider-NM escalation deleting
+2,583 faces at pass 10, and termination at the loop limit rather than at
+convergence. The escalation works — nm goes 236 to 26 — but it is deleting
+geometry to get there, which is where the 0.5% volume and 493 open edges come
+from.
+
+**So the incumbent is slower, lossier, and ends short of clean on the one real
+multi-shell model tested.** Its wins remain the simple single-shell cases —
+`fin` and `doubles`, both exact.
