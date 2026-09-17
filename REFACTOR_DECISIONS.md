@@ -3275,26 +3275,22 @@ A closed sphere with **every** face reversed was put through the whole chain:
 | `meshfix.repair()` | clean no-op: 760 faces in, 760 out, volume unchanged, `ok=True` |
 | commercial online repair service | **"0 Inverted normals"** — its dedicated check reports nothing |
 | Bambu Studio — render | renders as a normal opaque sphere |
-| Bambu Studio — **slice** | **not yet tested** (see below) |
+| Bambu Studio — **slice** | **slices fine** (confirmed) |
 
 Only signed volume distinguishes it: **+4094.9 against −4094.9**.
 
-**Correction, same day.** The table above originally said "slices fine". That
-was my misreading: the user confirmed all four spheres *render* normally and I
-took "all 4" to cover slicing as well. The render result is real; the slice
-result is pending. The conclusion below therefore rests on four of five stages,
-and the fifth is the one that decides whether the file prints — so it is the
-one that matters most.
+**Confirmed on all five stages**, the slice last and separately. (A note on
+process: the table briefly claimed "slices fine" before it had been tested — I
+read the user's confirmation that all four *rendered* as covering slicing too.
+It was corrected while the test ran, and then the test agreed with it. Being
+right by luck is not being right, and the correction was worth making.)
 
-**If the slice confirms it**, nothing downstream treats this as a defect and it
-is not one: a slicer reconstructs orientation from geometry rather than
-trusting the file's winding, which is the sane thing for it to do since it has
-to produce a solid either way. **If the slice fails or produces a hollow or
-inverted result**, this entry is wrong and detection becomes worth building —
-signed volume is a one-line check we already compute.
+**Nothing downstream treats this as a defect, so it is not one.** A slicer
+reconstructs orientation from geometry rather than trusting the file's winding,
+which is the sane thing for it to do since it has to produce a solid either
+way.
 
-**Provisional consequence: `normal_vote` is not ported, and not rebuilt on our
-side** — pending the slice test. The
+**Consequence: `normal_vote` is not ported, and not rebuilt on our side.** The
 previous entry was heading toward reimplementing its flood-fill-and-vote in
 numpy. That would have been machinery for a condition with no consequence
 anywhere in the chain.
