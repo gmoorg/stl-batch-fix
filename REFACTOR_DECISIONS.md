@@ -1782,17 +1782,40 @@ use of the Blender boundary.
 > format change to break. What changes is the loader, and `wm.ply_import`
 > replaces ~30 lines of hand-parsing.
 >
-> **To settle when resumed**, in this order:
+> **The ordering recorded here was wrong, and the user caught it.** It said to
+> settle "does the Blender rung survive?" first, on the reasoning that if
+> Blender goes, the boundary goes and the format question is moot. Two things
+> are wrong with that:
 >
-> 1. **Does `repairer` keep the Blender rung at all?** It is not the default and
->    it does not re-wind anything (D26). If the rung goes, the boundary goes
->    with it and this question is moot. Settle this first — everything else is
->    wasted work otherwise.
-> 2. **Measure the STL round-trip cost** on Mandy's 38 parts: write, launch,
->    read. If it is not a measurable fraction of the 9s repair, the performance
->    argument is dead and only the correctness one remains.
-> 3. **Re-verify the inherited PLY facts** against the installed Blender.
-> 4. Only then decide the format.
+> - **The format question does not depend on it.** PLY is a strictly better way
+>   to hand a mesh to Blender whenever Blender runs — including in the frozen
+>   `stl_batch_fix.py`, which has been running batches with this exact loss for
+>   as long as it has existed. Deferring a *measured data-loss bug* behind an
+>   architectural question is backwards.
+> - **"Alternative" was the wrong frame to begin with.** `blender_part` was
+>   built as an either/or swap against PyMeshFix via `tool=`, and that framing
+>   was challenged at the time and conceded — then kept leaking into the
+>   reasoning anyway. The measurements say the two tools do **different jobs**:
+>   Blender is better at holes and fins (`fin`: 760f/+4094.9, 1 vertex lost
+>   against 756f/+4093.1 and 3 lost) and **never re-winds anything**, while
+>   PyMeshFix re-winds correctly. A part with a hole wants one; a part with bad
+>   winding wants the other. The boundary is therefore not
+>   optional-if-we-choose-it.
+>
+> **The actual order:**
+>
+> 1. **Switch the Blender boundary to PLY.** It is a self-contained change to
+>    `blender_fx/repair.blender` — `wm.ply_import` replaces ~30 lines of
+>    hand-parsing, `wm.ply_export` replaces `write_stl_from_bm`, and
+>    `remove_doubles(dist=merge_dist)` becomes unnecessary, deleting the third
+>    absolute tolerance rather than recalibrating it. Justified on its own by
+>    the measured loss above.
+> 2. **Then** decide how step 4 chooses between the tools — by defect rather
+>    than by size, which is what the measurements support and what
+>    `_repair_part`'s docstring still frames as an unanswered threshold
+>    question.
+> 3. Measure the round-trip cost whenever convenient. It bears on performance
+>    only; the correctness argument is already settled.
 
 **Both preconditions were verified** (2026-09-15, Blender 4.0.2) and hold, so
 this is a scope decision rather than a research one:
