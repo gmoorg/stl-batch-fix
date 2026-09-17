@@ -4366,3 +4366,51 @@ from.
 **So the incumbent is slower, lossier, and ends short of clean on the one real
 multi-shell model tested.** Its wins remain the simple single-shell cases —
 `fin` and `doubles`, both exact.
+
+### CORRECTION — the sequence is dented on `fin` and `tjunction_many`
+
+**Confirmed by eye 2026-09-16.** Two of the eight `_seq3` outputs are visibly
+dented, despite **every numeric check passing**: nm=0, open=0, seams 0/0, and
+volume at 100.00% and 99.78%.
+
+**The composition is not at fault.** Traced step by step, `CLEAN` changed
+nothing on either fixture (no duplicates, no null faces), the split found one
+part, and the ORIENT guard correctly declined to fire. `meshfix.repair()` on
+the raw source gives byte-identical output to the whole sequence. The dents
+come from PyMeshFix, inherited rather than introduced.
+
+**Blender is exact on `fin` — literally.** Compared face-set against the
+control:
+
+| version | faces | verts | volume | identical to control |
+|---|---|---|---|---|
+| **`_bl`** | **760** | **382** | **100.00%** | **YES — 0 extra, 0 missing** |
+| `_pmf` / `_seq3` | 756 | 380 | 99.96% | no — 527 extra, 531 missing |
+| `_fixed` (service) | 766 | 385 | 100.01% | no |
+
+Blender did not approximate the repair; it reconstructed the original mesh
+exactly. PyMeshFix removed 4 extra faces, and that 0.04% is what shows as a
+dent.
+
+On `tjunction_many` **nothing matches the control** — every tool produces a
+different surface, and only the commercial service's is visually clean.
+
+#### What this changes
+
+The sequence applies **PyMeshFix to everything**, and that is wrong where
+another tool is exact. Routing by defect rather than by fixed order:
+
+| defect | tool | evidence |
+|---|---|---|
+| doubles, degenerate | PyMeshLab CLEAN, before the split | exact |
+| **fin / nm on a small mesh** | **Blender** | **identical to control** |
+| nm on a large multi-shell mesh | PyMeshFix after the split | costume01: 2,263 → 0, 100.0% volume, 201s |
+| inverted, seams | PyMeshLab ORIENT, guarded | exact |
+| T-junctions | **nothing we have** | all three fail; only the service is clean |
+
+**Three numeric all-clears on visibly wrong meshes, in one session.** `fin` at
+99.96% and `tjunction_many` at 99.78% both passed nm, open, seam and shell
+checks. Volume differences that small are indistinguishable from rounding, so
+volume cannot be the gate either. The surface-comparison check recorded earlier
+as "nothing we have" is now the blocking gap: without it, a repair ladder
+cannot tell which tool produced the better mesh.
