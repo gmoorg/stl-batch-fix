@@ -67,11 +67,11 @@ regression.  On a mesh carrying 1,871 non-manifold edges PyMeshFix's cut
 choices are not stable under a one-face perturbation, so a face-count
 comparison across versions means nothing here.
 
-**One figure here is below what was recorded**: the all-defects sphere reached
-**840f at +4094.9** when step 4 routed to Blender, against 836f at +4092.9
-through PyMeshFix.  That is the routing table's small-single-shell row, and
-this module does not implement it — see `_repair_part`.  Four faces on one
-synthetic fixture, recorded so it is not rediscovered as a regression.
+**A note on the all-defects figure**: it reaches 840f at +4094.9 when step 4
+runs Blender rather than PyMeshFix, against 836f at +4092.9.  Four faces on one
+synthetic fixture, recorded so the difference is not rediscovered as a
+regression.  It is **not** an argument for switching — see `_repair_part` for
+why the choice is settled.
 
 On `Mandy...-simp` a commercial repair service kept 94.9% of faces; this keeps
 **99.7%**.  It removed 5% of the model to fix 63 defects.  Our detection matched
@@ -331,40 +331,27 @@ def _count_lost(before: np.ndarray, after: np.ndarray,
 def _repair_part(part: Mesh) -> tuple[Mesh, str]:
     """Step 4's repair tool, run on one part.  Returns `(mesh, detail)`.
 
-    **PyMeshFix only — this is a one-rung ladder, and the missing rung is
-    known.**
+    **PyMeshFix.  This is settled — do not re-open it by benchmarking the two
+    tools against each other again.**
 
-    The measurements record a routing decision this does not implement:
+    The one thing that decides it: **PyMeshFix re-winds a reversed surface and
+    Blender does not.**  Orientation is fixed here, per part, immediately above
+    this call, and step 3b's `by_geometry` plus PyMeshFix's own re-winding are
+    what make `inverted`, `seam`, `shell_inverted` and `allbad` come out right.
+    Handing those to Blender instead returns the input's winding unchanged.
 
-        small, single-shell   Blender     allbad step 4 lost 1 vertex (the fin
-                                          apex, a defect) at exactly 100.00%
-                                          volume, where PyMeshFix lost 7 at
-                                          99.95%; `fin_bl` was face-identical
-                                          to the control
-        large, multi-shell    PyMeshFix   costume01: 2,263 nm -> 0, 28 open,
-                                          100% volume, ~200s, against
-                                          Blender's 493 open edges at 488s and
-                                          a 420s timeout in the real pipeline
+    `blender_part` exists and works, and is better at one thing — holes and
+    fins, where it reaches `fin` at 760f/+4094.9 losing only the fin's own apex
+    against PyMeshFix's 756f and 3.  It is injectable via `repair(tool=)` for a
+    caller who has measured that their parts need it.
 
-    Blender is not wired in because it is a subprocess with a file boundary and
-    a repair script that does not exist in `blender_fx/` yet — `convert` is the
-    only one there.
-
-    **Re-confirmed 2026-09-17**, with Blender's repair loop given an
-    already-welded, oriented, cleaned, single-shell part — which is what step 4
-    hands it, and is *not* what the frozen `stl_batch_fix.blender` does to a raw
-    file: Blender reaches `allbad` 840f at +4094.9 against PyMeshFix's 836f at
-    +4092.9, and `fin` at 760f, 100.00% volume, 1 vertex lost (the apex).  So
-    the routing table is right and the omission is a real if small cost.
-
-    **The routing rule also cannot be applied as written from here.**  This
-    runs per part, after `by_shells`, so every mesh reaching it is single-shell
-    by construction and "multi-shell" never occurs.  What the table really
-    separates is small fixtures from large models, and no measurement says
-    where the boundary is.  Adding Blender means answering that first.
-
-    Injectable via `repair(tool=)` so that answer can be supplied without this
-    module growing a threshold nobody has measured.
+    **What is NOT an open question**: which tool is generally better.  The two
+    do different jobs, so a fixture-by-fixture comparison produces a table that
+    reads like a contest and answers nothing — and worse, it is misleading,
+    because rows like `seam` and `inverted` show Blender "failing" at defects
+    steps 2 and 3b have already fixed before any part reaches step 4.  Running
+    either tool alone on a raw fixture tests a configuration this pipeline
+    never produces.
     """
     notes = []
 
