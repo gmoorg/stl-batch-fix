@@ -1689,11 +1689,43 @@ use of the Blender boundary.
 > **Still inherited, not re-checked**: Bambu Studio's import dialog lists no
 > PLY. It only matters for the deliverable, which PLY was never proposed for.
 >
-> **Honest limit of this evidence**: no case has been found where the weld
-> guess actually goes *wrong*. At r=1 — a 2 mm part — the sphere's edges are
-> still 15.7x the 0.01 mm weld distance, and the face count survives intact.
-> The argument for PLY is that it removes a reconstruction that cannot fail
-> rather than one that has been seen failing.
+> **The failing case, found 2026-09-17 (second session) at the user's
+> suggestion to scale a sphere down.** The weld guess does not merely *risk*
+> being wrong — it destroys geometry, and at sizes that occur in real models.
+>
+> A whole sphere, shrunk. PLY is unaffected at every size; the STL path is not:
+>
+> | radius | shortest edge | STL path | PLY path | |
+> |---|---|---|---|---|
+> | 1.0 mm | 0.049 mm | 382v / 760f | 382v / 760f | ok |
+> | 0.5 mm | 0.024 mm | 382v / 760f | 382v / 760f | ok |
+> | **0.2 mm** | **0.0098 mm** | **361v / 718f** | 382v / 760f | **DAMAGED** |
+> | **0.1 mm** | 0.0049 mm | **333v / 662f** | 382v / 760f | **DAMAGED** |
+> | **0.05 mm** | 0.0024 mm | **142v / 280f** | 382v / 760f | **63% of the model gone** |
+>
+> **A whole 0.2 mm sphere is not a real model — but a 0.2 mm feature is.** Same
+> test on a normal 20 mm sphere carrying one small bead:
+>
+> | bead radius | STL path | PLY path | bead vertices kept |
+> |---|---|---|---|
+> | 0.30 mm | 764v / 1520f | 764v / 1520f | 389 / 389 |
+> | **0.20 mm** | **742v / 1476f** | 764v / 1520f | **367 / 389** |
+> | **0.15 mm** | **742v / 1476f** | 764v / 1520f | **367 / 389** |
+> | **0.10 mm** | **715v / 1422f** | 764v / 1520f | **340 / 389** |
+>
+> The large sphere is untouched; the damage is confined to the small feature,
+> which is exactly the geometry a repair pipeline must not eat. A 0.2 mm bead
+> on a 20 mm figure is an ordinary level of detail — jewellery, buttons, eyes,
+> lace — and the bounding-box diagonal (69 mm) gives no hint that anything is
+> at risk.
+>
+> **This is a third absolute-tolerance failure**, alongside the two in the OPEN
+> BUG entry, and it is the worst of them: `welder`'s tolerance being wrong
+> means a defect goes *unrepaired*, while this one **deletes sound geometry**.
+>
+> So the case for PLY is no longer "it removes a reconstruction that cannot
+> fail". It is: **the reconstruction has been measured failing on
+> ordinary-sized detail, and PLY removes it.**
 >
 > **ARITHMETIC, not measurement:**
 >
