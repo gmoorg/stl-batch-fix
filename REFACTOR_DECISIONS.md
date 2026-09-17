@@ -4537,3 +4537,63 @@ produced on the 150-T-junction fixture while leaving all 532 vertices intact.
 neighbour contributes nothing, and checked the wrong vertex (382, which has 6
 edges all properly shared). The shape of the explanation was right; the
 specifics were invented. Checking took one query.
+
+### SOLVED (as a method) — the T-junction repair is one face split
+
+**2026-09-16.** The user sketched the fix and asked whether M–D should be a
+face. It should be an **edge**, and adding it splits the neighbouring face in
+two. Verified on `sphere_tjunction.stl`:
+
+```
+neighbour face 199 = [335, 358, 339]        D-C-A, with D = 335
+replaced by        [358, 345, 335]          C-M-D
+                   [345, 339, 335]          M-A-D
+
+before: 761f  nm=0  open=3
+after : 762f  nm=0  open=0  seams=0/0  shells=1  volume 100.00%
+```
+
+**+1 face, and the defect is gone.** Every edge now has two faces, M's fan is
+closed, and the surface is untouched — no vertex moved, nothing deleted.
+
+#### This is the repair nothing in the toolchain does
+
+| | faces | outcome |
+|---|---|---|
+| **face split at M** | 761 → **762** (+1) | **clean, 100.00%, no surface change** |
+| PyMeshFix | 910 → 1000 | numerically clean, **visibly dented** |
+| Blender | 910 → 824 | numerically clean, **visibly dented** |
+| commercial service | 910 → 1060 (**+150**) | clean |
+
+The service's **+150 faces on a 150-T-junction fixture** is one face per
+T-junction — the same operation, arrived at independently.
+
+#### Why the other tools fail at it
+
+Neither PyMeshFix nor Blender treats this as a topology problem. Both see
+open edges and try to *close a hole*: PyMeshFix patches (adding 90 faces),
+Blender restructures (removing 86 faces and 118 vertices). Both move geometry,
+and that is where the dents come from. The defect has **zero measurable gap** —
+there is no hole to close, only an edge that needs splitting.
+
+#### It is implementable, and simply
+
+The detection already exists in a scratch form: for each vertex, test whether
+it lies on an edge it does not belong to. On the fixture:
+
+```
+vertex 345 lies ON edge (339, 358) at t=0.500, distance 2.6e-23
+```
+
+Then split that edge's face at the vertex, preserving winding by walking the
+triangle and inserting M between A and C. About 30 lines over `scanner`'s
+existing edge map.
+
+**This is the first repair found today that our own code can do and no external
+tool does correctly.** Worth building rather than delegating — and it removes
+the one defect the survey listed as unowned.
+
+**Caveat before building**: the fixture has one T-junction at an exact
+midpoint. Real ones will sit anywhere along the edge, several may share a face,
+and a vertex may lie on an edge only approximately. The collinearity tolerance
+and the multiple-per-face case both need deciding on real data.
