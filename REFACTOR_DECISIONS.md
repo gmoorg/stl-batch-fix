@@ -3680,3 +3680,59 @@ better, the survey stands and `repairer` stays thin.
 
 Either way this is one session's work with fixtures that already exist, and it
 should happen **before** `repairer` is designed around either answer.
+
+### CORRECTION — the survey's conclusion is inverted: PyMeshFix is the weaker tool
+
+**2026-09-16, after putting the *source* fixtures through the commercial
+service.** The survey only ever fed it PyMeshFix's *output*. Fed the sources
+directly, it repairs all three to **perfect spheres**, verified by eye in
+Bambu.
+
+| fixture | PyMeshFix | the service, same source |
+|---|---|---|
+| `tjunction_many` | 1000 faces, **visibly dented** | 532 verts unchanged, +150 faces — **perfect** |
+| `fin` | 756 faces, small visible defect | +2 verts, +5 faces — **perfect** |
+| `doubles` | 418 faces — **half a sphere** | 1520 → **816** faces — **perfect** |
+
+**`doubles` is the decisive one.** 816 faces is one sphere's worth: the service
+**merged** the two coincident copies. PyMeshFix discarded one and ate half the
+other. That is `remove_doubles(dist=merge_dist)` behaviour — precisely the
+operation `MERGE_DIST` feeds in `stl_batch_fix.blender`, and precisely the
+capability the survey proposed dropping.
+
+**`tjunction_many` shows why the dents happened.** The service kept **all 532
+vertices** and added exactly 150 faces — one per T-junction, patching each
+without touching the surrounding surface. PyMeshFix restructured (532 → 502
+verts) and deformed the sphere doing it.
+
+#### What this does to the survey
+
+The entry above concluded that fins, degenerate faces and T-junctions "need no
+new capability" because PyMeshFix handles them. **That conclusion is wrong**,
+and the correction two entries up — "it meant topology, not surface quality" —
+did not go far enough. It is not merely that PyMeshFix's output was unverified
+on surface quality; it is that **another tool does the same repairs correctly**,
+so the capability is not redundant.
+
+Only the degenerate-face case survives: PyMeshFix returned exactly the
+control's 760 faces and 382 vertices, with nothing to deform.
+
+**Root cause of the wrong conclusion.** I measured PyMeshFix against defect
+counts and volume, both of which it satisfied, and never ran the incumbent — or
+any second repairer — on the same inputs. A comparison needs two columns.
+
+#### This makes the Blender run decisive, not a control
+
+The next-session task recorded below was framed as a control. It is now the
+test that decides the shape of `repairer`:
+
+- **If Blender matches the service** — merges `doubles`, patches
+  `tjunction_many` without denting — then its repair path is *better* than
+  PyMeshFix's and those capabilities must be kept, not dropped. `repairer`
+  becomes a ladder where Blender is not the last resort but the better tool for
+  several defect classes.
+- **If Blender is no better than PyMeshFix**, then neither is adequate, and the
+  gap is real and unowned — the pipeline would be shipping dented repairs today
+  and nothing measures it.
+
+Either answer changes the design. Neither is knowable from what has been run.
