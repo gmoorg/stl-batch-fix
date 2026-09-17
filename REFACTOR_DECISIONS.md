@@ -1642,32 +1642,68 @@ use of the Blender boundary.
 > **The user's position: switch to PLY for both input and output at the Blender
 > boundary.** Recorded as raised, not yet argued through.
 >
-> What has changed since this was written, beyond the volume of traffic:
+> **Claims below are labelled by provenance**, because the first version of
+> this entry did not distinguish them and read as though all were freshly
+> measured. Only the MEASURED ones were established on 2026-09-17.
+>
+> **MEASURED (2026-09-17, this session):**
+>
+> - `repairer.blender_part` produces **38 round trips on Mandy** — `parts=38`
+>   in the run output.
+> - The Blender script's `normal_vote` reported **`agree: 801, disagree: 0`**
+>   on `sphere_allbad`, because `mesh_io.write` derives normals from the
+>   winding ([mesh_io.py:362]). Confirmed byte-identical output with the vote
+>   enabled and disabled across six fixtures.
+>
+> **MEASURED EARLIER, recorded in the code:**
 >
 > - **STL has no vertex table**, so every write splits the mesh into loose
->   triangles and every read has to re-weld it. Measured on real models: exactly
->   **6.0x duplication** of every vertex. PLY carries the vertex table, and the
->   round-trip test above confirms it survives Blender intact (v/f 0.500 in,
->   0.501 out after decimation).
-> - **Re-welding is not free and is not neutral.** `mesh_io.load` folds `-0.0`
->   to `0.0` and welds by exact coordinate match; that is a correctness-relevant
->   transformation applied 38 times per model, where PLY would apply it zero
->   times.
-> - **STL normals are a liability at this boundary, not a feature.** Measured
->   today: the Blender script's `normal_vote` reported `agree: 801, disagree: 0`
->   because `mesh_io.write` derives normals from the winding, so the 12 bytes
->   per triangle carry no information and cost 24% of the file. PLY's bare
->   header (`x, y, z` plus a face list) carries exactly what is needed.
+>   triangles and every read re-welds it — exactly **6.0x duplication** of every
+>   vertex ([mesh_io.py:69]).
+> - `mesh_io.load` folds `-0.0` to `0.0` and welds by exact coordinate match
+>   ([mesh_io.py:273]).
+>
+> **INHERITED from the 2026-09-15 entry above — NOT re-verified this session:**
+>
+> - PLY survives a Blender round trip with the vertex table intact (v/f 0.500
+>   in, 0.501 out after decimation).
+> - `wm.ply_import`, `import_mesh.ply` and `wm.ply_export` exist in Blender
+>   4.0.2.
+> - Bambu Studio's import dialog lists no PLY.
+>
+> These were marked verified when written and are probably still true, but the
+> Blender version may have moved. **Re-check before building on them.**
+>
+> **ARITHMETIC, not measurement:**
+>
+> - The normal occupies 12 of STL's 50 bytes per triangle, so **24% of the
+>   file**. That is a file-size figure only — **no I/O time was measured**, and
+>   the round-trip cost of the STL boundary is still unknown.
+>
+> **OVERSTATED IN THE FIRST DRAFT, corrected here:**
+>
+> - That entry called re-welding "a correctness-relevant transformation applied
+>   38 times per model", implying observed harm. **There is none on record.**
+>   The `-0.0` fold is real and its rationale is sound, but no measurement shows
+>   it ever damaged a mesh across a Blender round trip — and
+>   `test_a_written_mesh_reloads_identically` asserts the opposite for the
+>   simple case. It is a theoretical risk, not a demonstrated one.
 >
 > **Scope is unchanged from the original entry**: the Blender scratch boundary
 > only. Not an input format — there has never been a PLY in the collection — and
-> never the deliverable, since Bambu Studio's import dialog lists no PLY.
+> never the deliverable, per the Bambu claim above (itself inherited).
 >
-> **To settle when resumed**: whether `repairer` keeps the Blender rung at all
-> (it is not the default, and it does not re-wind anything — see D26), because
-> if the rung goes, so does the boundary and the whole question. Measure the
-> round-trip cost on Mandy's 38 parts before deciding: if STL round tripping is
-> a measurable fraction of the 9s repair, that is the argument.
+> **To settle when resumed**, in this order:
+>
+> 1. **Does `repairer` keep the Blender rung at all?** It is not the default and
+>    it does not re-wind anything (D26). If the rung goes, the boundary goes
+>    with it and this question is moot. Settle this first — everything else is
+>    wasted work otherwise.
+> 2. **Measure the STL round-trip cost** on Mandy's 38 parts: write, launch,
+>    read. If it is not a measurable fraction of the 9s repair, the performance
+>    argument is dead and only the correctness one remains.
+> 3. **Re-verify the inherited PLY facts** against the installed Blender.
+> 4. Only then decide the format.
 
 **Both preconditions were verified** (2026-09-15, Blender 4.0.2) and hold, so
 this is a scope decision rather than a research one:

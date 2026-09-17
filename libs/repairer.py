@@ -424,8 +424,14 @@ def blender_part(part: Mesh, timeout: float = 600) -> tuple[Mesh, str]:
     for it (2026-09-17).**  STL carries no vertex table, so each write splits
     the mesh into loose triangles — measured at exactly **6.0x** duplication of
     every vertex — and each read has to re-weld it.  On Mandy that is 38 round
-    trips per repair.  PLY carries the vertex table and was verified to survive
-    Blender intact; see the re-opened PLY entry in REFACTOR_DECISIONS.md.
+    trips per repair.
+
+    **The round-trip cost has not been measured**, and that is the first thing
+    to settle: if it is not a real fraction of the 9s repair, the argument for
+    changing format is only a correctness one.  PLY carries the vertex table
+    and was recorded as surviving Blender intact, but that check is from
+    2026-09-15 and has not been re-run.  See the re-opened PLY entry in
+    REFACTOR_DECISIONS.md, where the claims are labelled by provenance.
 
     What it buys, measured on prepared single-shell parts — which is what step
     4 hands it, and is *not* what the frozen script does to a raw file:
