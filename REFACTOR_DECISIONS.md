@@ -1693,6 +1693,42 @@ use of the Blender boundary.
 > only. Not an input format — there has never been a PLY in the collection — and
 > never the deliverable, per the Bambu claim above (itself inherited).
 >
+> **The strongest argument, found after the above by reading the script
+> (2026-09-17) — the user's point:** the format change cannot break much,
+> because the script barely uses what STL carries.
+>
+> `blender_fx/repair.blender` does **not** use Blender's STL importer on the
+> binary path. `load_binary_stl` is a hand-written parser that calls
+> `bm.verts.new(...)` **three times per triangle** — a fresh vertex every time,
+> never reused. A 103,729-face part therefore creates **311,187 loose
+> vertices** in a Python loop, one `struct.unpack_from` per triangle.
+>
+> Then line 401 welds them back with
+> `bmesh.ops.remove_doubles(dist=merge_dist)`, and **`merge_dist` is `0.01 mm`
+> — an absolute distance**, the very value this project measured as the *worst*
+> threshold when used in PyMeshLab (nm 2,263 -> 2,359).
+>
+> So the round trip is:
+>
+> | side | what happens to the vertex table |
+> |---|---|
+> | ours | `mesh_io.write` discards it, splitting into loose triangles |
+> | Blender | a Python loop rebuilds 3 verts per triangle |
+> | Blender | `remove_doubles` **reconstructs it by proximity guess** |
+>
+> **A vertex table is destroyed and then guessed back at an absolute
+> tolerance.** With PLY the table is read directly, `remove_doubles` has
+> nothing to do, and that guess leaves the pipeline. That is a correctness
+> argument, not a performance one, and it is much stronger than the file-size
+> figure above.
+>
+> **And the risk of changing format is low**, which is the user's observation:
+> with `normal_vote` disabled the `orig_normal` layer is written by the loader
+> and **never read** — confirmed by byte-identical output across six fixtures
+> with the vote enabled and disabled. There is no normal logic left for a
+> format change to break. What changes is the loader, and `wm.ply_import`
+> replaces ~30 lines of hand-parsing.
+>
 > **To settle when resumed**, in this order:
 >
 > 1. **Does `repairer` keep the Blender rung at all?** It is not the default and
@@ -3036,6 +3072,15 @@ least one of them already fails on ordinary print sizes.
 | CLEAN `threshold` | `0.1` | `PercentageValue` of bbox diagonal | **correct** |
 | `splitter.MIN_SHELL_FACES` | `100` | face count | fine, not a distance |
 | `welder.MAX_ROUNDS` | `10` | iterations | fine, not a distance |
+| `blender.repair(merge_dist=)` | `0.01` mm | **absolute** | **third instance — see below** |
+
+**A third instance, found the same day**: `blender_fx/repair.blender` welds its
+input with `bmesh.ops.remove_doubles(dist=merge_dist)` at a default of
+**0.01 mm absolute**. Same failure shape as the two above, and worse than
+either, because it is the *only* thing reconstructing a vertex table that STL
+destroyed on the way in — see the re-opened PLY entry. Switching that boundary
+to PLY removes the call rather than fixing its tolerance, which is the better
+outcome: a guess deleted beats a guess calibrated.
 
 #### The measured failure
 
