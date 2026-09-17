@@ -186,11 +186,28 @@ class StepResult:
     faces_in/out    face counts either side of it
     detail          what it found or changed, in one line
     second_elapsed  wall time
+    scan            `scanner.Scan` of the mesh AFTER this step, or None when
+                    the step produced no single mesh to scan (the split)
+    volume          signed volume after this step, or None likewise
+    orphans         vertices no face references after this step
 
     Every step reports even when it changed nothing, because "the orientation
     guard did not fire" is as much a fact about a mesh as "it did" — and a run
     that skipped a step silently is indistinguishable from one where the step
     was never wired up.
+
+    **The scan is what makes a step's effect attributable**, and it is not
+    optional because face counts alone cannot tell a repair from a wound: a
+    step that removes 1,384 faces and closes holes looks identical to one that
+    removes 1,384 faces and tears 1,299 open edges.  That was not hypothetical
+    — the CLEAN step was blamed collectively in the decisions doc for a week,
+    and two guesses at which of its four filters was responsible were wrong,
+    because nothing recorded the counts between them.
+
+    Cost, measured on costume01 (900k faces): the filters themselves are
+    0.1-1.8s each and a scan is the same order, against a ~270s repair.  Cheap
+    enough that making it conditional would cost more in complexity than it
+    saves in time.
     """
 
     step: Step
@@ -198,6 +215,9 @@ class StepResult:
     faces_out: int
     detail: str
     second_elapsed: float
+    scan: scanner.Scan | None = None
+    volume: float | None = None
+    orphans: int = 0
 
     @property
     def changed(self) -> bool:
@@ -491,10 +511,23 @@ def repair(mesh: Mesh,
     steps: list[StepResult] = []
     destination = mesh.destination
 
-    def record(step: Step, was: int, now: int, detail: str,
-               since: float) -> None:
+    def record(step: Step, was: int, now: int, detail: str, since: float,
+               result: Mesh | None = None) -> None:
+        """Record one step, scanning `result` when there is a mesh to scan.
+
+        `result` is None for the split, which produces several meshes rather
+        than one — each part is then scanned by its own `Step.PART` entry.
+        """
+        scan = volume = None
+        orphans = 0
+        if result is not None and result.geometry is not None:
+            scan = scanner.scan(result)
+            volume = scanner.volume(result)
+            orphans = (len(result.geometry.verts)
+                       - len(np.unique(result.geometry.faces)))
         steps.append(StepResult(step, was, now, detail,
-                                time.monotonic() - since))
+                                time.monotonic() - since,
+                                scan, volume, int(orphans)))
 
     try:
         # 1. T-junctions.  Ours, because no other tool does this without
@@ -504,14 +537,15 @@ def repair(mesh: Mesh,
         welded = welder.repair(mesh)
         mesh = welded.mesh
         record(Step.WELD, was, len(mesh.geometry.faces),
-               f"{welded.splits} junction(s) in {welded.rounds} round(s)", mark)
+               f"{welded.splits} junction(s) in {welded.rounds} round(s)",
+               mark, mesh)
 
         # 2. Duplicates, before the split so deduplication sees both copies.
         mark = time.monotonic()
         was = len(mesh.geometry.faces)
         mesh = _run_filters(mesh, CLEAN_FILTERS)
         record(Step.CLEAN, was, len(mesh.geometry.faces),
-               f"{len(CLEAN_FILTERS)} filters", mark)
+               f"{len(CLEAN_FILTERS)} filters", mark, mesh)
 
         # 3. Split, repair each part, merge.  PyMeshFix rebuilds one manifold
         #    surface and discards the rest, so a multi-shell mesh reaching it
@@ -530,13 +564,13 @@ def repair(mesh: Mesh,
             fixed, detail = tool(part)
             repaired.append(fixed)
             record(Step.PART, part_was, len(fixed.geometry.faces),
-                   f"part {index}: {detail}", mark)
+                   f"part {index}: {detail}", mark, fixed)
 
         mark = time.monotonic()
         was = sum(len(p.geometry.faces) for p in repaired)
         mesh = splitter.merge(repaired, destination=destination)
         record(Step.MERGE, was, len(mesh.geometry.faces),
-               f"{len(repaired)} part(s) merged", mark)
+               f"{len(repaired)} part(s) merged", mark, mesh)
 
     except Exception as exc:
         return _failed(mesh, f"{type(exc).__name__}: {exc}", tuple(steps),

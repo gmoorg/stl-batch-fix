@@ -3365,6 +3365,46 @@ it at all. It is only needed when duplicate geometry exists, and `scanner`
 cannot detect that — the `doubles` fixture reads entirely clean, and only the
 shell count hints, which is useless since two shells is legitimate.
 
+> **Attributed 2026-09-17 by scanning after each filter** rather than blaming
+> CLEAN collectively. Two earlier guesses at the culprit were wrong; this is
+> measured. On costume01, after `welder`:
+>
+> | filter | faces | nm | open | orphan | volume |
+> |---|---|---|---|---|---|
+> | (loaded) | 900,000 | 2,263 | 20 | 0 | +7758.7 |
+> | `remove_null_faces` | 900,000 | **2,262** | 20 | 0 | +7758.7 |
+> | `merge_close_vertices` | 899,787 | **2,452** ↑ | 17 | **10** | +7758.7 |
+> | **`remove_duplicate_faces`** | 898,617 | 2,018 | **1,319** ↑ | 10 | **+7766.5** ↑ |
+> | `remove_unreferenced_vertices` | 898,617 | 2,018 | 1,319 | **0** | +7766.5 |
+>
+> **The culprit is `remove_duplicate_faces`, and the cause is winding.** Of the
+> 1,170 duplicate faces on that mesh, **1,166 have OPPOSITE winding** — they
+> are zero-thickness sheets, not redundant copies.
+>
+> Two faces sharing all three vertices with opposite winding **read as
+> perfectly clean**: each pairs the other's three edges, so `open=0, nm=0`.
+> Delete one and all three edges lose their partner. Demonstrated on a two-face
+> mesh: `open=0` becomes `open=3`. The arithmetic matches costume01 — 1,166
+> sheets against a rise of 1,302 open edges.
+>
+> Three corrections this produced:
+>
+> - **`remove_null_faces` repairs rather than tears** — nm 2,263 → 2,262, and
+>   the degenerate face gone. Confirmed separately on a fixture: a mesh with one
+>   degenerate face returns to its control exactly.
+> - **`merge_close_vertices` makes non-manifold edges worse on real data** —
+>   2,262 → 2,452, the documented failure mode now measured outside a fixture.
+> - **`remove_unreferenced_vertices` has a real job after all.** It was argued
+>   twice in discussion to be protecting against nothing; `merge_close_vertices`
+>   creates **10 orphans** on costume01 and this removes exactly those. They are
+>   harmless — no edges, no faces, invisible to every check, and `mesh_io.write`
+>   drops them because it walks faces — but they do occur.
+>
+> **What this does not settle**: whether deleting a zero-thickness sheet is
+> right. It leaves a hole PyMeshFix then fills, at a cost of 40 faces net. The
+> alternative — deleting *both* faces of a sheet, since a zero-volume flap is
+> not surface — has not been tried.
+
 **Decimation creates the defects.** `fast_simplification` took costume01 from
 **3 non-manifold edges to 2,263** and 448 shells to 491, preserving volume to
 0.02%. Repair tools are mostly cleaning up after decimation rather than after
