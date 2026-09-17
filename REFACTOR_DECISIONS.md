@@ -3804,3 +3804,42 @@ depends on the defect**:
 **Still to check by eye**: the `_bl` outputs in Bambu. Numbers missed the dents
 on PyMeshFix's output once already, and `tjunction_many_bl` at 414 vertices is
 the obvious candidate for the same problem.
+
+### CONFIRMED BY EYE — `tjunction_many_bl` is dented; everything else is spherical
+
+**Checked in Bambu 2026-09-16**, the step the numbers cannot replace.
+
+Seven of the eight `_bl` outputs render as clean spheres. **`sphere_tjunction_many_bl.stl`
+has a visible gash** — a wedge-shaped tear across the surface, the same failure
+mode PyMeshFix produced on the same fixture.
+
+**So `tjunction_many` is unanimous in the wrong direction:**
+
+| tool | faces | verts | volume | by eye |
+|---|---|---|---|---|
+| Blender | 824 | 414 | +4083.8 | **dented** |
+| PyMeshFix | 1000 | 502 | +4085.9 | **dented** |
+| service | 1060 | 532 | +4095.2 | clean |
+
+Both of our tools deform the surface closing 450 open edges; only the
+commercial service patches without restructuring — it kept **all 532 vertices**
+and added exactly 150 faces, one per T-junction.
+
+**The good results are confirmed too.** `doubles_bl` and `fin_bl` measured
+*exactly* the control (760 / 382 / +4094.9) and look right. So Blender's
+`remove_doubles` and fin removal are genuinely correct, not merely
+numerically plausible — which is the strongest evidence yet for keeping
+`MERGE_DIST` and the capabilities the survey proposed dropping.
+
+**Volume was a weak but real signal here.** Blender lost 11.1 units on
+`tjunction_many` (0.27%) against 0.0 on the cases that came out clean. Not
+enough to threshold on by itself — PyMeshFix lost 9.0 and was also dented,
+while the service *gained* 0.3 and was fine — but the two dented outputs are
+the two that lost volume, and the clean ones lost none. Worth keeping in mind
+if a surface-quality measure is ever built: "volume changed at all" may be a
+cheap first filter, with Hausdorff distance for the cases it flags.
+
+**Method note.** Three tools, three numeric checkers and a slicer all called
+`tjunction_many_bl` clean: nm=0, open=0, degenerate=0, one shell, volume within
+0.3%. Looking at it took seconds. This is the second time in one session that
+eye inspection overturned a conclusion every measurement supported.
