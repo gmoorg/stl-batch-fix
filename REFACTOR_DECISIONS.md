@@ -22,6 +22,25 @@ orchestration** — the step that decides what to do with a `repairer.Result`.
 Raw session narratives are archived under `archive/` when they grow past
 usefulness; this file keeps the conclusions.
 
+> **Code comments are deliberately verbose while the refactor is in motion, and
+> will be compacted to a few lines once it reaches a conclusion** (decided
+> 2026-09-17). They carry measurements — which value was tried, what it did,
+> why the obvious alternative was rejected — and re-deriving those costs a
+> session. `welder` changed three times in one day, and compacting between
+> changes would have meant losing the reasoning each time.
+>
+> **The cost is real and was demonstrated the same day**: asked to check
+> `welder` for stale comments, five were found, one of them contradicting the
+> code three lines below it. Both had been written minutes apart. The user's
+> own practice is the opposite — small functions with names that cannot go
+> stale — and that objection stands; the trade is accepted only while the
+> design is still moving.
+>
+> **So: a comment is a claim, and every non-trivial edit has to re-check the
+> claims around it.** Not optional, and not something to wait to be asked for.
+> When the refactor settles, compact each block to its conclusion and leave the
+> measurements here.
+
 > **Renumbered 2026-09-13.** Entries were previously numbered in the order they
 > were written, and each new one was inserted before D5 — so the file read
 > D1–D4, D4b, D7, D8, D9, D10, D5, D6. They are now in decision order. Three
