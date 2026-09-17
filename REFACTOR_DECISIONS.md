@@ -5078,3 +5078,52 @@ its tip.
 
 **`repairer` does not exist.** The sequence above runs in scratch scripts.
 `welder` is the only part committed as a module.
+
+### CLARIFICATION — `volume < 0` detects only a WHOLLY inverted model
+
+**Asked 2026-09-16**, and the answer qualifies the guard recorded above.
+
+`scanner.volume()` returns one signed total for the whole mesh, so it goes
+negative only when the *net* orientation is inverted. Measured:
+
+| mesh | volume | guard fires | actually has a reversed region |
+|---|---|---|---|
+| `sphere_inverted` | −4094.9 | **yes** | whole mesh — correct |
+| `sphere_allbad` | −4292.4 | **yes** | whole mesh — correct |
+| **`sphere_seam`** | **+2146.2** | **no** | **yes, the cap — MISSED** |
+| `Mandy-simp` (real) | +14,682.8 | no | small seam — correctly skipped, the step was churn |
+| `sphere_correct` | +4094.9 | no | none — correct |
+
+**A reversed region leaves the total positive**, so the guard skips it.
+
+#### Why that is tolerable, and where it is not
+
+**Tolerable because PyMeshFix fixes seams itself at step 4** — measured today,
+it re-wound all 760 faces of the `seam` fixture to exactly +4094.9 in one call.
+The defect is handled downstream whether or not step 2 fires.
+
+**Two cases still slip through:**
+
+1. **A reversed region PyMeshFix cannot re-wind.** The design doc's
+   head-deletion case is exactly this: PyMeshFix *deleted* the region rather
+   than flipping it, 562,288 faces in and 394,432 out. Volume stays positive,
+   the guard skips, and step 4 destroys geometry.
+2. **A reversed region larger than half the model.** The total then goes
+   negative and `by_geometry` fires on a mesh that is mostly *correct*,
+   flipping the majority the wrong way.
+
+#### What the trigger should probably be
+
+Not one number for the whole mesh. Candidates, none tested:
+
+- **per-shell volume after the split** — each component judged on its own sign,
+  which is the natural granularity now that the split exists;
+- **per-region volume after a seam split** — `splitter.by_seams` already
+  isolates the reversed region, and today's seam work showed its volume is
+  **negative** (−974.3 against the host's +3120.5) even when the whole mesh is
+  positive;
+- or simply run `by_geometry` **after** the split, per part, where a reversed
+  part does show a negative total.
+
+The last is the smallest change and would have caught `sphere_seam` while still
+skipping `Mandy-simp`.
