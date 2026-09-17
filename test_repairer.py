@@ -296,6 +296,69 @@ class TestFailure(unittest.TestCase):
 
 
 @needs_tools
+class TestZeroThicknessSheets(unittest.TestCase):
+    """Two coincident faces of opposite winding — and why removing one is a
+    repair rather than damage.
+
+    This was reasoned about wrongly twice. `remove_duplicate_faces` takes
+    costume01's open edges from 17 to 1,319, which looks like the filter
+    tearing the model apart. It is not: of 1,170 duplicate faces there, 1,166
+    have **opposite** winding. A closed surface cannot carry such a pair,
+    because the flap encloses no volume — it reads as clean only because the
+    two faces alibi each other's edges.
+    """
+
+    VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
+
+    def test_a_sheet_reads_as_clean_which_is_the_whole_problem(self):
+        """A tetrahedron missing one face, with a coincident sheet in the gap,
+        scores `open=0` — the defect is invisible to the success condition."""
+        holed = mesh(self.VERTS, self.FACES[1:])
+        self.assertGreater(scanner.scan(holed).open_edges, 0)
+        masked = mesh(self.VERTS, self.FACES[1:] + [[0, 2, 1], [0, 1, 2]])
+        self.assertEqual(scanner.scan(masked).open_edges, 0,
+                         "the sheet no longer masks the hole — fixture stale")
+
+    @needs_tools
+    def test_removing_a_flap_from_a_sound_mesh_restores_it(self):
+        """A flap on intact surface shows as non-manifold, and removing it
+        returns the mesh to its control exactly."""
+        sound = mesh(self.VERTS, self.FACES)
+        flapped = mesh(self.VERTS, self.FACES + [[0, 1, 2]])
+        self.assertEqual(scanner.scan(flapped).non_manifold, 3)
+        fixed = repairer._run_filters(
+            flapped, (('meshing_remove_duplicate_faces', {}),))
+        self.assertTrue(scanner.scan(fixed).is_clean)
+        self.assertEqual(len(fixed.geometry.faces),
+                         len(sound.geometry.faces))
+        self.assertAlmostEqual(scanner.volume(fixed), scanner.volume(sound),
+                               places=5)
+
+    @needs_tools
+    def test_removing_a_sheet_that_masked_a_hole_repairs_it(self):
+        """The direction that matters: one face of the sheet becomes the
+        missing surface and the redundant one goes, so the filter **repairs**
+        rather than opening anything."""
+        masked = mesh(self.VERTS, self.FACES[1:] + [[0, 2, 1], [0, 1, 2]])
+        fixed = repairer._run_filters(
+            masked, (('meshing_remove_duplicate_faces', {}),))
+        self.assertTrue(scanner.scan(fixed).is_clean)
+        self.assertEqual(len(fixed.geometry.faces), len(self.FACES))
+
+    @needs_tools
+    def test_both_faces_are_never_deleted(self):
+        """Deleting both is rejected, not untried: a sheet may be large and
+        both faces may be the only surface in that region, so removing both
+        would cut a real hole rather than expose one."""
+        masked = mesh(self.VERTS, self.FACES[1:] + [[0, 2, 1], [0, 1, 2]])
+        fixed = repairer._run_filters(
+            masked, (('meshing_remove_duplicate_faces', {}),))
+        self.assertEqual(len(fixed.geometry.faces), 4,
+                         "a face of the sheet survives as real surface")
+
+
+@needs_tools
 class TestRealTools(unittest.TestCase):
     """The default path, with PyMeshFix actually running."""
 

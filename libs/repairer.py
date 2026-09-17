@@ -132,6 +132,33 @@ class Step(Enum):
 #: absolute distance.  `MERGE_DIST = 0.01mm`, tuned for Blender's
 #: `remove_doubles`, was the one setting here that *increased* non-manifold
 #: edges (2,263 -> 2,359).
+#:
+#: **`remove_duplicate_faces` looks destructive and is not.**  On costume01 it
+#: takes open edges from 17 to 1,319, which was recorded for a week as CLEAN
+#: "tearing" the model.  That reads the symptom as the cause.
+#:
+#: Of the 1,170 duplicate faces on that mesh, **1,166 have OPPOSITE winding** —
+#: they are zero-thickness sheets, not redundant copies.  A closed surface
+#: cannot carry two coincident faces of opposite winding, because such a flap
+#: encloses no volume; it reads as clean only because the two faces alibi each
+#: other's edges.  Removing one removes the alibi, and the open edges it
+#: "creates" were always there, masked.
+#:
+#: Measured on a tetrahedron, both directions — neither tears anything:
+#:
+#:     sound tetra + an opposite flap    nm=3        -> 4f, nm=0, open=0
+#:     tetra MISSING a face, sheet in it open=0 nm=3 -> 4f, nm=0, open=0
+#:
+#: In the second case the filter **repairs outright**: one face of the sheet
+#: becomes the missing surface and the redundant one goes.
+#:
+#: So the 40-face cost on costume01 is not damage — it is the price of
+#: surfacing 1,166 hidden defects so the repair step can close them.  Skipping
+#: CLEAN would ship a model that *reads* clean while carrying them.
+#:
+#: **Deleting both faces of a sheet is rejected**, not untried: the sheet may be
+#: large and both faces may be the only surface in that region, so removing
+#: both would cut a real hole rather than expose one.
 CLEAN_FILTERS: tuple[tuple[str, dict], ...] = (
     ('meshing_remove_null_faces', {}),
     ('meshing_merge_close_vertices', {'threshold': 0.1}),

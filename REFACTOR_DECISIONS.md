@@ -3400,10 +3400,37 @@ shell count hints, which is useless since two shells is legitimate.
 >   harmless — no edges, no faces, invisible to every check, and `mesh_io.write`
 >   drops them because it walks faces — but they do occur.
 >
-> **What this does not settle**: whether deleting a zero-thickness sheet is
-> right. It leaves a hole PyMeshFix then fills, at a cost of 40 faces net. The
-> alternative — deleting *both* faces of a sheet, since a zero-volume flap is
-> not surface — has not been tried.
+> **Corrected immediately, and the whole framing above is wrong.** "The filter
+> tears 1,299 open edges" reads the symptom as the cause. A zero-thickness
+> sheet **is a defect**: a closed surface cannot carry two coincident faces of
+> opposite winding, because that flap encloses no volume. It reads as clean
+> only because the two faces alibi each other's edges.
+>
+> So `remove_duplicate_faces` is not damaging a sound model. It **removes the
+> alibi**, and the open edges it "creates" were always there — masked.
+>
+> Demonstrated on a tetrahedron, both directions:
+>
+> | case | before the filter | after |
+> |---|---|---|
+> | sound tetra + an opposite-winding flap | `nm=3`, vol +0.1667 | **4f, nm=0, open=0**, vol unchanged |
+> | tetra *missing* a face, sheet in the gap | `open=0, nm=3` — reads clean | **4f, nm=0, open=0** |
+>
+> Neither tears anything. In the second case the filter **repairs outright**:
+> one face of the sheet becomes the missing surface and the redundant one goes.
+>
+> On costume01 the 1,166 sheets mask genuine defects in a model that is
+> **already broken** — which is consistent with everything else known about
+> that file: decimation took it from 3 non-manifold edges to 2,263.
+>
+> **Deleting both faces of a sheet is explicitly rejected.** The sheet may be
+> large, and both faces may be the only surface in that region; removing both
+> would cut a real hole in the model rather than expose one.
+>
+> **What follows for CLEAN**: the "should be conditional" claim above is
+> undermined. The 40-face cost is not damage, it is the price of surfacing 1,166
+> hidden defects so that step 3 can repair them. Skipping CLEAN would ship a
+> model that *reads* clean while carrying them.
 
 **Decimation creates the defects.** `fast_simplification` took costume01 from
 **3 non-manifold edges to 2,263** and 448 shells to 491, preserving volume to
