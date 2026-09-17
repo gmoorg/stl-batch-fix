@@ -4755,3 +4755,70 @@ merges correctly-wound geometry).
 **Still to confirm by eye**: `sphere_allbad_ord2.stl`. Numbers have been wrong
 about surface quality four times today, and 99.95% is within the range where
 `fin_pmf` (99.96%) and `tjunction_many_pmf` (99.78%) were both visibly dented.
+
+### SOLVED — the surface check is MISSING VERTICES, and the input is the reference
+
+**2026-09-16, the user's correction.** Everything above calls these defects
+"dents". They are not. **They are missing vertices**, and saying so precisely
+is what makes them detectable.
+
+| mesh | verts | **missing** | extra | verdict by eye |
+|---|---|---|---|---|
+| `sphere_correct` (control) | 382 | — | — | clean |
+| `fin_bl` | 382 | **0** | 0 | clean |
+| `tjunction_many_tjfix` | 532 | **0** | 150 | clean |
+| **`fin_pmf`** | 380 | **2** | 0 | **wrong** |
+| `allbad_ord2` / `allbad_seq` | 420 | **18** | 56 | "not ideal" |
+
+The two vertices PyMeshFix drops from `fin` are at radius **10.000** — genuine
+points on the sphere, deleted. Blender's version of the same repair loses none.
+
+**Extra vertices are harmless**; that is a repair adding geometry, and
+`tjfix` adds exactly 150 — one per T-junction — while preserving every
+original. **Missing vertices mean something was destroyed.**
+
+#### Why this is the check the others could not be
+
+Four candidates failed today — nm/open counts, volume, seam counts, radius
+deviation — and all four failed for the same reason: they measure *properties
+of the result* rather than *what the result lost*.
+
+`fin_pmf` scores perfectly on every one of them: nm=0, open=0, degenerate=0,
+seams 0/0, one shell, 99.96% volume, and **zero** vertex displacement. It is
+wrong because two vertices are simply gone, and no property of the remaining
+surface reveals that.
+
+**And it needs no control mesh.** The earlier entries record vertex-set
+comparison as working but useless on real models, since they have no known-good
+reference. That was the wrong framing: **the input is the reference.** A repair
+that drops a vertex present in its own input has removed something, and every
+repair step has its input in hand.
+
+```python
+before = {tuple(p) for p in mesh.geometry.verts.tolist()}
+after  = {tuple(p) for p in result.geometry.verts.tolist()}
+lost   = before - after          # non-empty means geometry was deleted
+```
+
+That is the gate `repairer` needs to choose between tools automatically, and it
+closes the blocker recorded through the whole session.
+
+#### Caveats before building it
+
+- **Decimation legitimately removes vertices**, so this gate belongs to repair
+  steps, not to the whole pipeline.
+- **Merging duplicates legitimately removes them too** — CLEAN takes
+  `allbad` from 846v to 423v by design. The gate must exempt deduplication, or
+  compare positions rather than counts (a merged duplicate leaves its position
+  occupied; a deleted vertex does not).
+- Float comparison needs the same rounding `mesh_io.load` already applies, or
+  a tolerance.
+
+#### And the user's summary of the result
+
+> *"Not ideal but better by far compared to other."*
+
+`allbad_ord2` still loses 18 vertices and gains 56, inherited from PyMeshFix's
+handling of the fin and the remaining non-manifold edges — the one step in the
+sequence where Blender is known to be exact. Worth testing whether routing fins
+to Blender removes the last 18.
