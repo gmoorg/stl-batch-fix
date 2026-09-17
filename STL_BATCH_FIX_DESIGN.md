@@ -1237,7 +1237,7 @@ few tests that need the real thing are guarded by `is_available()`.
 > 183 s instead of 15 s. Blender is a single process, so `exec sleep 30` models
 > it and a bare `sleep 30` models something else entirely.
 
-`test_converter.py` — 19 tests for `libs/converter.py`, ~0.05 s. `convert` is
+`test_converter.py` — 20 tests for `libs/converter.py`, ~0.05 s. `convert` is
 injected, so a fake one records what it was asked to do and writes whatever the
 test needs — no Blender. Covers the walk's exclusions (`stl-exported/`,
 AppleDouble sidecars), companions copied but never emitted, an existing export
