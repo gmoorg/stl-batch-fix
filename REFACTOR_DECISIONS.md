@@ -4597,3 +4597,41 @@ the one defect the survey listed as unowned.
 midpoint. Real ones will sit anywhere along the edge, several may share a face,
 and a vertex may lie on an edge only approximately. The collinearity tolerance
 and the multiple-per-face case both need deciding on real data.
+
+#### Confirmed trivial — a naive implementation handles 150 at once
+
+The user's assessment, tested rather than assumed:
+
+| fixture | before | after | splits | rounds | time |
+|---|---|---|---|---|---|
+| `tjunction` | 761f, 3 open | **762f, 0 open, 100.00%** | 1 | 2 | 0.01s |
+| `tjunction_many` | 910f, 450 open | **1060f, 0 open, 100.00%** | 150 | 2 | **0.40s** |
+
+**1060 faces is exactly what the commercial service produced** — same face
+count, same 532 vertices preserved. Two implementations arriving at an
+identical result independently.
+
+Against the alternatives on `tjunction_many`:
+
+| | faces | open | volume | surface |
+|---|---|---|---|---|
+| **face split (ours)** | **1060** | **0** | **100.00%** | untouched |
+| commercial service | 1060 | 0 | 100.01% | clean |
+| PyMeshFix | 1000 | 0 | 99.78% | **dented** |
+| Blender | 824 | 0 | 99.73% | **dented** |
+
+**Three worries, all unfounded.** Several T-vertices on one edge, several on
+one face, and convergence all needed no special handling — the naive version
+takes at most one split per face per round and re-derives the edge map each
+round. Two rounds sufficed on 150 scattered T-junctions, the second only
+confirming none remained.
+
+**The one real open question is tolerance.** `1e-6` works because these
+fixtures are exact to 2.6e-23 by construction. A T-junction from a boolean or a
+decimation sits *near* an edge rather than on it, and the threshold becomes a
+judgement: too tight misses them, too loose splits faces that should not be.
+That is a parameter to calibrate on real data, not a design problem.
+
+Outputs written as `sphere_tjunction_tjfix.stl` and
+`sphere_tjunction_many_tjfix.stl` for visual confirmation — numbers have been
+wrong about this fixture three times.
