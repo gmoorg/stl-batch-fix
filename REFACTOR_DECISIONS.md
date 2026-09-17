@@ -4029,3 +4029,86 @@ model is not a sample — the mistake made four times already in this refactor.
 The seam algorithm does **not** apply to this model, incidentally: it has
 **0 seam edges and 0 closed loops**, so `by_seams` returns it unchanged. The
 defect here is shells and non-manifold edges, not reversed winding.
+
+### Measured — PyMeshLab is the strongest of the three tools we have
+
+**2026-09-16.** Asked whether PyMeshLab has equivalents for the defects
+PyMeshFix and Blender mishandle. It does, and it is exact on four of six —
+including two that **nothing else we have can fix**.
+
+| defect | Blender | PyMeshFix | **PyMeshLab** | online service |
+|---|---|---|---|---|
+| `doubles` | exact | **half a sphere** | **exact** | exact |
+| `degenerate` | exact | exact | **exact** | — |
+| `inverted` | unchanged | no-op | **exact — the only tool that fixes it** | reports 0 defects |
+| `seam` | unchanged | n/a | **exact, without any split** | exact |
+| `fin` | exact | lossy | 99.7%, 2 extra faces | exact |
+| `tjunction_many` | **dented** | **dented** | **destroys or no-ops** | **exact — only tool** |
+
+PyMeshLab is already a hard dependency, runs in-process, and takes numpy
+directly — so this costs no subprocess and no new install.
+
+#### The filter sequences that work
+
+**`doubles`** — 1520f/764v/200% volume becomes **760f/382v/100%**, exactly the
+control:
+
+```python
+meshing_merge_close_vertices(threshold=PercentageValue(0.1))
+meshing_remove_duplicate_faces()
+meshing_remove_unreferenced_vertices()
+```
+
+`merge_close_vertices` **alone makes it worse** — it collapses the vertices and
+leaves both face sets, giving 1,140 non-manifold edges at 200% volume. All
+three filters are needed.
+
+**`seam`** — +2146.2 becomes **+4094.9**, exactly the control:
+
+```python
+meshing_re_orient_faces_coherently()
+meshing_re_orient_faces_by_geometry()
+```
+
+`re_orient_faces_coherently` alone unifies the winding but picks the **wrong
+direction** — it orients everything to the reversed cap, giving −4094.9.
+`by_geometry` then turns the whole mesh outward.
+
+**`inverted`** — `meshing_re_orient_faces_by_geometry()` alone takes −4094.9 to
++4094.9. The only tool in the chain that detects and corrects it.
+
+**`degenerate`** — `meshing_remove_null_faces()`, exactly the control.
+
+#### This simplifies the seam repair recorded as "solved" this morning
+
+That entry describes split → flip the negative-volume region → merge → write →
+reload. It is correct and it reaches the control. **Two PyMeshLab filters reach
+the same answer with none of that machinery** — no split, no flip, no merge, no
+weld.
+
+The split-based sequence is still the more *general* mechanism (it isolates
+regions for separate treatment, which matters when PyMeshFix would otherwise
+delete one), but for the plain "a region is wound backwards" case the two-filter
+version is what should be reached for first.
+
+#### T-junctions are unfixed by anything we have
+
+`meshing_remove_t_vertices` has a `threshold` defaulting to 40, which is why it
+first appeared to be a no-op:
+
+| threshold | Edge Collapse | Edge Flip |
+|---|---|---|
+| 40, 10 | no-op (450 open edges remain) | no-op |
+| **1, 0.1** | **destroys the mesh — 910 faces to 0** | no-op |
+
+`meshing_close_holes(maxholesize=30)` alone gets 450 open edges down to 70 but
+introduces a non-manifold edge.
+
+So on `tjunction_many` all three of our tools fail: Blender dents it, PyMeshFix
+dents it, PyMeshLab either does nothing or deletes everything. **Only the
+commercial service handles it**, keeping all 532 vertices and adding exactly
+150 faces. That remains an unowned gap.
+
+**A hazard worth naming**: `meshing_remove_t_vertices(method='Edge Collapse')`
+at a low threshold silently reduced a 910-face mesh to zero faces with
+`nm=0 open=0` — a "clean" empty mesh. Volume is the only check that catches it.
