@@ -396,9 +396,11 @@ class TestToleranceScaling(unittest.TestCase):
         return Mesh('/generated', '/out.stl', Kind.BINARY_STL, len(faces),
                     True, None, Geometry(verts, faces))
 
-    @unittest.skip("OPEN BUG: absolute tolerance, fails at r=50, 100, 200")
     def test_a_tjunction_is_found_at_every_scale(self):
-        """One junction, one sphere, six sizes. Measured distances:
+        """One junction, one sphere, six sizes. **Fixed 2026-09-17.**
+
+        The distances the junction actually sits at, and what the old absolute
+        `1e-6` did with them:
 
             r=1     1.9e-08   found
             r=10    2.6e-23   found
@@ -406,6 +408,11 @@ class TestToleranceScaling(unittest.TestCase):
             r=100   2.5e-06   MISSED
             r=200   5.0e-06   MISSED
             r=1000  0.0       found
+
+        The absolute error grows with the model because float32 carries ~7
+        significant digits; the *ratio* to the edge length stays flat at
+        ~2.4e-07. So the tolerance is now a fraction of the edge's own length,
+        and every one of these passes.
         """
         from libs import welder
         for radius in self.RADII:

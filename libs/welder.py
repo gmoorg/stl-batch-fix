@@ -72,9 +72,25 @@ from .mesh_io import Geometry, Mesh
 #: bounding-box diagonal, as `repairer.CLEAN_FILTERS` already does — see the
 #: OPEN BUG entry in REFACTOR_DECISIONS.md.
 #:
-#: **Not calibrated on real data.**  The fixtures are exact, so any value from
-#: 1e-12 upward passes them; this is a starting point, not a measured one.
-DEFAULT_TOLERANCE = 1e-6
+#: **Now calibrated, on costume01** — the first real-data measurement of this
+#: constant.  A 113.7 mm model, sweeping the threshold as a fraction of the
+#: edge length:
+#:
+#:     fraction    junctions found    worst distance / edge
+#:     1e-7                      4                 5.2e-04
+#:     1e-6                      5                 1.5e-03   <- plateau
+#:     1e-5                      5                 1.5e-03   <- plateau
+#:     1e-4                     10                 6.1e-02   garbage
+#:     1e-3                     13                 5.4e-01   garbage
+#:
+#: **Five is the answer**, stable across two decades.  Above that it collapses
+#: sharply: a candidate 6% of an edge-length off the line is not a subdivided
+#: edge, it is a hole with a triangle fan across it.  Real junctions sit at
+#: ~1.5e-03 of the edge and false ones at 6e-02 — a 40x gap, so the value is
+#: not a fine judgement.  1e-5 sits in the middle of the plateau.
+#:
+#: The old value was `1e-6` **absolute**, and it found **1 of those 5**.
+DEFAULT_TOLERANCE = 1e-5
 
 #: Cap on repair rounds.  Splitting a face changes the edge map, so a vertex
 #: found on an edge that no longer exists must be re-found; the loop repeats
@@ -134,49 +150,98 @@ def _find_in(verts: np.ndarray,
              tolerance: float) -> dict[int, TJunction]:
     """One junction per face, keyed by face — a face is split once per round.
 
-    Only **open** edges are considered, and only vertices already on an open
-    boundary.  A T-junction always produces open edges: the unsplit neighbour's
-    full-length edge has one face, and so do the two halves on the split side.
-    Searching every vertex against every edge would be quadratic for no gain.
+    **The search is topological first.**  A T-junction has an exact structure,
+    and finding it that way rather than by distance is what keeps this
+    scale-independent:
 
-    **This assumes the spanning edge is one of the open ones**, which is not
-    stated anywhere else and is worth knowing.  Constructed counter-case: a mesh
-    where the full-length edge (a,c) was shared by two faces — so it looked
-    properly paired — while its two halves were the open edges.  `find`
-    returned 0.  That fixture was artificial and no real mesh has produced it,
-    but the assumption is real.
+        X = [a, b, c]     spans the full open edge (a, c)
+        L owns edge (a, M)      both open, both single-faced
+        R owns edge (M, c)      L != R, neither is X
 
-    **The search is also symmetric across the three open edges of a junction**,
-    and cannot resolve which vertex is the interior one: the full edge (a,c) and
-    its halves (a,M), (M,c) are combinatorially identical under relabelling, so
-    a purely topological reading nominates three different vertices as M.  Only
-    the distance test below separates them — which is why the tolerance is a
-    tie-breaker among plausible candidates rather than a detection threshold.
+    So the candidate M is not "any vertex near this edge" — it is a vertex the
+    connectivity already nominates.  The previous version tested **every**
+    open-boundary vertex against every open edge, which on a 900k-face model is
+    thousands of candidates per edge with the tolerance as the only thing
+    rejecting them.  That is why a loose tolerance was catastrophic: at 1e-2 of
+    the diagonal it accepted vertices 6% of an edge-length away, tripling the
+    face count on `tjunction_many`.
+
+    **The pattern is symmetric, and `t` is what breaks the tie.**  The full
+    edge (a,c) and its halves (a,M), (M,c) are combinatorially identical under
+    relabelling, so the pattern nominates three different vertices as M — and
+    all three are collinear, so distance cannot separate them either.  Measured
+    on one junction of `tjunction_many`:
+
+        X=170  M=285  t= 2.0000   beyond an end
+        X=838  M=283  t= 0.5000   <- the junction
+        X=849  M=281  t=-1.0000   beyond an end
+
+    Only one has M *between* a and c.  `t` is a ratio, so that test is
+    **dimensionless** and was never part of the scale bug.  Picking by smallest
+    face index instead was tried and is wrong: 170 < 838 here, and it chooses
+    the candidate whose M lies outside the edge entirely.
+
+    **What the tolerance still does**, and it is now a narrow job: reject an M
+    that projects between a and c but sits *off* the line — a hole with a
+    triangle fan across it rather than a subdivided edge.  Nothing topological
+    distinguishes those, because the defect is precisely the absence of a link
+    between M and X.
+
+    **This assumes the spanning edge is open.**  Constructed counter-case: a
+    mesh where (a,c) was shared by two faces — so it looked properly paired —
+    while its two halves were the open edges; nothing was found.  Artificial,
+    and no real mesh has produced it, but the assumption is real.
     """
     owners = _edge_faces(faces)
     open_edges = {edge: owning for edge, owning in owners.items()
                   if len(owning) == 1}
-    candidates = {v for edge in open_edges for v in edge}
+    if not open_edges:
+        return {}
+
+    # Vertices of each open edge, and the open edges each vertex belongs to.
+    # Only a vertex sharing open edges with *both* ends of (a, c) can subdivide
+    # it, which is what narrows the search from thousands to a handful.
+    open_at: dict[int, set[int]] = defaultdict(set)
+    for u, w in open_edges:
+        open_at[u].add(w)
+        open_at[w].add(u)
 
     found: dict[int, TJunction] = {}
-    for (a, b), owning in open_edges.items():
+    for (a, c), owning in open_edges.items():
         face = owning[0]
         if face in found:
             continue                       # already splitting this one
-        start, along = verts[a], verts[b] - verts[a]
+        start, along = verts[a], verts[c] - verts[a]
         length_squared = float(along @ along)
         if length_squared == 0.0:
             continue                       # degenerate edge, nothing to lie on
-        for vertex in candidates:
-            if vertex in (a, b):
+
+        # A candidate must sit on an open edge reaching one end of (a, c), and
+        # be owned by some face other than X.  It need NOT have an open edge to
+        # the *other* end: an edge subdivided twice has three pieces
+        # ((a,M1), (M1,M2), (M2,c)), so neither M1 nor M2 connects straight to
+        # the far end.  Requiring both halves was tried and missed that case
+        # entirely — worse than the geometric search it replaced.
+        for vertex in open_at[a] | open_at[c]:
+            if vertex in (a, c):
                 continue
+            if any(face == owner
+                   for end in (a, c)
+                   for owner in owners.get(
+                       (min(end, vertex), max(end, vertex)), ())):
+                continue                   # X's own corner, not a junction
+
             t = float((verts[vertex] - start) @ along / length_squared)
-            if not (1e-6 < t < 1.0 - 1e-6):
-                continue                   # at or beyond an end, not interior
+            if not (0.0 < t < 1.0):
+                continue                   # beyond an end — the symmetric twin
             distance = float(np.linalg.norm(
                 verts[vertex] - (start + t * along)))
-            if distance < tolerance:
-                found[face] = TJunction(vertex, (a, b), face, t, distance)
+            # Relative to the edge's own length, so one number works at every
+            # scale.  An absolute distance cannot: float32 carries ~7
+            # significant digits, so the rounding error of a coordinate grows
+            # with the model while the *ratio* stays flat at ~2.4e-07.
+            if distance <= tolerance * float(np.sqrt(length_squared)):
+                found[face] = TJunction(vertex, (a, c), face, t, distance)
                 break
     return found
 
