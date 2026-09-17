@@ -198,24 +198,34 @@ class TestSequence(unittest.TestCase):
         result = repair(tetra(), min_shell_faces=0, tool=tool)
         self.assertTrue(result.ok, result.problem)
         order = [s.step for s in result.steps]
-        self.assertEqual(order[:4], [Step.WELD, Step.ORIENT,
-                                     Step.CLEAN, Step.SPLIT])
+        self.assertEqual(order[:3], [Step.WELD, Step.CLEAN, Step.SPLIT])
         self.assertEqual(order[-1], Step.MERGE)
 
-    def test_a_skipped_step_still_reports(self):
-        """"the guard did not fire" is as much a fact as "it did" — a silently
-        skipped step is indistinguishable from one never wired up."""
-        result = repair(tetra(), min_shell_faces=0, tool=Recorder())
-        orient = [s for s in result.steps if s.step is Step.ORIENT][0]
-        self.assertIn('skipped', orient.detail)
-        self.assertFalse(orient.changed)
+    def test_there_is_no_orientation_step_before_the_split(self):
+        """Orientation moved into step 3, per part, and became unconditional.
 
-    def test_the_orientation_guard_fires_on_an_inverted_mesh(self):
-        """`volume < 0` is the only detector of a wholly inverted mesh — it is
-        identical to a correct one on every topological count."""
-        result = repair(inverted_tetra(), min_shell_faces=0, tool=Recorder())
-        orient = [s for s in result.steps if s.step is Step.ORIENT][0]
-        self.assertIn('re-oriented', orient.detail)
+        Before the split it erased the seam signal the splitters read — on
+        `sphere_seam`, 40 seam edges in 1 closed loop became 0/0 — so
+        `by_shells` and `by_seams` were reasoning about geometry the
+        orientation filter had already flattened.
+        """
+        result = repair(tetra(), min_shell_faces=0, tool=Recorder())
+        self.assertFalse(hasattr(Step, 'ORIENT'),
+                         "Step.ORIENT still exists; orientation is per-part")
+        split = [s for s in result.steps if s.step is Step.SPLIT][0]
+        weld = [s for s in result.steps if s.step is Step.WELD][0]
+        clean = [s for s in result.steps if s.step is Step.CLEAN][0]
+        self.assertEqual(clean.faces_in, weld.faces_out)
+        self.assertEqual(split.faces_in, clean.faces_out)
+
+    def test_an_inverted_mesh_comes_back_outward(self):
+        """The default tool orients every part unconditionally, so a wholly
+        inverted mesh is turned outward without any guard having to detect it.
+
+        The stub tool does not orient, so this uses the real one.
+        """
+        result = repair(inverted_tetra(), min_shell_faces=0)
+        self.assertTrue(result.ok, result.problem)
         self.assertGreater(scanner.volume(result.mesh), 0)
 
     def test_the_tool_sees_one_call_per_part(self):
@@ -251,7 +261,7 @@ class TestSequence(unittest.TestCase):
         the record does not describe one sequence."""
         result = repair(tetra(), min_shell_faces=0, tool=Recorder())
         chain = [s for s in result.steps
-                 if s.step in (Step.WELD, Step.ORIENT, Step.CLEAN)]
+                 if s.step in (Step.WELD, Step.CLEAN, Step.SPLIT)]
         for earlier, later in zip(chain, chain[1:]):
             self.assertEqual(later.faces_in, earlier.faces_out)
 

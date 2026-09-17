@@ -12,15 +12,20 @@ The sequence, validated end to end on two real models and an all-defects
 sphere:
 
     1. welder.repair          T-junctions
-    2. by_geometry            only when volume < 0
-    3. CLEAN                  duplicates, before the split
-    4. split -> per part: by_geometry when volume < 0, then repair -> merge
+    2. CLEAN                  duplicates, before the split
+    3. split -> per part: by_geometry, then repair -> merge
 
-**The orientation guard runs twice.**  Step 2 must run before CLEAN and the
-split, or they work on backwards geometry; but one signed volume only goes
-negative when the model is inverted *as a whole*, so a reversed region survives
-it.  Isolated as its own part after the split, that region does show a negative
-volume (measured: -974.3 against its host's +3120.5) and gets flipped.
+**Orientation is unconditional, and runs once, after the split.**  It was
+previously guarded by `volume < 0` in two places; both are gone.  A signed
+total only goes negative when **more than half the model is inverted**, which
+is not how real models break — the guard fired *zero times* on Mandy's 38 parts
+and costume01's 2, both of which contain genuinely inverted faces.  What it
+blocked on Mandy: 15 inward-facing faces fixed against 1 broken.
+
+The position is what makes it safe.  Run before the split it also erased the
+seam signal the splitters read (`sphere_seam`: 40 edges / 1 closed loop -> 0/0),
+blinding `by_shells` and `by_seams`.  After the split there is nothing left to
+blind.
 
 **Why this order**, each answer measured rather than reasoned:
 
@@ -109,11 +114,10 @@ class Step(Enum):
     """
 
     WELD = 'weld'                    # 1. T-junctions
-    ORIENT = 'orient'                # 2. by_geometry, when volume < 0
-    CLEAN = 'clean'                  # 3. duplicates
-    SPLIT = 'split'                  # 4a. into parts
-    PART = 'part'                    # 4b. one part through the repair tool
-    MERGE = 'merge'                  # 4c. back into one mesh
+    CLEAN = 'clean'                  # 2. duplicates
+    SPLIT = 'split'                  # 3a. into parts
+    PART = 'part'                    # 3b. one part: orient, then repair
+    MERGE = 'merge'                  # 3c. back into one mesh
 
 
 #: The four PyMeshLab filters that remove duplicate geometry, run together.
@@ -357,23 +361,37 @@ def _repair_part(part: Mesh) -> tuple[Mesh, str]:
     """
     notes = []
 
-    # The orientation guard again, where it can see a reversed *region*.
-    # `scanner.volume()` is one signed total, so at step 2 it only fires when
-    # the model is inverted entirely; a reversed region leaves the total
-    # positive and slips through.  Isolated as its own part it does not:
-    # measured, a reversed cap comes back at -974.3 against its host's +3120.5,
-    # and on costume01 this fired on a real part.
+    # Orientation, **unconditionally**, and this is the one place it runs.
     #
-    # **It is cheap insurance rather than a proven saving.**  The one part it
-    # was seen to fire on ended at 6 faces either way — PyMeshFix collapses a
-    # 212-face, 98-vertex tangle with 56 non-manifold edges in a 1.5 mm box
-    # whichever way it faces, and that is the right answer for that geometry.
-    # Kept because the fixture measurement says an isolated reversed region is
-    # detectable only here, and the cost is one volume sum per part.
-    if scanner.volume(part) < 0:
-        part = _run_filters(
-            part, (('meshing_re_orient_faces_by_geometry', {}),))
-        notes.append('oriented')
+    # It used to be guarded by `volume < 0` here and in a step before the
+    # split.  Both are gone, because a signed total only goes negative when
+    # **more than half the model is inverted** — which is not how a real model
+    # breaks.  Measured: the guard fired **zero times** on Mandy's 38 parts and
+    # costume01's 2, on models that demonstrably contain inverted faces.  A
+    # guard that never fires on the case it exists for is not a safety measure.
+    #
+    # What it was blocking, measured on Mandy: **15 inward-facing faces fixed
+    # against 1 outward-facing face broken**, scattered across four parts of a
+    # 188,940-face model.  Stray reversed faces are the common defect and no
+    # volume test can see them.
+    #
+    # `by_geometry` needs no trigger because it is idempotent on correct
+    # geometry — it decides outward by ray casting, so on a sound part it is a
+    # no-op.  The guard was protecting against a cost, not a risk: +50% on
+    # Mandy (6s to 9s) and +15% on costume01 (266s to 307s).
+    #
+    # It does move seam counts — 19 on Mandy, 151 on costume01 — which is the
+    # effect the record warned about.  Measured consequence: **none**.  Final
+    # results are identical with and without, because re-winding a face changes
+    # its agreement with its neighbours and PyMeshFix then resolves it.  On
+    # Mandy's part 0 the closed-loop count went 1 -> 0, an improvement.
+    #
+    # **Position matters and is the reason this is safe.**  Before the split it
+    # also erased the seam signal that `by_shells` and `by_seams` read
+    # (`sphere_seam` went 40 edges/1 loop -> 0/0).  Here the split has already
+    # happened, so there is nothing left to blind.
+    part = _run_filters(part, (('meshing_re_orient_faces_by_geometry', {}),))
+    notes.append('oriented')
 
     result = meshfix.repair(part)
     if not result.ok:
@@ -476,40 +494,14 @@ def repair(mesh: Mesh,
         record(Step.WELD, was, len(mesh.geometry.faces),
                f"{welded.splits} junction(s) in {welded.rounds} round(s)", mark)
 
-        # 2. Orientation, guarded.  `volume < 0` is the only detector of a
-        #    wholly inverted mesh — it is identical to a correct one on every
-        #    topological count, and neither PyMeshFix nor a commercial service
-        #    nor Bambu sees it.
-        #
-        #    **This guard is narrow on purpose, and step 4 covers the rest.**
-        #    One signed total only goes negative when the model is inverted
-        #    *as a whole*, so `sphere_seam` (+2146.2 with its cap backwards) is
-        #    skipped here and caught per part after the split, where the
-        #    reversed region has a volume of its own.
-        #
-        #    Running the filter unguarded instead is not the fix: on an
-        #    already-correct mesh it manufactured **153 seam edges in 34 closed
-        #    loops**, the signal meaning "PyMeshFix will delete a region here".
-        #    On Mandy it inflated seams 4/1 -> 23/3 and the final result was
-        #    byte-identical without it — pure churn.
-        mark = time.monotonic()
-        was = len(mesh.geometry.faces)
-        if scanner.volume(mesh) < 0:
-            mesh = _run_filters(
-                mesh, (('meshing_re_orient_faces_by_geometry', {}),))
-            record(Step.ORIENT, was, len(mesh.geometry.faces),
-                   'inverted: re-oriented by geometry', mark)
-        else:
-            record(Step.ORIENT, was, was, 'not inverted: skipped', mark)
-
-        # 3. Duplicates, before the split so deduplication sees both copies.
+        # 2. Duplicates, before the split so deduplication sees both copies.
         mark = time.monotonic()
         was = len(mesh.geometry.faces)
         mesh = _run_filters(mesh, CLEAN_FILTERS)
         record(Step.CLEAN, was, len(mesh.geometry.faces),
                f"{len(CLEAN_FILTERS)} filters", mark)
 
-        # 4. Split, repair each part, merge.  PyMeshFix rebuilds one manifold
+        # 3. Split, repair each part, merge.  PyMeshFix rebuilds one manifold
         #    surface and discards the rest, so a multi-shell mesh reaching it
         #    whole comes back as its largest shell alone.
         mark = time.monotonic()

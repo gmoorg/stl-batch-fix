@@ -220,32 +220,21 @@ class TestRepairsToControl(ProbeCase):
         self.assertRepairsToControl('allbad', faces=CONTROL_FACES,
                                     max_lost=8, face_tolerance=160)
 
-    @unittest.expectedFailure
     def test_a_third_inverted(self):
-        """**KNOWN GAP — this is the bug, not the test.**
+        """A third of the faces reversed, scattered rather than a contiguous
+        cap — the case that forced orientation to become unconditional.
 
-        A third of the faces reversed, scattered rather than a contiguous cap.
-        The pipeline returns a topologically flawless sphere that is
-        **inside-out**: 760 faces, nm=0, open=0, volume −4094.9.
+        It defeats every volume-based guard: the signed total is **+1364.4**,
+        positive, because the reversed faces are a minority. And left to
+        itself PyMeshFix unifies the winding but picks the **wrong
+        direction** — measured across inversion fractions, only the 1/3 case
+        inverts, while every 2nd, 4th, 5th and 10th come back +4094.9.
 
-        Why every guard misses it:
+        It also defeats `by_seams`: 722 seam edges in **0 closed loops**,
+        because scattered faces have no ring-shaped boundary and therefore no
+        region to cut out.
 
-        - step 2 skips, because the signed total is +1364.4 — positive, since
-          the reversed faces are a minority;
-        - step 4's per-part guard skips for the same reason: one shell, so the
-          part's volume is the whole mesh's;
-        - PyMeshFix unifies the winding but picks the **wrong direction**.
-          Measured across inversion fractions, only the 1/3 case inverts:
-          every 2nd, 4th, 5th and 10th face all come back +4094.9.
-
-        `by_geometry` fixes it completely — run unguarded before PyMeshFix it
-        gives +4094.9 — so the repair exists and the *trigger* is what is
-        wrong. `winding_seams` reports 722 seam edges in 0 closed loops, so a
-        seam-count trigger would catch this where `volume < 0` cannot, and
-        unlike `by_seams` it needs no connected reversed region.
-
-        Marked expected-failure rather than deleted or weakened: the gap stays
-        visible in every run. Remove the marker when the trigger is fixed.
+        What fixes it is `by_geometry` simply being allowed to run.
         """
         self.assertRepairsToControl('inverted_third')
 
@@ -280,30 +269,25 @@ class TestTheSplitPath(ProbeCase):
         self.assertEqual(scanner.shell_count(result.mesh), 2)
         self.assertVolume(result.mesh, MULTI_SHELL['two_shells'])
 
-    def test_the_per_part_orientation_guard_fires(self):
-        """The only test that reaches the per-part guard.
+    def test_one_inverted_shell_among_correct_ones_is_turned_outward(self):
+        """A large correct sphere beside a small inverted one.
 
-        A large correct sphere beside a small inverted one. The signed total is
-        **+3583.0 — positive**, so step 2 correctly skips; only after the split
-        does the small sphere show its own negative volume and get flipped.
+        The signed total is **+3583.0 — positive** — so no whole-mesh volume
+        test could ever see the inverted component. Only orienting each part
+        after the split fixes it, and since orientation is unconditional the
+        large sphere passes through unchanged (`by_geometry` is a no-op on
+        sound geometry).
 
-        Both halves matter: if step 2 fired here it would flip the *majority*
-        the wrong way, and if the per-part guard did not exist the small sphere
-        would stay inside-out.
+        Correct answer: both outward, +4094.9 + 511.9 = +4606.8.
         """
         result = repairer.repair(load('shell_inverted'))
         self.assertTrue(result.ok, result.problem)
 
-        step2 = [s for s in result.steps
-                 if s.step is repairer.Step.ORIENT][0]
-        self.assertIn('skipped', step2.detail,
-                      "step 2 fired on a positive-volume mesh")
-
         parts = [s for s in result.steps if s.step is repairer.Step.PART]
         self.assertEqual(len(parts), 2)
         oriented = [s for s in parts if 'oriented' in s.detail]
-        self.assertEqual(len(oriented), 1,
-                         "exactly one part should have been re-oriented")
+        self.assertEqual(len(oriented), 2,
+                         "every part is oriented, unconditionally")
 
         self.assertVolume(result.mesh, MULTI_SHELL['shell_inverted'])
         self.assertTrue(scanner.scan(result.mesh).is_clean)
@@ -333,17 +317,22 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
         weld = [s for s in result.steps if s.step is repairer.Step.WELD][0]
         self.assertIn('0 junction', weld.detail)
 
-    def test_the_orientation_guard_fires_only_when_inverted(self):
-        fires = {}
+    def test_orientation_runs_on_every_part_of_every_fixture(self):
+        """Unconditional, because a guard on `volume < 0` needs **more than
+        half the model inverted** to fire — which is not how models break.
+
+        Measured: that guard fired **zero times** on Mandy's 38 parts and
+        costume01's 2, both of which contain genuinely inverted faces. What it
+        blocked on Mandy was 15 inward-facing faces fixed against 1 broken.
+        """
         for name in ('correct', 'inverted', 'seam', 'inverted_third'):
-            result = repairer.repair(load(name))
-            step = [s for s in result.steps
-                    if s.step is repairer.Step.ORIENT][0]
-            fires[name] = 'skipped' not in step.detail
-        self.assertEqual(
-            fires, {'correct': False, 'inverted': True,
-                    'seam': False, 'inverted_third': False},
-            "the guard's firing pattern changed — see test_a_third_inverted")
+            with self.subTest(fixture=name):
+                result = repairer.repair(load(name))
+                parts = [s for s in result.steps
+                         if s.step is repairer.Step.PART]
+                self.assertTrue(parts)
+                for step in parts:
+                    self.assertIn('oriented', step.detail)
 
     def test_duplicates_are_gone_before_the_split(self):
         """Measured: splitting first left `doubles` at 200% volume in 2
@@ -364,18 +353,17 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
         the same day — had never executed under test. This fails if that
         happens again.
         """
-        exercised = {'weld': 0, 'orient': 0, 'split': 0, 'part_orient': 0}
+        exercised = {'weld': 0, 'split': 0, 'orient': 0, 'merge': 0}
         for name in FIXTURES:
             result = repairer.repair(load(name))
             for step in result.steps:
                 if step.step is repairer.Step.WELD and '0 junction' not in step.detail:
                     exercised['weld'] += 1
-                elif step.step is repairer.Step.ORIENT and 'skipped' not in step.detail:
-                    exercised['orient'] += 1
                 elif step.step is repairer.Step.PART and 'oriented' in step.detail:
-                    exercised['part_orient'] += 1
+                    exercised['orient'] += 1
             if result.parts > 1:
                 exercised['split'] += 1
+                exercised['merge'] += 1
         for stage, count in exercised.items():
             with self.subTest(stage=stage):
                 self.assertGreater(count, 0,

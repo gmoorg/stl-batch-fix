@@ -12,8 +12,7 @@ tests do not catch.
 Decisions are grouped by topic. Numbers are global and stable across topics, so
 a commit message citing D7 keeps meaning D7 when a new topic is added.
 
-**Status (2026-09-17): twelve modules in `libs/`, 376 tests, all green (one
-expected failure: see D25).**
+**Status (2026-09-17): twelve modules in `libs/`, 376 tests, all green.**
 `stl_batch_fix.py` is untouched and still frozen. Built so far: `pool`,
 `indicators`, `blender`, `mesh_io`, `scanner`, `splitter`, `meshfix`,
 `decimator`, `converter`, `welder`, `repairer`. Still to build: **the
@@ -2866,6 +2865,88 @@ Measured inside the full-script run before that approach was abandoned:
 
 Neither is a reason to change the frozen script. They are reasons not to port
 those two steps into any Blender rung that is built later.
+
+---
+
+### D26 — Orientation is unconditional, runs once, and after the split
+
+**2026-09-17.** The two guarded orientation steps are gone, replaced by one
+unconditional `by_geometry` per part inside step 4. The sequence is now:
+
+```text
+1. welder.repair      T-junctions
+2. CLEAN              duplicates, before the split
+3. split -> per part: by_geometry, then PyMeshFix -> merge
+```
+
+**Every conditional in the orientation path is removed.** `Step.ORIENT` no
+longer exists.
+
+#### Why the guard had to go
+
+`volume < 0` is one signed total, so it only fires when **more than half the
+model is inverted** — which is not how a real model breaks. Measured: the
+guard fired **zero times** on Mandy's 38 parts and costume01's 2, on models
+that demonstrably contain inverted faces.
+
+What it was blocking, counted face by face on Mandy:
+
+| | faces |
+|---|---|
+| inward-facing, **fixed** by orientation | **15** |
+| outward-facing, **broken** by orientation | **1** |
+
+A net repair of 14 faces, scattered across four parts of a 188,940-face model
+whose total volume is +14,682. Stray reversed faces are the common defect and
+no volume test can see them. A guard that never fires on the case it exists for
+is not a safety measure.
+
+#### Why unconditional is safe
+
+`by_geometry` needs no trigger because it is **idempotent on correct geometry**
+— it decides outward by ray casting, so on a sound part it is a no-op. The
+guard was protecting against a cost, not a risk: +50% on Mandy (6s to 9s), +15%
+on costume01 (266s to 307s).
+
+It does move seam counts — 19 added on Mandy, 151 on costume01, reproducing the
+warning recorded in D25 almost exactly. **Measured consequence: none.** Final
+results are identical with and without: Mandy 188,432f at 99.99%, costume01
+834,582f at 99.99%. Re-winding a face changes its agreement with its
+neighbours, and PyMeshFix resolves that at the very next step. On Mandy's part
+0 the closed-loop count went **1 -> 0**, an improvement.
+
+So D25's warning was right about the mechanism and wrong about the
+consequence.
+
+#### Why *after* the split, not before
+
+Running it before the split **erased the signal the splitters read**:
+
+| fixture | seams before | seams after a whole-mesh orient |
+|---|---|---|
+| `sphere_seam` | 40 edges / **1 closed loop** | 0 / 0 |
+| `sphere_inverted_third` | 722 edges / 0 loops | 0 / 0 |
+
+`by_seams` needs that closed loop to isolate a reversed region, so the old step
+2 was blinding a splitter that can never fire in production because of it.
+Shell detection is unaffected — winding does not change which vertices an edge
+joins — so this was the seam half of the concern only.
+
+After the split there is nothing left to blind.
+
+#### `sphere_inverted_third` is fixed, and the marker is off
+
+It now returns **+4094.9**, so D25's `@unittest.expectedFailure` is removed —
+because the mesh is correct, not because the test was weakened.
+
+That fixture defeats every other approach and is worth keeping for it: the
+signed total is +1364.4 (positive, so no volume guard sees it); PyMeshFix
+unifies the winding but picks the **wrong direction**, and only for the 1/3
+case (2nd, 4th, 5th and 10th all come back +4094.9); and `by_seams` cannot help
+because 722 seam edges form **0 closed loops** — scattered faces have no
+ring-shaped boundary and therefore no region to cut out.
+
+What fixes it is `by_geometry` simply being allowed to run.
 
 ---
 
