@@ -164,24 +164,41 @@ def run_repair_loop(mesh, obj, label):
     bm.from_mesh(mesh)
 
     for repair_pass in range(12):
+        def say(message, _pass=repair_pass):
+            """Log one line, already tagged with the label and pass number.
+
+            The tag was repeated at four call sites as three-way string
+            concatenation, which is a third of the line at some of them.
+            """
+            print(label + " pass " + str(_pass + 1) + ": " + message)
+
         # --- 4a: wire edge deletion (directly in BMesh — no Edit Mode needed) ---
         wire_edges = [e for e in bm.edges if len(e.link_faces) == 0]
         if wire_edges:
             bmesh.ops.delete(bm, geom=wire_edges, context='EDGES')
 
         # --- 4b: NM face deletion ---
-        use_wide = (stall_count == 1 and not wide_used)
+        # Deleting only the offending faces sometimes cannot make progress:
+        # the same edges come back non-manifold on the next pass because the
+        # geometry around them is the problem.  So on the FIRST stalled pass —
+        # and once only — also delete every face adjacent to one, cutting a
+        # wider hole for the fill step to close.
+        #
+        # **Once only, because it is destructive and escalating.**  Each
+        # widening removes a ring of sound geometry; repeating it every stalled
+        # pass would eat outward from the defect without bound.  One attempt,
+        # then the stall limit (4 passes rather than 2, below) gives the normal
+        # deletion room to converge on the wider hole.  Measured on a real
+        # model, the widening took 2,583 faces in one pass.
+        widen_now = (stall_count == 1 and not wide_used)
         nm_faces = nm_faces_of(bm)
-        if nm_faces and use_wide:
-            extra = set()
-            for f in list(nm_faces):
-                for e in f.edges:
-                    for linked_f in e.link_faces:
-                        if linked_f not in nm_faces:
-                            extra.add(linked_f)
-            nm_faces.update(extra)
-            print(label + " pass " + str(repair_pass+1) + ": wider NM deletion (" +
-                  str(len(nm_faces)) + " faces)")
+        if nm_faces and widen_now:
+            neighbours = set()
+            for face in nm_faces:
+                for edge in face.edges:
+                    neighbours.update(edge.link_faces)
+            nm_faces.update(neighbours)
+            say("wider NM deletion (" + str(len(nm_faces)) + " faces)")
             wide_used = True
         if nm_faces:
             bmesh.ops.delete(bm, geom=list(nm_faces), context='FACES')
@@ -191,7 +208,7 @@ def run_repair_loop(mesh, obj, label):
                      if any(e.is_boundary for e in v.link_edges) and len(v.link_faces) == 1]
         if fin_verts:
             bmesh.ops.delete(bm, geom=fin_verts, context='VERTS')
-            print(label + " pass " + str(repair_pass+1) + ": removed " + str(len(fin_verts)) + " fin verts")
+            say("removed " + str(len(fin_verts)) + " fin verts")
 
         # --- 4d: hole fill ---
         if any(e.is_boundary for e in bm.edges):
@@ -224,8 +241,7 @@ def run_repair_loop(mesh, obj, label):
         # --- 4e: convergence check ---
         nm_now, open_now = count_defects(bm)
 
-        print(label + " pass " + str(repair_pass+1) + ": nm=" + str(nm_now) +
-              " boundary=" + str(open_now))
+        say("nm=" + str(nm_now) + " boundary=" + str(open_now))
 
         converged = (nm_now == 0 and open_now == 0)
         stalled = False
@@ -233,7 +249,7 @@ def run_repair_loop(mesh, obj, label):
             stall_count += 1
             limit = 4 if wide_used else 2
             if stall_count >= limit:
-                print(label + " pass " + str(repair_pass+1) + ": no improvement, stopping early")
+                say("no improvement, stopping early")
                 stalled = True
         else:
             stall_count = 0
