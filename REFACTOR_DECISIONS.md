@@ -4479,3 +4479,61 @@ So when a known-good reference exists, vertex-set comparison is the
 surface-quality check that volume and topology counts cannot provide. It does
 not help on real models, where no control exists — but it makes the fixture
 suite able to catch dents automatically.
+
+### Measured — CLEAN earns nothing on `costume01`; it should be conditional
+
+| | faces | nm | open | shells | volume | time |
+|---|---|---|---|---|---|---|
+| **with CLEAN** | 835,466 | 0 | 28 | 2 | 100.0% | 198s |
+| **without CLEAN** | 835,426 | 0 | 28 | 3 | 100.0% | 202s |
+
+A **40-face** difference and 4 seconds, for a step that first tears **1,225
+open edges** into the mesh which PyMeshFix then has to close. Damage and repair
+for no net gain — because this model has no duplicate geometry to remove.
+
+That does not make CLEAN useless: it is the only thing that fixes `doubles`,
+where PyMeshFix returns half a sphere. It makes it **conditional**, like ORIENT
+already is. Run it when there is duplicate geometry, not unconditionally.
+
+Detecting that is the open part. `scanner` currently reports the `doubles`
+fixture as entirely clean — nm=0, open=0, degenerate=0 — and only the shell
+count hints at anything, which is useless because two shells is legitimate.
+
+**A side effect worth noting**: without CLEAN the orient guard fired on **two**
+parts; with CLEAN, on one. So CLEAN was masking a misorientation rather than
+resolving it.
+
+### The T-junction defect, precisely
+
+Traced on `sphere_tjunction.stl` rather than described from memory, after an
+explanation of mine turned out to be wrong in its details.
+
+The T-junction vertex is **345** — not the last-added index, since PyMeshLab
+renumbers on load. It has **3 edges and 2 faces**, and:
+
+```
+vertex 345 lies ON edge (339, 358) at t=0.500, distance 2.6e-23
+```
+
+Exactly the midpoint, and that edge is used by **one** face — the neighbour
+that never got split. The three open edges are:
+
+| edge | faces | what it is |
+|---|---|---|
+| (339, 358) | 1 | the unsplit neighbour's full-length edge |
+| (339, 345) | 1 | left half, on the split side |
+| (345, 358) | 1 | right half, on the split side |
+
+The halves and the whole occupy the same line and are three distinct edges,
+each with a single face. **Three open edges and zero measurable gap** — which
+is why merging coincident vertices cannot help: nothing is coincident.
+
+**The repair** is to split the neighbouring face at 345. One face becomes two,
+345 gains a fourth edge, its fan closes, and every edge gets two faces. **One
+extra face per T-junction** — precisely the +150 faces the commercial service
+produced on the 150-T-junction fixture while leaving all 532 vertices intact.
+
+**A correction**: I first described this as vertex M having 3 edges where the
+neighbour contributes nothing, and checked the wrong vertex (382, which has 6
+edges all properly shared). The shape of the explanation was right; the
+specifics were invented. Checking took one query.
