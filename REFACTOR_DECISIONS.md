@@ -4703,3 +4703,55 @@ on vertex geometry alone will miss it.
 **Also noted**: the 40 off-sphere vertices in `allbad_seq` are the fixture's
 own artifact — midpoints of chords are always inside a sphere — not a repair
 defect. The T-junction fix preserving them is correct behaviour.
+
+### SETTLED — the repair order, measured on the all-defects sphere
+
+**2026-09-16.** The user proposed: T-junction, inverted, doubles by PyMeshLab,
+then PyMeshFix. Tested against the order used previously (T-junction, CLEAN,
+PyMeshFix with a guarded orient per part). **The user's order is better.**
+
+| step | | faces | nm | open | deg | seams | shells | volume |
+|---|---|---|---|---|---|---|---|---|
+| | source | 1604 | 4 | 246 | 2 | 80/2 | 2 | −104.82% |
+| 1 | **T-junction fix** (ours) | 1684 | 4 | **6** | 2 | 80/2 | 2 | −104.82% |
+| 2 | **`re_orient_faces_by_geometry`** | 1684 | 4 | 6 | 2 | **0/0** | 2 | **+200.00%** |
+| 3 | **CLEAN** (doubles) | **841** | 1 | 2 | **0** | 0/0 | **1** | **+100.00%** |
+| 4 | split → **PyMeshFix** → merge | 836 | **0** | **0** | 0 | 0/0 | 1 | **+99.95%** |
+
+**Step 2 is where the orders diverge.** `by_geometry` on the whole mesh fixes
+the inversion **and the seam together** — seams 80/2 → 0/0 and volume
+−104.82% → +200.00% (two correctly-oriented spheres) in one filter. The
+previous order left that seam until after the split, handling it part by part.
+
+Both orders end at 836f / +99.95%, but the user's reaches **correct orientation
+three steps earlier**, so every later step works on a properly-oriented mesh.
+That matters on real models: PyMeshFix deciding what to keep on a backwards
+surface is how the head-deletion case happens.
+
+#### What this establishes about `by_geometry`
+
+Previously recorded as the fix for uniform inversion, with `coherently` needed
+for seams. **`by_geometry` alone fixes both.** And it never refuses — the
+`nm == 0` precondition belongs only to `coherently`, which on this evidence is
+not needed at all.
+
+That makes it the safest filter in the set: no precondition, fixes two defect
+classes, and is a no-op on a correctly-oriented mesh.
+
+#### The order
+
+```
+1. T-junction fix                 ours, ~30 lines      246 open -> 6
+2. meshing_re_orient_faces_by_geometry                 inversion AND seams
+3. CLEAN: remove_null_faces, merge_close_vertices,     doubles
+          remove_duplicate_faces, remove_unreferenced
+4. split by shells -> PyMeshFix -> merge               remaining nm and open
+```
+
+Steps 1–3 run on the whole mesh; only step 4 splits. CLEAN must precede the
+split (deduplication needs to see both copies) and follow orientation (so it
+merges correctly-wound geometry).
+
+**Still to confirm by eye**: `sphere_allbad_ord2.stl`. Numbers have been wrong
+about surface quality four times today, and 99.95% is within the range where
+`fin_pmf` (99.96%) and `tjunction_many_pmf` (99.78%) were both visibly dented.
