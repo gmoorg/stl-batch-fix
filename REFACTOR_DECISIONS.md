@@ -3736,3 +3736,71 @@ test that decides the shape of `repairer`:
   and nothing measures it.
 
 Either answer changes the design. Neither is knowable from what has been run.
+
+### MEASURED — the three-way comparison: Blender wins `doubles` and `fin`, loses `tjunction_many`
+
+**Run 2026-09-16.** Every probe sphere through `fix_stl(src, dst,
+MERGE_DIST=0.01)` — the frozen script's Blender path — with PyMeshFix's and the
+commercial service's outputs alongside. Control: **760 faces, 382 verts,
++4094.9**.
+
+| fixture | Blender | PyMeshFix | service |
+|---|---|---|---|
+| `doubles` | **760 / 382 / +4094.9 — exactly the control** | 418 / 211 / +2047.4 | 816 / 410 / +4095.2 |
+| `fin` | **760 / 382 / +4094.9 — exactly the control** | 756 / 380 / +4093.1 | 766 / 385 / +4095.2 |
+| `degenerate` | 760 / 382 / +4094.9 | 760 / 382 / +4094.9 | — |
+| `tjunction` | 762 / 383 / +4094.9 | 760 / 382 / +4094.9 | — |
+| `tjunction_many` | 824 / **414** / +4083.8 | 1000 / 502 / +4085.9 | **1060 / 532 / +4095.2** |
+| `inverted` | **unchanged** (−4094.9) | no-op | reports 0 defects |
+| `seam` | **unchanged** (+2146.2) | — | **fixed** (+4095.2) |
+
+**`doubles` settles the one real gap.** Blender returns *exactly* the control —
+it merged the two coincident spheres. That is `remove_doubles(dist=merge_dist)`
+doing precisely what `MERGE_DIST` exists for, and it is the capability the
+survey proposed dropping. PyMeshFix returns half a sphere; the service is close
+but carries a slight excess.
+
+**`fin` likewise**: Blender exactly the control, where PyMeshFix loses volume
+(the visible defect) and the service adds geometry.
+
+**But Blender is the *worst* of the three on `tjunction_many`.** It dropped 118
+vertices (532 → 414) and lost the most volume. The service kept all 532 and
+matched the control. So the Blender T-junction path restructures harder than
+either alternative at scale — the opposite of what the `doubles` and `fin`
+results suggest, and a reminder that "which tool is better" has no single
+answer.
+
+#### Two defects nothing in the pipeline repairs
+
+`inverted` and `seam` come back **byte-identical to their sources** — same
+face/vertex counts, same volume. `inverted` is settled as a non-defect, so that
+is correct behaviour. **`seam` is not.** It is the hair-over-scalp case the
+entire seam-split mechanism exists for, and the incumbent repair path leaves it
+untouched at +2146.2 against a control of +4094.9. The commercial service
+repairs it to +4095.2.
+
+That is a live gap in the current pipeline, not a refactor question.
+
+#### `BLENDER_OK` means "the script ran"
+
+All eight fixtures reported `BLENDER_OK`, including the two it did not repair
+at all. The marker is not a verdict on the mesh — the same trap as PyMeshFix's
+`ok=True`, and the reason `_post_verify` exists. Worth keeping in mind when
+`repairer` reads these markers.
+
+#### What this does to the design
+
+No tool dominates. A ladder over both is justified, and **which rung to prefer
+depends on the defect**:
+
+| defect | best tool |
+|---|---|
+| coincident/duplicate geometry | **Blender** (`remove_doubles`) |
+| stray fins | **Blender** |
+| degenerate faces | either (tie) |
+| many T-junctions | neither of ours — the service beat both |
+| winding seams | neither of ours — split first, as the pipeline already does |
+
+**Still to check by eye**: the `_bl` outputs in Bambu. Numbers missed the dents
+on PyMeshFix's output once already, and `tjunction_many_bl` at 414 vertices is
+the obvious candidate for the same problem.
