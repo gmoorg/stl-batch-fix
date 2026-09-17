@@ -3913,3 +3913,40 @@ clean sphere, including across the boundary ring where the two regions
 rejoined. That check mattered — twice today a mesh with nm=0, open=0, one shell
 and volume within 0.3% turned out to have a visible gash. This one matches the
 control on every field including vertex count, and looks right as well.
+
+### Note — an unrepaired seam mesh looks perfectly fine
+
+**Observed 2026-09-16.** `fixture_seam.stl` — the **unrepaired** source, 40
+seam edges in 1 closed loop, volume **+2146.2** against a control of +4094.9 —
+renders as a clean sphere. Nearly half its enclosed volume is wrong and nothing
+is visible.
+
+Consistent with the inverted-normals finding: renderers reconstruct orientation
+from geometry rather than trusting winding, and a reversed cap occupies exactly
+the right space — same surface, traversed the other way. Nothing moves, so
+nothing looks wrong.
+
+**This contradicts the recorded symptom.** The design doc says of winding
+seams: *"a region renders black in viewers and in Bambu while every defect
+count reads zero."* This fixture reads zero on every count **and renders
+normally**. Either the symptom needs something the fixture lacks, or it was
+misattributed. Not resolved.
+
+**The real justification for the seam mechanism is not visual.** It is that
+**PyMeshFix deletes a region** when handed irreconcilable winding — 562,288
+faces in, 394,432 out, a model's head gone. The failure is in the repair, not
+the render, and it strikes a file that looks and measures fine going in.
+
+Worth recording plainly, because "it looks fine" is exactly the observation
+that would justify removing the machinery:
+
+| | `fixture_seam.stl` |
+|---|---|
+| nm / open / degenerate | 0 / 0 / 0 |
+| shells | 1 |
+| renders in Bambu | **fine** |
+| signed volume | **+2146.2 vs +4094.9 — 52% of control** |
+| through PyMeshFix unsplit | **region deleted** |
+
+Signed volume is the only check that sees anything wrong, and it is the same
+measure that turned out to drive the repair (flip the negative-volume region).
