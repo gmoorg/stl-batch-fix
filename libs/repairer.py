@@ -80,6 +80,8 @@ its own output.
 
 from __future__ import annotations
 
+import os
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -88,7 +90,7 @@ from enum import Enum
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import meshfix, scanner, splitter, welder
+from . import blender, mesh_io, meshfix, scanner, splitter, welder
 from .mesh_io import Geometry, Mesh
 
 try:
@@ -384,6 +386,44 @@ def _repair_part(part: Mesh) -> tuple[Mesh, str]:
         # stdout, and they are the only warning that a repair was lossy.
         note += ' (with warnings)'
     return result.mesh, note
+
+
+def blender_part(part: Mesh, timeout: float = 600) -> tuple[Mesh, str]:
+    """Step 4 through Blender instead of PyMeshFix.  Pass as `repair(tool=)`.
+
+    **Costs a file boundary**, which is the whole argument against it: the part
+    is written out, Blender is launched, and the result read back.  PyMeshFix
+    runs on the arrays in this process.
+
+    What it buys, measured on prepared single-shell parts — which is what step
+    4 hands it, and is *not* what the frozen script does to a raw file:
+
+        all-defects sphere   840f at +4094.9   (PyMeshFix: 836f at +4092.9)
+        fin                  760f at 100.00%, losing only the fin's own apex
+
+    Two of the script's six steps are disabled in `blender_fx/repair.blender`,
+    because `repairer` already did them and did them better — see
+    `blender.REPAIR_SCRIPT`.
+
+    Returns the part unchanged with a reason when Blender fails, so a caller
+    can tell "not repaired" from "repaired badly".
+    """
+    with tempfile.TemporaryDirectory(prefix='repairer-blender-') as folder:
+        source = os.path.join(folder, 'part.stl')
+        target = os.path.join(folder, 'fixed.stl')
+        mesh_io.write(part.with_destination(source))
+        ok, result = blender.repair(source, target, timeout=timeout)
+        if not ok:
+            why = ('timed out' if result.is_timed_out
+                   else f"exit {result.exit_code}")
+            return part, f"blender failed: {why}"
+        repaired = mesh_io.load(mesh_io.probe(target, part.destination))
+
+    marker = next((line for line in result.stdout_capture.splitlines()
+                   if line.startswith('BLENDER_')), 'BLENDER_OK')
+    return (repaired.with_destination(part.destination),
+            f"blender {len(part.geometry.faces)}f -> "
+            f"{repaired.triangles}f ({marker.split(':')[0]})")
 
 
 def repair(mesh: Mesh,

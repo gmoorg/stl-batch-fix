@@ -194,6 +194,25 @@ def load_script(name: str) -> str:
 
 CONVERT_SCRIPT = load_script('convert')
 
+#: The repair script, lifted from the frozen `stl_batch_fix.blender` with two
+#: of its six steps disabled — see the comments at those sites in
+#: `blender_fx/repair.blender`.  Both were measured to be redundant or wrong
+#: once the mesh arrives through `repairer`:
+#:
+#:   step 3, T-junction split  scans NON-MANIFOLD edges; a T-junction produces
+#:                             OPEN edges, so it found 0 of 80 on the
+#:                             all-defects sphere.  `welder` owns this.
+#:   step 4, normal vote       compares each face's normal against the stored
+#:                             one, but `mesh_io.write` derives normals from
+#:                             the winding, so they always agree: measured
+#:                             "agree: 801, disagree: 0".
+#:
+#: What remains is the hole-filling repair loop, which is what Blender is
+#: actually better at: given a prepared single-shell part it reaches the
+#: all-defects sphere at 840f/+4094.9 against PyMeshFix's 836f/+4092.9, and
+#: `fin` at 760f/100.00% volume losing only the fin's own apex.
+REPAIR_SCRIPT = load_script('repair')
+
 
 def convert(source: str, destination: str, timeout: float = 600,
             executable: str = 'blender') -> tuple[bool, str]:
@@ -219,6 +238,37 @@ def convert(source: str, destination: str, timeout: float = 600,
           and result.exit_code == 0
           and 'BLENDER_CONVERT_OK' in result.stdout_capture)
     return ok, destination
+
+
+def repair(source: str, destination: str, merge_dist: float = 0.01,
+           timeout: float = 600, executable: str = 'blender',
+           ) -> tuple[bool, Result]:
+    """Repair the binary STL at `source`, writing the result to `destination`.
+
+    Returns `(ok, result)`.  `ok` means the script ran to completion and wrote
+    a file — **not** that the mesh is clean: the script exits 2 with
+    `BLENDER_UNREPAIRED` when non-manifold edges remain, and that is a real
+    outcome a caller may still want to keep.  The full `Result` comes back
+    because a repair can run for minutes and its output is the only sign of
+    life.
+
+    Unlike `convert`, this is **not** a lossless operation — it fills holes,
+    deletes non-manifold faces and may move geometry.  `scanner` decides
+    whether what came back is worth keeping, and `repairer.Result` carries the
+    volume and lost-vertex comparisons that catch a destructive repair.
+
+    A file boundary is unavoidable here: Blender is a subprocess, so the mesh
+    must be written out and read back.  That is the cost `meshfix` does not
+    pay, and the reason PyMeshFix is step 4's default.
+    """
+    script = REPAIR_SCRIPT.format(src=source, dst=destination,
+                                  merge_dist=merge_dist,
+                                  is_ascii=False, is_obj=False)
+    result = Runner(executable).run(script, timeout=timeout)
+    ok = (not result.is_timed_out
+          and result.exit_code in (0, 2)
+          and os.path.exists(destination))
+    return ok, result
 
 
 def is_available(executable: str = 'blender') -> bool:
