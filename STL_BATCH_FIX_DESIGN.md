@@ -946,6 +946,41 @@ only sign of life.
 **`ok` means the tool ran, not that the mesh is clean.** PyMeshFix reports
 success on meshes that still have defects; `scanner` gives the verdict.
 
+`libs/welder.py` — repair T-junctions by splitting the face that ignores them:
+
+```python
+find(mesh, tolerance=1e-6)   -> tuple[TJunction, ...]
+repair(mesh)                 -> Result(mesh, splits, rounds)
+```
+
+A T-junction is a vertex lying on the interior of an edge belonging to a face
+that does not reference it — one side of the surface was subdivided and its
+neighbour was not. The two sides occupy the same line as *different* edges, so
+the gap is zero and no vertex merge can help: nothing is coincident. Measured
+on `sphere_tjunction.stl`, vertex 345 sits on edge (339, 358) at t=0.500, at a
+distance of 2.6e-23.
+
+**The repair is one face split**, and the mesh gains exactly one face per
+junction while **nothing moves and nothing is deleted**. Measured against every
+other tool on a 150-junction fixture:
+
+| | faces | open | volume | vertices lost |
+|---|---|---|---|---|
+| **welder** | 910 → **1060** | 0 | **100.00%** | **0** |
+| commercial service | 910 → 1060 | 0 | 100.01% | 0 |
+| PyMeshFix | 910 → 1000 | 0 | 99.78% | **2** |
+| Blender | 910 → 824 | 0 | 99.73% | **118** |
+
+The commercial service reaches an identical face count independently. PyMeshFix
+and Blender both treat the open edges as a hole to close and move geometry to
+do it — but there is no hole, and that is where their losses come from. Both
+outputs were confirmed visibly wrong; welder's was confirmed clean.
+
+**The tolerance is not calibrated.** The fixtures are exact by construction, so
+any value from 1e-12 upward passes them. A junction arriving from a boolean or
+a decimation sits *near* rather than *on*, and the default wants measuring
+against real data.
+
 `libs/splitter.py` — cut a mesh into independently-repairable pieces, and put
 them back:
 
