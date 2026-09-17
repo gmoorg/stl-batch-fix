@@ -3397,3 +3397,66 @@ test whether PyMeshFix still copes.
 
 Still untested from the survey: wire edges, fin vertices, doubles-merging,
 and whether `scanner`'s degenerate-face count needs anything acting on it.
+
+### Measured — the rest of the survey, on synthetic fixtures (2026-09-16)
+
+Same method throughout: one defect on an otherwise perfect 760-face sphere,
+run through `scanner`, then `meshfix.repair()`, then a commercial online repair
+service for an independent verdict. Fixtures and their `_pmf` outputs are in
+`/mnt/sda2/STL/_validate/`.
+
+| fixture | source | `scanner` sees | PyMeshFix result | volume | verdict |
+|---|---|---|---|---|---|
+| control | 760/382 | clean | — | +4094.9 | — |
+| **fin** | 761/383 | nm=1, open=2 | **756/380** clean | +4093.1 | deleted the fin, trimmed slightly |
+| **degenerate** | 761/382 | nm=1, open=1, deg=1 | **760/382** clean | +4094.9 | exactly the control |
+| **t-junction x150** | 910/532 | open=450 | **1000/502** clean | +4085.9 | all 450 closed, 0.2% volume loss |
+| **doubles** | 1520/764, 2 shells | **clean** | **418/211** | **+2047.4** | **destructive** |
+
+**Independently confirmed clean**: the service reports all zeros on both
+`sphere_fin_pmf.stl` and `sphere_tjunction_many_pmf.stl`. So PyMeshFix's
+repairs are good by a mature implementation's judgement, not merely by ours.
+
+**`MAX_ITER = 200` is not a limit in practice.** The Blender splitter's cap
+suggested it was built for meshes with hundreds of T-junctions; PyMeshFix
+handled 150 at once without difficulty. Note it *patches* rather than *undoes*
+at that scale — 1000 faces out, not back to 760 — where on a single T-junction
+it undid it exactly. Both give a clean mesh.
+
+#### The doubles case is the one real gap
+
+Control volume +4094.9. Two coincident spheres: +8189.7. PyMeshFix returns
+**+2047.4** — *half of one sphere*, from 418 faces where a correct merge gives
+about 760. It discarded one shell and then ate half the other.
+
+This is the same shell-eating seen on `platform_supported.stl`, and it is what
+`MERGE_DIST` and Blender's `remove_doubles` exist for. **PyMeshFix makes this
+one worse, not better.**
+
+Also worth noting: `scanner` reports the doubles fixture as **completely
+clean** — nm=0, open=0, degenerate=0. Only the shell count (2) hints at
+anything, and two shells is legitimate on a real model. So we cannot currently
+distinguish "two parts" from "one part duplicated".
+
+#### An observation about the online service
+
+On `sphere_tjunction_many_pmf.stl` it reported **0 of everything** and then
+changed the file anyway: +2 verts, +6 faces. So "0 defects" and "unchanged" are
+not the same thing for that tool — its repair pass evidently does tidying its
+analysis does not report. Worth remembering when reading its output as ground
+truth.
+
+#### Survey status
+
+| capability | detected | needs building | why |
+|---|---|---|---|
+| inverted normals | no | **no** | nothing downstream cares |
+| T-junctions | yes | **no** | PyMeshFix fixes them, at scale |
+| fin vertices | yes | **no** | PyMeshFix fixes them |
+| degenerate faces | yes | **no** | PyMeshFix fixes them exactly |
+| **doubles / coincident** | **no** | **probably yes** | PyMeshFix is destructive; nothing detects it |
+| wire edges | untested | — | — |
+
+**Still to test in Bambu**, which decides whether the doubles gap matters at
+all: if two coincident shells slice identically to one, the destruction never
+happens because the file would never need repairing.
