@@ -4414,3 +4414,68 @@ checks. Volume differences that small are indistinguishable from rounding, so
 volume cannot be the gate either. The surface-comparison check recorded earlier
 as "nothing we have" is now the blocking gap: without it, a repair ladder
 cannot tell which tool produced the better mesh.
+
+### Measured — CLEAN tears holes in `costume01`, and the threshold is not why
+
+**2026-09-16.** The costume run showed open edges going **20 → 1,318** at the
+CLEAN step. I attributed that to my `merge_close_vertices` threshold, having
+used PyMeshLab's `PercentageValue(0.1)` — roughly 0.11 mm on this model —
+against the project's own `MERGE_DIST = 0.01 mm`. **Wrong.**
+
+| threshold | faces | nm | open | shells |
+|---|---|---|---|---|
+| input | 900,000 | 2,263 | **20** | 491 |
+| 0.1% (~0.11 mm, what I used) | 898,616 | 2,018 | 1,318 | 489 |
+| **0.01 mm = `MERGE_DIST`** | 895,230 | **2,359** ↑ | 1,506 | 487 |
+| 0.001 mm | 898,636 | 2,016 | 1,318 | 491 |
+| **no merge step at all** | 898,953 | 1,920 | **1,225** | 491 |
+
+**Open edges go 20 → 1,225 with no merge step at all**, so the damage belongs to
+`remove_duplicate_faces` or `remove_null_faces`, not to the merge or its
+threshold.
+
+And `MERGE_DIST = 0.01 mm` is the **worst** setting tried: the only one that
+*increases* non-manifold edges, 2,263 → 2,359. The project's own constant is
+tuned for Blender's `remove_doubles`, and does not transfer to PyMeshLab's
+filter.
+
+**The net result is still fine** — PyMeshFix closes those 1,225 holes back to
+28 — so CLEAN's damage is real but recoverable. Whether it *earns its place* on
+a mesh with no duplicate geometry is a separate question, now being tested by
+running the sequence without it.
+
+**A correction to note**: `pymeshlab.AbsoluteValue` does not exist. The
+absolute-units class is **`PureValue`**; `PercentageValue` is the other. Both
+are required — passing a bare float raises.
+
+#### The costume result, for the record
+
+| | faces | nm | open | shells | volume | time |
+|---|---|---|---|---|---|---|
+| decimated input | 900,000 | 2,263 | 20 | 491 | 100.0% | — |
+| **full sequence** | 835,466 | **0** | **28** | 2 | **100.0%** | **198s** |
+| PyMeshFix alone | 835,426 | 0 | 28 | 3 | 100.0% | 201s |
+| Blender, uncapped | 887,019 | 0 | 493 | 450 | 99.5% | 488s |
+
+The sequence and PyMeshFix-alone differ by **40 faces and one shell** — the
+PyMeshLab work contributed almost nothing on this model. `part 1: oriented`
+did fire, so the guard found a genuinely misoriented region on real data.
+
+#### `seq4` — `by_geometry` before the repair
+
+Tried at the user's suggestion, since `re_orient_faces_by_geometry` never
+refuses and could run first. Result: **byte-identical to `seq3` on all eight
+fixtures.** It only acts on a misoriented mesh, and by the time it runs the
+orientation is either already correct or PyMeshFix will fix it. A no-op in
+either position.
+
+#### Vertex-set comparison detects what the eye detects
+
+Comparing each output's sorted vertex array against the control's: six of eight
+match exactly, and **the two that do not are precisely the two seen as
+dented** — `fin` (756f/380v) and `tjunction_many` (1000f/502v).
+
+So when a known-good reference exists, vertex-set comparison is the
+surface-quality check that volume and topology counts cannot provide. It does
+not help on real models, where no control exists — but it makes the fixture
+suite able to catch dents automatically.
