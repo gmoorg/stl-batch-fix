@@ -4229,3 +4229,89 @@ to `inverted` and `seam`, and it **timed out at 420s** on costume01 — the
 `TIMEOUT after 420s` in stdout being why the original run wrote `.failed.stl`
 with no markers. A run with the cap lifted is in progress; until it returns,
 whether Blender can repair a mesh of that shape at all is unknown.
+
+### CORRECTION + the full sequence measured on all eight fixtures
+
+**2026-09-16.** Two corrections to the entries above, both from running the
+composed sequence rather than each tool alone.
+
+#### 1. Only ONE of the two orientation filters refuses
+
+Recorded above as *"PyMeshLab's orientation filters refuse when `nm > 0`"*.
+Too broad. Tested individually:
+
+| case | nm | open | `re_orient_faces_coherently` | `re_orient_faces_by_geometry` |
+|---|---|---|---|---|
+| clean tetra | 0 | 0 | ok | ok |
+| **nm edge (fin)** | **1** | 2 | **RAISES** | **ok** |
+| open (face removed) | 0 | 3 | ok | ok |
+| **degenerate face** | **1** | 1 | **RAISES** | **ok** |
+| two shells | 0 | 0 | ok | ok |
+| vertex-joined | 0 | 3 | ok | ok |
+
+`by_geometry` **never refuses**. The precondition belongs to `coherently`
+alone, and the trigger is non-manifold *edges* — open edges, multiple shells
+and vertex joins all pass. The original test ran the pair together, so
+`coherently` raising masked that `by_geometry` was fine.
+
+Practically: `by_geometry` alone fixes `inverted` and can run on anything.
+`coherently` is needed for the seam case and carries the constraint.
+
+#### 2. Clean filters must run BEFORE the split
+
+First composition attempt — split, then repair each part, then clean — left
+`doubles` at **200% volume and two shells**. The split separated the coincident
+spheres, so `merge_close_vertices` never saw them together and had nothing to
+merge. **Splitting first defeats deduplication.** Moving the clean filters ahead
+of the split fixed it: 760f, one shell, 100.0%.
+
+#### 3. ORIENT damages a mesh that does not need it
+
+The sole remaining failure was `tjunction_many`: source has **0 seam edges**,
+output had **153 in 34 closed loops**. Traced step by step:
+
+```
+source            910f  nm=0 open=450 seams=0/0   100.0%
+after CLEAN       910f  nm=0 open=450 seams=0/0   100.0%
+after pymeshfix  1000f  nm=0 open=  0 seams=0/0    99.8%   <- already correct
+after ORIENT     1000f  nm=0 open=  0 seams=153/34 99.8%   <- damaged
+```
+
+The orientation filters **manufactured 34 closed seam loops** on a mesh
+PyMeshFix had just rebuilt correctly. That is worse than the dents: a closed
+seam loop is precisely the signal meaning *PyMeshFix will delete a region here*.
+
+My earlier "safe no-op on clean meshes" conclusion came from simple fixtures.
+On a mesh freshly patched over 150 T-junctions, they are not.
+
+**The guard**: run ORIENT only when the mesh says it is misoriented —
+`volume < 0` or a closed winding seam. With that, **all eight fixtures pass**.
+
+#### The sequence that works
+
+```python
+mesh = pml(mesh, CLEAN)                 # BEFORE the split — dedup needs the whole mesh
+for part in splitter.by_shells(mesh):
+    part = meshfix.repair(part).mesh
+    if scanner.volume(part) < 0 or scanner.winding_seams(part)[1] > 0:
+        if scanner.scan(part).non_manifold == 0:
+            part = pml(part, ORIENT)    # only when needed, and only when legal
+merge(parts)
+```
+
+| fixture | faces | nm | open | seams | shells | volume |
+|---|---|---|---|---|---|---|
+| inverted | 760 | 0 | 0 | 0/0 | 1 | **100.0%** |
+| seam | 760 | 0 | 0 | 0/0 | 1 | **100.0%** |
+| doubles | 760 | 0 | 0 | 0/0 | 1 | **100.0%** |
+| degenerate | 760 | 0 | 0 | 0/0 | 1 | **100.0%** |
+| fin | 756 | 0 | 0 | 0/0 | 1 | **100.0%** |
+| tjunction | 760 | 0 | 0 | 0/0 | 1 | **100.0%** |
+| tjunction_many | 1000 | 0 | 0 | 0/0 | 1 | 99.8% |
+| correct | 760 | 0 | 0 | 0/0 | 1 | **100.0%** |
+
+**Eight of eight numerically clean.** Outputs written as `sphere_*_seq3.stl`.
+
+**Not yet confirmed by eye** — and `tjunction_many` at 1000 faces is the same
+shape that was visibly dented before, so that one especially needs looking at.
+Numbers have been wrong about this fixture twice.
