@@ -3262,3 +3262,65 @@ splitting first is what prevents the loss.
 `make_fixtures.py`: a closed sphere with every face reversed. `check()` now
 reports signed volume, because without it the inverted fixture is
 indistinguishable from a correct one in that table.
+
+### Settled — inverted normals are a NON-DEFECT; do not build detection for them
+
+**Tested end to end 2026-09-16, and the answer retires the question.**
+
+A closed sphere with **every** face reversed was put through the whole chain:
+
+| stage | result |
+|---|---|
+| `scanner` (nm, open, degenerate, seams, shells) | all zero — identical to a correct sphere |
+| `meshfix.repair()` | clean no-op: 760 faces in, 760 out, volume unchanged, `ok=True` |
+| commercial online repair service | **"0 Inverted normals"** — its dedicated check reports nothing |
+| Bambu Studio — render | renders as a normal opaque sphere |
+| Bambu Studio — **slice** | **slices fine** |
+
+Only signed volume distinguishes it: **+4094.9 against −4094.9**.
+
+**Nothing downstream treats it as a defect**, so it is not one. A slicer
+reconstructs orientation from geometry rather than trusting the file's winding,
+which is the sane thing for it to do — it has to produce a solid either way.
+
+**Consequence: `normal_vote` is not ported, and not rebuilt on our side.** The
+previous entry was heading toward reimplementing its flood-fill-and-vote in
+numpy. That would have been machinery for a condition with no consequence
+anywhere in the chain.
+
+**The commercial tool has the same blind spot we do**, which is itself worth
+recording: it offers an "Inverted normals" check and reports **0** on a mesh
+that is entirely inside-out, while reporting **40** on `fixture_seam.stl`. So
+its check means what `find_winding_seams` means — faces disagreeing *with each
+other*. A uniformly reversed mesh is locally perfect everywhere and scores
+clean. We are not missing a standard check that everybody else has.
+
+#### The seam case is different and is NOT retired
+
+`fixture_seam.stl` — one sphere with only its cap reversed — was flagged (40
+inverted normals) and genuinely repaired: 40 seam edges / 1 closed loop and
+volume +2146.2 became **0 edges / 0 loops and +4095.2**, matching the correct
+sphere to rounding.
+
+Worth noting how it repaired: it **re-wound 554 of 760 faces**, and the face
+set is not even identical ignoring winding — so it rebuilt the surface rather
+than flipping the offending cap. Vertex and triangle counts unchanged, so
+nothing was added or lost. I had assumed from the log that it flipped 40 faces
+in place; comparing the arrays showed otherwise, and the counts the log prints
+would never have revealed it.
+
+#### A design-doc note that now needs revisiting
+
+The doc says of winding seams: *"a region renders black in viewers and in Bambu
+while every defect count reads zero."* That symptom is real and recorded from a
+real model, but it cannot describe the **uniform** case, which Bambu renders and
+slices without complaint. It must describe the **partial** case — a region
+disagreeing with its neighbours, where a renderer cannot resolve a consistent
+surface. The note should say which.
+
+#### Retired with it
+
+The planned re-scan of the collection at `dot < -0.9`, to separate genuine
+inversions from exporter noise, is **no longer worth running**. Whether 62 files
+or 6 carry opposed stored normals does not matter if the condition has no
+consequence.
