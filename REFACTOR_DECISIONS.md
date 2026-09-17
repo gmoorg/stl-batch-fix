@@ -3627,3 +3627,56 @@ is silent — a dented print that slices without complaint.
 **The method that found it**: loading the output and looking at it. Three
 independent implementations reported these meshes clean. No amount of
 cross-checking numeric tools would have caught it.
+
+### NEXT SESSION — first task: run the probe spheres through Blender
+
+**The control the survey never ran.** Every fixture was measured against
+`scanner`, PyMeshFix, a commercial service and Bambu — but **not** against the
+incumbent, `stl_batch_fix.blender`. Its 12-pass repair loop is the thing the
+survey was implicitly arguing could be dropped, and it was never asked to
+repair anything.
+
+That is a hole in the reasoning, not merely a missing datapoint. The survey
+concluded "PyMeshFix handles these, so the Blender capabilities need no
+porting" without establishing what the Blender capabilities actually produce on
+the same inputs.
+
+**What to run.** Regenerate the probes if the collection was cleared:
+
+```bash
+.venv/bin/python tools/make_probe_meshes.py
+```
+
+Then put each through the frozen script's Blender path — `fix_stl(src, dst,
+merge_dist=MERGE_DIST)` in `stl_batch_fix.py`, which renders `BLENDER_SCRIPT`
+and parses `BLENDER_OK` / `BLENDER_OPEN` / `BLENDER_UNREPAIRED` /
+`BLENDER_EMPTY`. Write results beside the `_pmf` ones as `_bl` so all three
+versions of each mesh sit together.
+
+**What to measure, and in this order** — the last one is the point:
+
+1. `scanner.scan()` — nm, open, degenerate, shells
+2. signed volume against the control's +4094.9
+3. face and vertex counts against the control's 760 / 382
+4. **load it in Bambu and look at it**
+
+Step 4 is what found the dents that steps 1-3 all missed. It cannot be skipped
+and cannot be delegated to a numeric check we do not have.
+
+**The cases that matter most:**
+
+| fixture | why |
+|---|---|
+| `tjunction_many` | PyMeshFix closed all 450 open edges and **dented the surface**. Does Blender's T-junction splitter — the thing `MERGE_DIST` feeds — do better? This is the direct comparison the survey lacked. |
+| `doubles` | PyMeshFix returned half a sphere. `remove_doubles(dist=merge_dist)` is exactly the operation for this, so Blender should merge the two coincident spheres into one. If it does, the one real gap has an owner. |
+| `fin` | PyMeshFix leaves a small visible defect. The script's fin-vertex removal targets this specifically. |
+| `inverted` | Settled as a non-defect, but `normal_vote` should flip it — worth confirming the mechanism works even though the condition does not matter. |
+
+**What the answers would change.** If Blender produces clean *and* undamaged
+surfaces where PyMeshFix produces clean-but-dented ones, the survey's
+conclusion inverts: those capabilities are not redundant, they are better, and
+`repairer` needs them rather than needing to drop them. If Blender does no
+better, the survey stands and `repairer` stays thin.
+
+Either way this is one session's work with fixtures that already exist, and it
+should happen **before** `repairer` is designed around either answer.
