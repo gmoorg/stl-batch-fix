@@ -12,7 +12,7 @@ tests do not catch.
 Decisions are grouped by topic. Numbers are global and stable across topics, so
 a commit message citing D7 keeps meaning D7 when a new topic is added.
 
-**Status (2026-09-17): twelve modules in `libs/`, 378 tests, all green (one
+**Status (2026-09-17): twelve modules in `libs/`, 402 tests, all green (one
 skipped: the OPEN BUG on tolerance scaling).**
 `stl_batch_fix.py` is untouched and still frozen. Built so far: `pool`,
 `indicators`, `blender`, `mesh_io`, `scanner`, `splitter`, `meshfix`,
@@ -3230,17 +3230,103 @@ including the negative. On this evidence it is not merely a better prefilter —
 it is a strictly better detector, the one known exception being the
 constructed case where M sits 5 mm off the line and the pattern still fires.
 
-**So the tolerance fix has two candidate shapes**, and this changes which is
-preferable:
+#### The counter-example was invalid, and the real limit is ambiguity
 
-1. *Scale the existing tolerance* by the edge length — fixes the unit, keeps a
+**The user rejected the 5 mm counter-example, correctly.** The argument: if two
+triangles touch a third, they must share *edges* with it, or there is a tear.
+Checked — that "mesh" was **7 open edges out of 8 and 2 shells**: three
+triangles joined at two single vertices, not a surface. A properly stated
+pattern gives **0** there, not 1.
+
+A second attempt, built edge-connected (1 shell), did produce 2 hits — but
+those came from a **bug in my statement of the pattern**, not from the pattern
+itself. I had never required M to lie *between* a and c topologically, i.e.
+that L owns edge (a,M) and R owns (M,c). Adding that condition takes the
+off-line case to **0**.
+
+**So topology does not produce false positives on edge-connected geometry. It
+produces an AMBIGUITY.** With the between-ness condition added, the
+single-junction fixture yields **three** hits, not one:
+
+| hit | X | claims M is | |
+|---|---|---|---|
+| 1 | 199, spans 339-358 | **345** | correct |
+| 2 | 200 | 358 | |
+| 3 | 760 | 339 | |
+
+The three open edges are (339,358) and its two halves (339,345), (345,358). The
+pattern is **symmetric** across them — the three faces and three open edges are
+combinatorially identical under relabelling — so each nominates a different
+vertex as M. Topology cannot tell them apart. What distinguishes them is purely
+geometric: 345 lies *between* 339 and 358, and 358 does not lie between 339 and
+345.
+
+**This re-characterises the tolerance.** It is not a detection threshold and it
+is not rejecting bad candidates. It is a **tie-breaker among three symmetric
+ones**, and the right form is therefore a *comparison* — "which of these
+vertices sits closest to its opposing edge" — not a threshold. Comparisons need
+no units, which would remove the scale bug rather than relocate it.
+
+#### `find` under-reports when one face carries several junctions
+
+**The user's prediction: the algorithm fails when there is more than one
+T-junction on the same face of a-b-c. Confirmed.**
+
+Built on a real sphere (two hand-built attempts were malformed the same way the
+counter-example was — vertex-connected, not edge-connected — and the user
+caught the pattern both times): one spanning edge subdivided **twice**, at
+t=1/3 and t=2/3.
+
+| | result |
+|---|---|
+| `find` | **1 junction** — M=383 at t=0.667; the one at t=0.333 is missed |
+| `repair` | **correct** — splits=2, rounds=3, ending `open=0 nm=0` |
+
+The cause is one line:
+
+```python
+found[face] = TJunction(...)
+break                       # one per face, then stop
+```
+
+Which of the two is found is **arbitrary** — iteration order over a set.
+
+`repair` recovers because the round loop re-searches: round 1 splits at one
+vertex, which changes the edge map, and round 2 finds the other. `MAX_ROUNDS`
+gives it room. So `rounds > 2` is the signal that this case occurred —
+`tjunction_many` converges in 2, this took 3.
+
+`find`'s docstring does say "one per affected face", so it is documented rather
+than a surprise. But **any caller using `find` for reporting** — counting
+defects, or deciding whether repair is worth running — gets a silently low
+number.
+
+Undecided: whether `find` should report all junctions per face (keyed by
+`(face, vertex)` rather than `face`). `repair` must keep one-per-face-per-round
+because splitting invalidates the face index, so the two would diverge, which
+is a real cost.
+
+#### A related prefilter assumption, found while testing
+
+`welder` scans **open edges only**, which assumes the spanning edge is open. In
+one constructed fixture the spanning edge (0,1) was shared by two faces — so it
+looked properly paired — while the three *halves* were the open ones, and
+`find` returned 0. That fixture was artificial, but the assumption is real and
+is not stated anywhere in the module.
+
+**So the tolerance fix has three candidate shapes now:**
+
+1. *Scale the existing tolerance* by edge length — fixes the unit, keeps a
    number to calibrate.
-2. *Make the topological pattern the detector* and use a distance test only to
-   reject the M-far-off-the-line case — where the threshold is a sanity check
-   rather than the discriminator, so its exact value stops mattering.
+2. *Make the topological pattern the detector* with a distance sanity check —
+   more work, and the ambiguity above means the check is load-bearing after all.
+3. *Keep the geometric search but make the decision a comparison* — pick the
+   candidate with the smallest distance to its edge rather than the first one
+   under a threshold. Removes the unit question entirely and fixes the
+   arbitrary-`break` problem in the same change.
 
-The second is more work but removes the calibration question rather than
-relocating it. Not yet decided.
+The third now looks best and was not on the list before this discussion. Not
+yet decided.
 
 ---
 

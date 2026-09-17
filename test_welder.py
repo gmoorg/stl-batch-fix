@@ -11,6 +11,8 @@ reach comparable face counts on the same input while deleting 2 and 118
 vertices respectively.
 """
 
+import os
+import sys
 import unittest
 
 import numpy as np
@@ -233,6 +235,73 @@ class TestManyJunctions(unittest.TestCase):
         twice = repair(once)
         self.assertEqual(twice.splits, 0)
         self.assertIs(twice.mesh, once)
+
+
+class TestSeveralJunctionsOnOneFace(unittest.TestCase):
+    """One spanning edge subdivided more than once — `find` under-reports and
+    `repair` still gets it right.
+
+    The fixture is built on a real sphere rather than by hand. Two hand-built
+    attempts at this case were malformed in the same way: three triangles
+    joined at single *vertices* rather than edges, giving 7 open edges of 8 and
+    2 shells. That is not a surface with a defect, it is not a surface — and a
+    detector is right to find nothing in it.
+    """
+
+    def sphere_with_two_on_one_edge(self):
+        """A sphere whose face 200 has its edge subdivided at t=1/3 and t=2/3,
+        leaving the neighbour spanning it whole."""
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'tools'))
+        from make_probe_meshes import sphere
+        verts, faces = sphere(r=10.0)
+        verts, faces = verts.tolist(), faces.tolist()
+        a, b, c = faces[200]
+        along = [verts[b][i] - verts[a][i] for i in range(3)]
+        verts.append([verts[a][i] + along[i] / 3.0 for i in range(3)])
+        verts.append([verts[a][i] + 2.0 * along[i] / 3.0 for i in range(3)])
+        first, second = len(verts) - 2, len(verts) - 1
+        faces[200] = [a, first, c]
+        faces += [[first, second, c], [second, b, c]]
+        return mesh(verts, faces), (first, second)
+
+    def test_the_fixture_really_holds_two_junctions_on_one_edge(self):
+        """Guard on the fixture: one shell, edge-connected, and both inserted
+        vertices lie on the same spanning edge."""
+        m, (first, second) = self.sphere_with_two_on_one_edge()
+        self.assertEqual(len(scanner.shells(m)), 1,
+                         "the fixture must be edge-connected, not a pile of "
+                         "triangles touching at points")
+        self.assertGreater(scanner.scan(m).open_edges, 0)
+
+    def test_find_reports_a_lower_bound_not_a_total(self):
+        """`find` returns one junction per face, so a doubly-subdivided edge
+        reports 1 of 2 — and which one is arbitrary, since the search breaks
+        on the first match while iterating a set."""
+        m, _ = self.sphere_with_two_on_one_edge()
+        self.assertEqual(len(find(m)), 1,
+                         "documented behaviour: one per affected face")
+
+    def test_repair_still_finds_both(self):
+        """The round loop is what recovers: splitting changes the edge map, so
+        the second junction is found on the next pass."""
+        m, _ = self.sphere_with_two_on_one_edge()
+        result = repair(m)
+        self.assertEqual(result.splits, 2)
+        self.assertTrue(scanner.scan(result.mesh).is_clean)
+        self.assertEqual(result.mesh.triangles, m.triangles + 2)
+
+    def test_rounds_is_the_signal_that_this_happened(self):
+        """`tjunction_many` converges in 2 rounds; a face carrying more than
+        one junction needs 3. That makes `rounds` the cheap way for a caller
+        to know `find`'s count was low."""
+        m, _ = self.sphere_with_two_on_one_edge()
+        self.assertGreater(repair(m).rounds, 2)
+
+    def test_no_vertex_is_lost(self):
+        m, _ = self.sphere_with_two_on_one_edge()
+        result = repair(m)
+        self.assertEqual(vertex_set(m) - vertex_set(result.mesh), set())
 
 
 class TestResult(unittest.TestCase):

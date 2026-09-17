@@ -138,6 +138,20 @@ def _find_in(verts: np.ndarray,
     boundary.  A T-junction always produces open edges: the unsplit neighbour's
     full-length edge has one face, and so do the two halves on the split side.
     Searching every vertex against every edge would be quadratic for no gain.
+
+    **This assumes the spanning edge is one of the open ones**, which is not
+    stated anywhere else and is worth knowing.  Constructed counter-case: a mesh
+    where the full-length edge (a,c) was shared by two faces — so it looked
+    properly paired — while its two halves were the open edges.  `find`
+    returned 0.  That fixture was artificial and no real mesh has produced it,
+    but the assumption is real.
+
+    **The search is also symmetric across the three open edges of a junction**,
+    and cannot resolve which vertex is the interior one: the full edge (a,c) and
+    its halves (a,M), (M,c) are combinatorially identical under relabelling, so
+    a purely topological reading nominates three different vertices as M.  Only
+    the distance test below separates them — which is why the tolerance is a
+    tie-breaker among plausible candidates rather than a detection threshold.
     """
     owners = _edge_faces(faces)
     open_edges = {edge: owning for edge, owning in owners.items()
@@ -186,11 +200,26 @@ def _split(triangle: list[int], edge: tuple[int, int],
 
 def find(mesh: Mesh,
          tolerance: float = DEFAULT_TOLERANCE) -> tuple[TJunction, ...]:
-    """Every T-junction in the mesh, one per affected face.
+    """Every T-junction in the mesh, **one per affected face**.
 
     Detection only — for reporting, or for deciding whether repair is worth
     running.  `repair` does its own search each round, since splitting changes
     what there is to find.
+
+    **The count is a lower bound, not a total** (measured 2026-09-17).  A face
+    whose edge is subdivided more than once carries several junctions and this
+    reports one of them — and *which* one is arbitrary, since the search breaks
+    on the first match while iterating a set.
+
+    Measured on a sphere with one spanning edge subdivided twice, at t=1/3 and
+    t=2/3: `find` returns **1**, the junction at t=0.667, and misses the other.
+    `repair` on the same mesh is correct — `splits=2, rounds=3`, ending
+    `open=0 nm=0` — because each round re-searches after the edge map changes.
+    So `rounds > 2` is the signal that a face carried more than one junction.
+
+    A caller counting defects or deciding "is repair worth running" therefore
+    gets a number that can be too low.  It is never too high, so a non-zero
+    answer always means there is real work to do.
     """
     if mesh.geometry is None:
         raise ValueError(f"{mesh.path} has no geometry — load it first")
