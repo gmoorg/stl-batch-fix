@@ -335,9 +335,14 @@ def _repair_part(part: Mesh) -> tuple[Mesh, str]:
 
     Blender is not wired in because it is a subprocess with a file boundary and
     a repair script that does not exist in `blender_fx/` yet — `convert` is the
-    only one there.  The cost of the omission is measured and small: **four
-    faces on one synthetic fixture**, and nothing on either real model, both of
-    which route to PyMeshFix anyway.
+    only one there.
+
+    **Re-confirmed 2026-09-17**, with Blender's repair loop given an
+    already-welded, oriented, cleaned, single-shell part — which is what step 4
+    hands it, and is *not* what the frozen `stl_batch_fix.blender` does to a raw
+    file: Blender reaches `allbad` 840f at +4094.9 against PyMeshFix's 836f at
+    +4092.9, and `fin` at 760f, 100.00% volume, 1 vertex lost (the apex).  So
+    the routing table is right and the omission is a real if small cost.
 
     **The routing rule also cannot be applied as written from here.**  This
     runs per part, after `by_shells`, so every mesh reaching it is single-shell

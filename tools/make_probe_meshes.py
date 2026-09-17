@@ -86,6 +86,45 @@ def build_seam(v, f):
     return v, f
 
 
+def build_inverted_third(v, f):
+    """Exactly one third of the faces reversed, chosen by index rather than
+    by position.
+
+    Distinct from `seam`, whose cap is defined geometrically (z > 5.0) and
+    happens to be 32% — a contiguous region bounded by one closed loop.  This
+    one reverses every third face, so the reversed set is **scattered** and its
+    boundary is many short loops rather than one ring.
+
+    It exists to separate two things the orientation guard conflates: a mesh
+    whose total volume stays positive because the reversed part is a minority
+    (both cases), and a reversed region that `by_seams` can isolate as a
+    connected component (only `seam`).  Scattered faces cannot be split out,
+    so this is the harder case and the one a per-region guard will not catch.
+    """
+    f = f.copy()
+    f[::3] = f[::3][:, ::-1]
+    return v, f
+
+
+def build_allbad(v, f):
+    """Every defect at once, on one sphere.
+
+    Built by composing the single-defect builders in a fixed order, so the
+    result is reproducible and each ingredient is traceable — the original
+    `sphere_allbad.stl` came from a scratch script and survived only as a file.
+
+    Order matters: the index-based defects (`tjunction_many`, `degenerate`)
+    run before `doubles` duplicates the whole thing, and `inverted` runs last
+    so the mesh is wholly inside-out, which is what the orientation guard is
+    meant to catch.
+    """
+    v, f = build_tjunction_many(v, f, n=80)
+    v, f = build_degenerate(v, f)
+    v, f = build_fin(v, f)
+    v, f = build_doubles(v, f)
+    return build_inverted(v, f)
+
+
 def build_tjunction(v, f):
     """One vertex at an edge midpoint the neighbouring face does not use.
 
@@ -144,12 +183,14 @@ def build_doubles(v, f):
 BUILDERS = {
     'correct': build_correct,
     'inverted': build_inverted,
+    'inverted_third': build_inverted_third,
     'seam': build_seam,
     'tjunction': build_tjunction,
     'tjunction_many': build_tjunction_many,
     'fin': build_fin,
     'degenerate': build_degenerate,
     'doubles': build_doubles,
+    'allbad': build_allbad,
 }
 
 
