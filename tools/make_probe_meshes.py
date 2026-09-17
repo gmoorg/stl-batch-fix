@@ -106,6 +106,39 @@ def build_inverted_third(v, f):
     return v, f
 
 
+def build_two_shells(v, f):
+    """Two separate spheres, both correctly wound.
+
+    The plain multi-shell case.  Every other probe is a single sphere, so
+    `by_shells` returns them unsplit and step 4's per-part path never runs —
+    this is the fixture that makes the split, the per-part loop and `merge`
+    reachable at all.
+
+    Volume is the sum of both: +8189.7.
+    """
+    second = (v + np.float32([40, 0, 0])).astype(np.float32)
+    return np.vstack([v, second]), np.vstack([f, f + len(v)])
+
+
+def build_shell_inverted(v, f):
+    """A large correct sphere beside a small inverted one.
+
+    **The fixture for the per-part orientation guard**, and the sizes are the
+    point.  The small sphere is half the radius, so it contributes an eighth of
+    the volume and the signed total stays **positive** (+3583.0) — step 2's
+    guard correctly skips, and only the per-part guard after the split can see
+    that one component is inside-out (-511.9 against the host's +4094.9).
+
+    Two equal spheres would not do: their volumes cancel to -0.0, step 2 fires
+    on that, and the per-part guard is never reached.  That was measured, not
+    assumed.
+
+    Correct result: both spheres outward, +4094.9 + 511.9 = **+4606.8**.
+    """
+    second = (v * 0.5 + np.float32([40, 0, 0])).astype(np.float32)
+    return np.vstack([v, second]), np.vstack([f, f[:, ::-1] + len(v)])
+
+
 def build_allbad(v, f):
     """Every defect at once, on one sphere.
 
@@ -190,6 +223,8 @@ BUILDERS = {
     'fin': build_fin,
     'degenerate': build_degenerate,
     'doubles': build_doubles,
+    'two_shells': build_two_shells,
+    'shell_inverted': build_shell_inverted,
     'allbad': build_allbad,
 }
 

@@ -49,7 +49,22 @@ CONTROL_FACES = 760
 VOLUME_TOLERANCE = 0.005
 
 FIXTURES = ('correct', 'degenerate', 'tjunction', 'tjunction_many', 'fin',
-            'doubles', 'inverted', 'inverted_third', 'seam', 'allbad')
+            'doubles', 'inverted', 'inverted_third', 'seam', 'allbad',
+            'two_shells', 'shell_inverted')
+
+#: Fixtures that are more than one sphere, with their expected output volume.
+#:
+#: They exist because **every single-sphere probe leaves step 4's multi-part
+#: path unexercised** — `by_shells` returns `(mesh,)`, so the per-part loop, the
+#: per-part orientation guard and `merge`'s concatenation never run.  Ten
+#: fixtures and a green suite proved nothing about a quarter of the pipeline.
+MULTI_SHELL = {
+    # two correct spheres: both survive, volumes add
+    'two_shells': 2 * CONTROL_VOLUME,
+    # a large correct sphere and a small inverted one; the small is half the
+    # radius, so an eighth of the volume, and the total stays positive
+    'shell_inverted': CONTROL_VOLUME * 1.125,
+}
 
 HAVE_TOOLS = repairer.is_available()
 
@@ -235,6 +250,81 @@ class TestRepairsToControl(ProbeCase):
         self.assertRepairsToControl('inverted_third')
 
 
+class TestTheSplitPath(ProbeCase):
+    """Step 4's multi-part path — split, per-part repair, merge.
+
+    **Nothing else in this suite reaches it.** Every other probe is one sphere,
+    so `by_shells` returns `(mesh,)` and the whole of step 4 collapses to a
+    single call on the whole mesh. These two fixtures were added after counting
+    what the suite actually exercised and finding the split never split.
+    """
+
+    def assertVolume(self, mesh, expected, msg=''):
+        delta = abs(scanner.volume(mesh) - expected) / abs(expected)
+        self.assertLess(delta, VOLUME_TOLERANCE,
+                        f"{msg}volume {scanner.volume(mesh):+.1f} is not "
+                        f"{expected:+.1f} ({delta * 100:.2f}% off)")
+
+    def test_two_shells_both_survive(self):
+        """The split must preserve both components.
+
+        Unsplit, PyMeshFix rebuilds *one* manifold surface and discards the
+        rest — measured on a real model, it kept the body and ate 4,525 support
+        pillars. Splitting first is what prevents that, so this asserts the
+        volume of both spheres, not just a clean scan.
+        """
+        result = repairer.repair(load('two_shells'))
+        self.assertTrue(result.ok, result.problem)
+        self.assertEqual(result.parts, 2)
+        self.assertTrue(scanner.scan(result.mesh).is_clean)
+        self.assertEqual(scanner.shell_count(result.mesh), 2)
+        self.assertVolume(result.mesh, MULTI_SHELL['two_shells'])
+
+    def test_the_per_part_orientation_guard_fires(self):
+        """The only test that reaches the per-part guard.
+
+        A large correct sphere beside a small inverted one. The signed total is
+        **+3583.0 — positive**, so step 2 correctly skips; only after the split
+        does the small sphere show its own negative volume and get flipped.
+
+        Both halves matter: if step 2 fired here it would flip the *majority*
+        the wrong way, and if the per-part guard did not exist the small sphere
+        would stay inside-out.
+        """
+        result = repairer.repair(load('shell_inverted'))
+        self.assertTrue(result.ok, result.problem)
+
+        step2 = [s for s in result.steps
+                 if s.step is repairer.Step.ORIENT][0]
+        self.assertIn('skipped', step2.detail,
+                      "step 2 fired on a positive-volume mesh")
+
+        parts = [s for s in result.steps if s.step is repairer.Step.PART]
+        self.assertEqual(len(parts), 2)
+        oriented = [s for s in parts if 'oriented' in s.detail]
+        self.assertEqual(len(oriented), 1,
+                         "exactly one part should have been re-oriented")
+
+        self.assertVolume(result.mesh, MULTI_SHELL['shell_inverted'])
+        self.assertTrue(scanner.scan(result.mesh).is_clean)
+
+    def test_merge_puts_the_parts_back(self):
+        """`merge` concatenates; the face count must be the sum of the parts."""
+        result = repairer.repair(load('two_shells'))
+        parts = [s for s in result.steps if s.step is repairer.Step.PART]
+        merge = [s for s in result.steps if s.step is repairer.Step.MERGE][0]
+        self.assertEqual(merge.faces_in, sum(s.faces_out for s in parts))
+        self.assertEqual(merge.faces_out, len(result.mesh.geometry.faces))
+
+    def test_the_merged_mesh_keeps_the_parents_destination(self):
+        """Each part gets its own destination so their markers do not collide;
+        the merged mesh must be the parent again, not part 0."""
+        mesh = load('two_shells')
+        result = repairer.repair(mesh)
+        self.assertEqual(result.mesh.destination, mesh.destination)
+        self.assertNotIn('.part.', result.mesh.destination)
+
+
 class TestTheSequenceItselfOnRealMeshes(ProbeCase):
     """Properties of the run, not of the output mesh."""
 
@@ -265,12 +355,31 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
         self.assertEqual(split.faces_in, CONTROL_FACES)
         self.assertEqual(result.parts, 1)
 
-    def test_no_fixture_takes_more_than_one_part_except_doubles(self):
-        """Every probe is one sphere, so the split is a no-op — which is what
-        makes the per-part orientation guard untestable on this suite."""
+    def test_every_pipeline_step_is_exercised_by_some_fixture(self):
+        """A coverage guard, because a green suite is not the same as a tested
+        pipeline.
+
+        Counted once by hand and the answer was uncomfortable: the split never
+        split, so step 4's per-part path — including an orientation guard added
+        the same day — had never executed under test. This fails if that
+        happens again.
+        """
+        exercised = {'weld': 0, 'orient': 0, 'split': 0, 'part_orient': 0}
         for name in FIXTURES:
-            with self.subTest(fixture=name):
-                self.assertLessEqual(repairer.repair(load(name)).parts, 2)
+            result = repairer.repair(load(name))
+            for step in result.steps:
+                if step.step is repairer.Step.WELD and '0 junction' not in step.detail:
+                    exercised['weld'] += 1
+                elif step.step is repairer.Step.ORIENT and 'skipped' not in step.detail:
+                    exercised['orient'] += 1
+                elif step.step is repairer.Step.PART and 'oriented' in step.detail:
+                    exercised['part_orient'] += 1
+            if result.parts > 1:
+                exercised['split'] += 1
+        for stage, count in exercised.items():
+            with self.subTest(stage=stage):
+                self.assertGreater(count, 0,
+                                   f"no fixture exercises {stage}")
 
 
 if __name__ == '__main__':

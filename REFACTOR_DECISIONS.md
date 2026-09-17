@@ -12,7 +12,7 @@ tests do not catch.
 Decisions are grouped by topic. Numbers are global and stable across topics, so
 a commit message citing D7 keeps meaning D7 when a new topic is added.
 
-**Status (2026-09-17): twelve modules in `libs/`, 372 tests, all green (one
+**Status (2026-09-17): twelve modules in `libs/`, 376 tests, all green (one
 expected failure: see D25).**
 `stl_batch_fix.py` is untouched and still frozen. Built so far: `pool`,
 `indicators`, `blender`, `mesh_io`, `scanner`, `splitter`, `meshfix`,
@@ -2798,6 +2798,41 @@ scattered and cannot be split out.
 
 Recorded as `@unittest.expectedFailure` rather than deleted or weakened, so the
 gap is visible in every test run.
+
+#### The suite was not testing a quarter of the pipeline
+
+Counted after the fact, and the answer was uncomfortable: of ten probes,
+**the split never split**. Every fixture was one sphere, so `by_shells`
+returned `(mesh,)` every time and the whole of step 4 collapsed to a single
+call — the per-part loop, the **per-part orientation guard added the same
+day**, and `merge`'s concatenation had never executed under test.
+
+| step | fixtures exercising it, before |
+|---|---|
+| welder | 3 of 10 |
+| orient (step 2) | 2 of 10 — only the wholly-inverted case |
+| CLEAN | 10 of 10, unconditional |
+| **split / per-part / merge** | **0 of 10** |
+
+Worse, a test had been written that *documented* the hole
+(`test_no_fixture_takes_more_than_one_part_except_doubles`) rather than filling
+it. A green suite is not a tested pipeline.
+
+Two fixtures close it, and the second one's shape was measured rather than
+guessed:
+
+- **`two_shells`** — two correct spheres. Asserts both survive the split, since
+  unsplit PyMeshFix rebuilds one surface and discards the rest.
+- **`shell_inverted`** — a large correct sphere beside a **half-radius**
+  inverted one. The small sphere contributes an eighth of the volume, so the
+  signed total stays **positive (+3583.0)**: step 2 correctly skips and only
+  the per-part guard can see the inversion. Two *equal* spheres do not work —
+  their volumes cancel to −0.0, step 2 fires on that, and the per-part guard is
+  never reached.
+
+`test_every_pipeline_step_is_exercised_by_some_fixture` now fails if any stage
+loses its coverage. Verified by removing `shell_inverted` and confirming the
+guard goes red.
 
 #### Two corrections to what was recorded earlier today
 
