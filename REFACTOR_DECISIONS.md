@@ -4920,3 +4920,62 @@ Workable refinements, none yet tested:
 The gate is still the right idea — it is the only check that caught `fin_pmf`,
 where two vertices at radius 10.000 were deleted from a sound surface — but it
 needs to distinguish *removing a defect* from *damaging the model*.
+
+### Measured — the sequence on a REAL model: `Mandy_Body_Dinamuuu3D-simp.stl`
+
+**2026-09-16**, with an independent verdict from the commercial service for
+comparison.
+
+**Detection agrees with the service exactly** on the counts both measure:
+
+| | ours | service |
+|---|---|---|
+| non-manifold edges | **29** | **29** |
+| naked / open edges | **34** | **34** |
+| degenerate | 0 | 0 |
+| winding | 4 seam edges / 1 loop | "40 inverted normals" (faces, not edges) |
+| shells | 40 connected components | "0 disjoint shells" (means strays, not components) |
+
+`welder` finds **0 T-junctions** — this model does not have that defect, and
+step 1 correctly no-ops.
+
+#### Result
+
+| | faces | verts | volume | nm | open |
+|---|---|---|---|---|---|
+| source | 188,940 | 94,530 | +14,682.8 | 29 | 34 |
+| **ours** | **188,432 (99.7%)** | **94,286 (99.7%)** | **99.99%** | **0** | **0** |
+| commercial service | 179,398 (94.9%) | 89,683 (94.9%) | — | 0 | 0 |
+
+**We keep ~9,000 more faces and ~4,600 more vertices** than the service while
+reaching the same clean state. It removed 5% of the model to fix 63 defects;
+we removed 0.3%. Sixteen seconds against its 21.8.
+
+#### `by_geometry` is churn on a correctly-oriented model
+
+Step 2 took seams from **4/1 to 23/3** — it manufactured seam edges on a mesh
+that had almost none. The same failure seen on `tjunction_many`.
+
+Running the identical sequence **without** it gives a **byte-identical final
+result**: same faces, vertices, nm, seams, volume, and the same 525 lost
+vertices. So the step was pure churn here — PyMeshFix undid the damage along
+with everything else.
+
+**The existing guard does not catch this.** It asks *"does the mesh have a
+closed seam loop?"*, and this one does (4 edges / 1 loop), so it fires — but
+the seam is small enough that PyMeshFix resolves it, and the orientation
+filter's cure is worse than the disease. A better trigger would be
+`volume < 0` alone, or a seam large enough to matter relative to the mesh.
+
+On the all-defects sphere `by_geometry` was essential — the mesh was genuinely
+inverted. On a correctly-oriented model with a small seam it is at best
+neutral. **That is the difference the guard needs to express.**
+
+#### Still to confirm by eye
+
+`mandy_simp_seq.stl`. The **525 lost vertices** are what to judge: 0.3% of the
+model, repairing 29 non-manifold edges. On `fin` a loss of 2 showed as visible
+damage, but that was 2 from a sound surface, where these may be the
+non-manifold geometry itself. The refined gate recorded above — *lost a vertex
+belonging to the sound surface* — is exactly what would answer this
+automatically, and it is not built.
