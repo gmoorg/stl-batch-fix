@@ -3484,3 +3484,94 @@ damage.
 **Still to test in Bambu**, which decides whether the doubles gap matters at
 all: if two coincident shells slice identically to one, the destruction never
 happens because the file would never need repairing.
+
+---
+
+## Where the refactor stands (2026-09-16, end of session)
+
+**Ten modules, 260 tests across nine suites, all green.**
+`stl_batch_fix.py` untouched and still frozen; `main` at `4c1c0c2`.
+
+| module | owns | tests |
+|---|---|---|
+| `pool` | the worker loop, nothing domain-specific | 24 |
+| `indicators` | what the filesystem says about a file | 21 |
+| `blender` | launching Blender, killing it, reading markers | 32* |
+| `mesh_io` | probe, load, write — the only writer | 44 |
+| `scanner` | defect counts off one edge map | 46 |
+| `splitter` | cutting into parts and merging back | 27 |
+| `meshfix` | PyMeshFix on the arrays | 23 |
+| `decimator` | the two-rung ladder | 19 |
+| `converter` | the preparation walk | 20 |
+| — | `test_pipeline` (the frozen script) | 36 |
+
+\* `test_blender` runs separately; it launches real Blender and takes ~20 s.
+
+### Built this session
+
+`splitter` and `meshfix` are new. `scanner` gained `seam_edges()` and had two
+bugs fixed (self-edges counted as closed loops; vertex- instead of
+edge-connected shells). `decimator` lost its Blender rung. `Mesh` gained a
+required `destination`. scipy became a hard requirement.
+
+### Still to build
+
+- **`repairer`** — the ladder over `meshfix` and `blender`, with the volume
+  check deciding when a repair destroyed rather than fixed. **Much thinner than
+  assumed at the start of the session** — see the survey results above.
+- **`blender_fx/repair.blender`** — and it is now unclear how much of the
+  593-line original it needs to carry.
+- **Orchestration** — the four-line pipeline `splitter`'s docstring describes.
+- Intermediate suffixes in `indicators`, per D21.
+
+### Open questions, in the order they would need answering
+
+1. **Does the doubles case matter to Bambu?** If two coincident shells slice
+   identically to one, the one real gap in the survey closes itself. Fixture is
+   `_validate/sphere_doubles.stl`. *This is the cheapest open question and it
+   decides whether anything needs building at all.*
+2. **Wire edges** — the last untested survey item.
+3. **How thin can `repair.blender` be?** Four of six capabilities need no
+   porting. What remains is the 12-pass repair loop and the hole-filling
+   escalation, and it is not established that those beat PyMeshFix either.
+4. **The split-upfront decision** (re-opened) — closed-loop detection cannot
+   predict what PyMeshFix will do, so the trigger has to stay the volume check
+   after the fact.
+5. **Debris by bounding box, and the nm-ratio idea** — both recorded as
+   discussion points, neither designed.
+6. **PLY at the repair boundary** — its original justification (deleting
+   `decimate.blender`'s hand-packed byte loop) evaporated when D19 deleted that
+   file. Weaker case now; reconsider when `repairer` lands.
+
+### The methodological thread, since it recurred all session
+
+Six times a confident claim of mine was wrong and a measurement corrected it:
+`shells()` "nearly free" (was 5-10x the load), the pointer-jumping benchmark
+(15x faster synthetically, 2x slower on a real mesh), vertex-vs-edge
+connectivity (implementation, test and oracle all agreed and all wrong), stored
+normals "carry no information" (62 files say otherwise), `Done/` being pipeline
+output (it is source archives), and "slices fine" written before the slice was
+tested.
+
+Each was caught by the user asking a question I could not answer, or by running
+against real data rather than a fixture I had chosen. The standing rules that
+came out of it:
+
+- a claim about cost or behaviour ships with a number or an admission there is none;
+- a decision that reverses existing behaviour ships with the reason that behaviour exists;
+- a differential test proves agreement, not correctness — where an independent
+  implementation exists, check against that, on real geometry, at least once;
+- a performance fixture must resemble real input in *structure*, not merely in size.
+
+And the finding that generalises furthest, from the doubles case: **every
+defect check in this chain is local.** Ours, PyMeshFix's, and a commercial
+service's all ask "is this mesh self-consistent" — none asks "did the repair
+destroy anything". Only volume before-vs-after answers that, and it caught what
+three independent implementations missed.
+
+### Probe meshes
+
+`tools/make_probe_meshes.py` regenerates the eight single-defect meshes the
+survey used. They are written into the collection (`/mnt/sda2/STL/_validate`),
+which is deletable by design — the generator is the durable artefact, not the
+meshes.
