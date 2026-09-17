@@ -3331,3 +3331,69 @@ The planned re-scan of the collection at `dot < -0.9`, to separate genuine
 inversions from exporter noise, is **no longer worth running**. Whether 62 files
 or 6 carry opposed stored normals does not matter if the condition has no
 consequence.
+
+### Measured — T-junctions: `scanner` detects them, PyMeshFix repairs them
+
+**Tested 2026-09-16** on a synthetic fixture, the same method that settled the
+inverted-normals question.
+
+**The fixture**: a closed 760-face sphere with one vertex inserted at the
+midpoint of one edge, used by the two faces on one side and *not* by the
+neighbour across it. The surfaces stay geometrically flush — no measurable gap
+— but are topologically unjoined, and no vertex merge closes it because no two
+vertices are coincident. `tests/fixtures` equivalent written to
+`_validate/sphere_tjunction.stl`.
+
+**Unlike inverted normals, this one is visible to us:**
+
+| | faces | verts | nm | open | seams | volume |
+|---|---|---|---|---|---|---|
+| control | 760 | 382 | 0 | **0** | 0/0 | +4094.9 |
+| T-junction | 761 | 383 | 0 | **3** | 0/0 | +4094.9 |
+
+Three open edges, so the file never takes the clean-copy shortcut and always
+reaches repair. Volume is unchanged, which confirms signed volume is specific
+to orientation and blind to this.
+
+**A commercial repair service agrees with our detection**: *3 Naked edges,
+1 Planar hole*. Worth recording after the inverted case, where we shared a
+blind spot with the same tool — here our numbers match a mature implementation
+exactly.
+
+**PyMeshFix repairs it, and arguably better than the service does:**
+
+| | faces | verts | approach |
+|---|---|---|---|
+| source | 761 | 383 | — |
+| `meshfix.repair()` | **760** | **382** | removed the T-vertex, merged the split face back |
+| online service | **762** | 383 | kept the T-vertex, added a triangle to patch the crack |
+
+PyMeshFix returns *exactly* the control's counts with a volume change of
+**+0.000** — it undid the T-junction rather than papering over it, without
+moving any geometry. The service's answer is the more conservative one (it
+removes nothing), and both are valid; for a spurious T-vertex, undoing it is
+the better result.
+
+#### What this means for the survey
+
+Two of the capabilities that live only inside `stl_batch_fix.blender` now turn
+out not to need porting, for **opposite** reasons:
+
+| capability | detected by us? | needs building? | why |
+|---|---|---|---|
+| inverted normals | no | **no** | nothing downstream cares — renders and slices fine |
+| T-junctions | **yes** (open edges) | **no** | `meshfix.repair()` already fixes it, on every repaired file |
+
+The Blender script's T-junction splitter and the unused `MERGE_DIST` constant
+may therefore be solving a problem PyMeshFix already handles — and handling it
+on 0.8% of files where PyMeshFix handles it on all of them.
+
+**Not yet settled**, and the honest limit of this test: the fixture is *one*
+synthetic T-junction on an otherwise perfect sphere. The script's splitter
+carries a `MAX_ITER = 200` cap, which suggests it was written for meshes with
+hundreds. A harder fixture — many T-junctions, or T-junctions along a seam
+between two welded surfaces, which is the shape the real cases take — would
+test whether PyMeshFix still copes.
+
+Still untested from the survey: wire edges, fin vertices, doubles-merging,
+and whether `scanner`'s degenerate-face count needs anything acting on it.
