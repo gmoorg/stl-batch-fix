@@ -3843,3 +3843,69 @@ cheap first filter, with Hausdorff distance for the cases it flags.
 `tjunction_many_bl` clean: nm=0, open=0, degenerate=0, one shell, volume within
 0.3%. Looking at it took seconds. This is the second time in one session that
 eye inspection overturned a conclusion every measurement supported.
+
+### SOLVED — the seam case: split, flip by signed volume, merge, reload
+
+**Measured 2026-09-16.** `sphere_seam.stl` — one sphere with its cap reversed,
+40 seam edges in 1 closed loop, volume **+2146.2** against a control of
+**+4094.9** — is repaired to a **perfect reconstruction** by a sequence that
+uses no repair tool at all.
+
+| step | result |
+|---|---|
+| `splitter.by_seams()` | 760f → **520f + 240f**, each seam-free, each one shell, 40 open edges apiece |
+| region volumes | +3120.5 and **−974.3** — the reversed cap is negative |
+| flip the negative region | −974.3 → +974.3 |
+| `splitter.merge()` | 760f / 422v / 80 open / 2 shells / **+4094.9** |
+| `mesh_io.write` + `load` | **760f / 382v / nm=0 / open=0 / seams 0/0 / 1 shell / +4094.9** |
+
+**Identical to the control on every measure.**
+
+**Repairing the regions is what breaks it.** PyMeshFix caps each open region
+into its own closed solid, which is correct in isolation and wrong here:
+
+| approach | volume | vs control |
+|---|---|---|
+| split → repair (no flip) | +2936.5 | 71.7% — capped the reversed cap inside-out |
+| split → flip → repair | +4355.9 | 106.4% — cap surfaces sit inside the sphere |
+| **split → flip → merge → reload** | **+4094.9** | **100.0%** |
+
+The regions must be left open so the merge rejoins them. A repair tool cannot
+know that.
+
+**The weld claim in `splitter.merge()`'s docstring is confirmed.** It says
+*"coincident vertices at an old cut line are not welded — the next
+`mesh_io.load` does that"*. Measured: 422 verts and 80 open edges collapse to
+382 and 0 on write-and-reload. That claim was load-bearing here.
+
+#### This corrects the morning's `normal_vote` conclusion
+
+Recorded earlier: *"inverted normals are a non-defect; do not build detection
+for them"*. That holds for a **uniformly** inverted mesh — nothing downstream
+cares, Bambu renders and slices it fine.
+
+**It does not hold after a seam split.** One region is then reversed *relative
+to the other*, and flipping it is the entire repair. So the capability is
+needed after all — but not as `normal_vote`'s per-component majority vote over
+stored facet normals, which today's scan showed to be mostly exporter noise.
+**Signed volume decides it**: a region with negative volume is reversed. Three
+lines, using a measure already computed for the volume-loss guard, with no
+dependence on stored normals at all.
+
+That is a better mechanism than the one being considered for porting, and it
+was reached from the opposite direction.
+
+#### Where this leaves the seam defect
+
+| tool | result |
+|---|---|
+| Blender `fix_stl` | **unchanged** — `BLENDER_OK`, +2146.2 |
+| PyMeshFix alone | not applicable — no open edges to work on |
+| commercial service | fixed, +4095.2 |
+| **split → flip → merge → reload** | **+4094.9, exactly the control** |
+
+Ours is now the best result available, and it needs nothing the modules do not
+already have: `splitter.by_seams`, a signed-volume test, `splitter.merge`, and
+a write/reload cycle.
+
+Written to `_validate/sphere_seam_FIXED.stl` for visual confirmation.
