@@ -30,6 +30,14 @@ here is a single shell and the call would be a no-op at best.  It is omitted
 rather than exposed as an off-by-default flag: a parameter that must always be
 False is one somebody eventually sets to True.
 
+**Omitting it does not make shell deletion impossible**, and an earlier version
+of this docstring implied it did.  On a real 4,526-shell mesh
+(`platform_supported.stl`, a resin model whose supports are separate shells)
+`clean()` alone returned **1 shell and 266,918 of 525,254 faces** — it kept the
+body and discarded 4,525 support pillars.  The two-tetrahedra test above is too
+small to show that.  So: splitting first is what prevents the loss, not this
+omission.  Hand this function a multi-shell mesh and it may still eat it.
+
 **The output is captured at file-descriptor level, on both descriptors**,
 because PyMeshFix writes from C++ straight to the fds rather than through
 Python.  `contextlib.redirect_stdout` swaps a Python object and catches none of

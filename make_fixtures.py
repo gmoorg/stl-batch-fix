@@ -16,6 +16,7 @@ on, not the model itself:
     foot2    one clean closed shell                      (passthrough)
     falcon   heavy non-manifold edges                    (blender fallback)
     seam     two regions wound against each other        (PyMeshFix deletion)
+    inverted a closed sphere with EVERY face reversed     (no check but volume)
 
 Verify with `--check`, which reports each fixture's measured properties so a
 generator change that stops reproducing a defect is visible immediately.
@@ -229,6 +230,27 @@ def build_seam():
     return verts, faces
 
 
+def build_inverted():
+    """A closed sphere with every face reversed: inside-out, and nothing but
+    signed volume can tell.
+
+    The case `find_winding_seams` provably cannot see. A seam is two regions
+    disagreeing *with each other*; this mesh is uniformly backwards, so no two
+    neighbours disagree and the seam count is zero. Measured against the same
+    sphere wound correctly — identical on every check the pipeline has:
+
+        correct    760 faces  nm=0 open=0 deg=0 seams=0/0 shells=1  vol +4094.9
+        inverted   760 faces  nm=0 open=0 deg=0 seams=0/0 shells=1  vol -4094.9
+
+    PyMeshFix is a no-op on it: 760 faces in, 760 out, volume unchanged at
+    -4094.9, `ok=True`. So this fixture exists to pin a defect that currently
+    reaches the clean-copy shortcut and is written out as `ok` — the design
+    doc's "renders black in viewers while every defect count reads zero".
+    """
+    verts, faces = sphere(0, 0, 0, 10, seg=20)
+    return verts, faces[:, ::-1].copy()
+
+
 def build_falcon():
     """Heavy non-manifold edges: pymeshfix's failure case."""
     return combine(sphere(0, 0, 0, 10, seg=20),
@@ -238,7 +260,7 @@ def build_falcon():
 BUILDERS = {
     'body': build_body, 'arms': build_arms, 'leg': build_leg,
     'foot1': build_foot1, 'foot2': build_foot2, 'falcon': build_falcon,
-    'seam': build_seam,
+    'seam': build_seam, 'inverted': build_inverted,
 }
 
 
@@ -255,7 +277,8 @@ def generate():
 def check():
     """Report what each fixture actually is, so a generator change that stops
     reproducing a defect shows up here rather than as a confusing test pass."""
-    print(f'{"name":8} {"tris":>10} {"nm":>8} {"open":>6} {"shells":>7}  note')
+    print(f'{"name":8} {"tris":>10} {"nm":>8} {"open":>6} {"shells":>7} '
+          f'{"volume":>12}  note')
     for name in BUILDERS:
         path = os.path.join(FIXTURE_DIR, f'{name}.stl')
         if not os.path.exists(path):
@@ -279,8 +302,15 @@ def check():
                 p[ra] = rb
         shells = len(np.unique([find(i) for i in range(len(v))]))
         over = ' OVER SCAN LIMIT' if n > fix._LARGE_MESH_TRI_LIMIT else ''
-        print(f'{name:8} {n:>10,} {nm:>8} {op:>6} {shells:>7}{over}')
-        del v, f
+        # Signed volume, because it is the ONLY check that distinguishes an
+        # inside-out mesh from a correct one — see build_inverted.
+        tri = v[f].astype(np.float64)
+        volume = float(np.einsum('ij,ij->i', tri[:, 0],
+                                 np.cross(tri[:, 1], tri[:, 2])).sum() / 6.0)
+        flag = ' INSIDE-OUT' if volume < 0 else ''
+        print(f'{name:8} {n:>10,} {nm:>8} {op:>6} {shells:>7} '
+              f'{volume:>+12,.1f}{over}{flag}')
+        del v, f, tri
 
 
 if __name__ == '__main__':
