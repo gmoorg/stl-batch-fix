@@ -3575,3 +3575,55 @@ three independent implementations missed.
 survey used. They are written into the collection (`/mnt/sda2/STL/_validate`),
 which is deletable by design — the generator is the durable artefact, not the
 meshes.
+
+### CORRECTION — "PyMeshFix repairs it" meant topology, not surface quality
+
+**Seen in Bambu 2026-09-16, after the survey above was recorded.** The user
+loaded the `_pmf` outputs and looked at them. Three defects are visible that
+every numeric check called clean:
+
+| mesh | what the numbers said | what it looks like |
+|---|---|---|
+| `sphere_doubles_pmf` | clean; volume +2047.4 | **half a sphere — an open bowl** |
+| `sphere_tjunction_many_pmf` | clean; volume within 0.2% | **visible dents and creases** |
+| `sphere_fin_pmf` | clean; volume −0.04% | a small defect |
+
+**The survey entry above is wrong where it says fins, degenerate faces and
+T-junctions "need no new capability".** That verdict rested on defect counts
+and volume, and it should have said: *PyMeshFix produces a topologically clean
+mesh*. For `tjunction_many` that is true and insufficient — 450 open edges were
+closed and the surface was deformed doing it.
+
+The degenerate-face result still stands unqualified: PyMeshFix returned
+*exactly* the control's 760 faces and 382 vertices, so there is nothing to be
+deformed.
+
+#### The third category of check
+
+The doubles case already showed that every defect check here is **local** —
+none asks whether the repair destroyed anything. The dents show a further gap:
+
+| question | what answers it |
+|---|---|
+| is this mesh self-consistent? | nm, open edges, degenerate, shells |
+| did the repair destroy anything? | volume before vs after |
+| **does the surface still look like the original?** | **nothing we have** |
+
+A bad patch preserves volume almost exactly — `tjunction_many_pmf` is within
+0.2% — while visibly deforming the surface. Volume cannot see it, and neither
+can any topological count.
+
+Candidate measures, none tried: Hausdorff distance to the pre-repair mesh
+(PyMeshLab has a filter), or per-vertex displacement, or dihedral-angle change
+across the patched region. Any of them would need a threshold calibrated
+against what the user considers acceptable, which is a judgement rather than a
+measurement.
+
+**Why this matters beyond the fixtures.** The pipeline currently accepts a
+repair whenever the defect counts reach zero and volume holds. On this evidence
+that is not sufficient to conclude the model is undamaged, and the failure mode
+is silent — a dented print that slices without complaint.
+
+**The method that found it**: loading the output and looking at it. Three
+independent implementations reported these meshes clean. No amount of
+cross-checking numeric tools would have caught it.
