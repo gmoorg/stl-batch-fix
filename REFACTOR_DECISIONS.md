@@ -3908,4 +3908,8 @@ Ours is now the best result available, and it needs nothing the modules do not
 already have: `splitter.by_seams`, a signed-volume test, `splitter.merge`, and
 a write/reload cycle.
 
-Written to `_validate/sphere_seam_FIXED.stl` for visual confirmation.
+**Confirmed by eye in Blender**: `_validate/sphere_seam_FIXED.stl` renders as a
+clean sphere, including across the boundary ring where the two regions
+rejoined. That check mattered — twice today a mesh with nm=0, open=0, one shell
+and volume within 0.3% turned out to have a visible gash. This one matches the
+control on every field including vertex count, and looks right as well.
