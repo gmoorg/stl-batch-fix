@@ -3997,3 +3997,35 @@ identified *without* extracting it; `scanner.shells()` does not currently
 distinguish regions across a seam boundary, so that would need new work. The
 split path is built and tested, so this is recorded as an option rather than a
 plan.
+
+### Measured — decimation creates the defects on `whole-costume01`
+
+**2026-09-16**, while testing the model the user recalled Blender breaking.
+
+| | faces | nm | open | degenerate | shells | volume |
+|---|---|---|---|---|---|---|
+| source | 2,004,941 | **3** | 93 | 1 | 448 | +7,760.5 |
+| after decimation to 900k | 900,000 | **2,263** | 20 | — | **491** | +7,758.7 |
+
+`fast_simplification` takes a mesh with **three** non-manifold edges and
+returns one with **2,263**, and adds 43 shells. Volume is preserved to within
+0.02%, so nothing is deleted — the damage is topological, not geometric.
+
+**This reframes the model's failure.** It does not reach repair carrying three
+defects; it reaches repair carrying 2,263, and the step that created them is
+upstream. Any comparison of repair tools on this file is measuring their
+response to decimation's output, not to the model.
+
+It is also consistent with the standing rule that decimation may leave
+non-manifold edges and that the repair steps exist to clean up after it —
+recorded in `decimator`'s docstring. What was not previously measured is the
+*scale*: a 750-fold increase on this model.
+
+**Not yet known**: whether this is particular to `whole-costume01` (444 of its
+448 shells are debris under 100 faces, so decimation is collapsing a great many
+tiny components) or general to fast_simplification on multi-shell meshes. One
+model is not a sample — the mistake made four times already in this refactor.
+
+The seam algorithm does **not** apply to this model, incidentally: it has
+**0 seam edges and 0 closed loops**, so `by_seams` returns it unchanged. The
+defect here is shells and non-manifold edges, not reversed winding.
