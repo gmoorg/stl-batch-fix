@@ -4822,3 +4822,48 @@ closes the blocker recorded through the whole session.
 handling of the fin and the remaining non-manifold edges — the one step in the
 sequence where Blender is known to be exact. Worth testing whether routing fins
 to Blender removes the last 18.
+
+### Measured — `libs/welder.py` on the all-defects sphere, and Blender wins step 4
+
+**2026-09-16.** The T-junction repair is now a module rather than a scratch
+script, and reproduces the scratch results exactly. Run on `sphere_allbad.stl`
+in the user's order, with per-step vertex-loss tracking:
+
+| step | | faces | verts | nm | open | seams | shells | volume | **lost** |
+|---|---|---|---|---|---|---|---|---|---|
+| | source | 1604 | 846 | 4 | 246 | 80/2 | 2 | −104.82% | — |
+| 1 | **welder** — 80 splits, 2 rounds | 1684 | 846 | 4 | **6** | 80/2 | 2 | −104.82% | **0** |
+| 2 | **`by_geometry`** | 1684 | 846 | 4 | 6 | **0/0** | 2 | **+200.00%** | **0** |
+| 3 | **CLEAN** (doubles) | **841** | 423 | 1 | 2 | 0/0 | **1** | **+100.00%** | — |
+| 4a | PyMeshFix | 836 | 420 | 0 | 0 | 0/0 | 1 | +99.95% | **7** |
+| 4b | **Blender** | **840** | **422** | **0** | **0** | 0/0 | 1 | **+100.00%** | **1** |
+
+**Steps 1 and 2 lose nothing**, which the missing-vertex gate confirms directly
+rather than by inference.
+
+**Blender is the better tool for step 4**: volume exact at 100.00% against
+99.95%, and **1 vertex lost against 7**. That matches `fin_bl` — Blender is
+precise on small non-manifold repairs where PyMeshFix deletes. It also matches
+the earlier finding that Blender is *worse* on a large multi-shell mesh
+(costume01: 493 open edges against PyMeshFix's 28), so neither dominates and
+the routing is per-defect, as recorded.
+
+Against the control the result is 12 missing / 52 extra, most of which comes
+from CLEAN at step 3 — merging a duplicate necessarily renumbers vertices, so
+those are not losses in the same sense. The per-step `lost` column is the
+honest measure.
+
+#### The sequence, with each stage's measured-best tool
+
+```
+1. welder.repair          T-junctions        lost 0
+2. by_geometry            inverted + seams   lost 0
+3. CLEAN                  doubles            2 shells -> 1
+4. Blender fix_stl        remaining nm       lost 1, volume exact
+   (PyMeshFix instead when the mesh is large and multi-shell —
+    costume01: 2,263 nm -> 0, 28 open, 100% volume, 201s,
+    against Blender's 493 open at 488s)
+```
+
+Written as `sphere_allbad_v2.stl` (PyMeshFix step 4) and
+`sphere_allbad_v3.stl` (Blender step 4).
