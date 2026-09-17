@@ -12,11 +12,11 @@ tests do not catch.
 Decisions are grouped by topic. Numbers are global and stable across topics, so
 a commit message citing D7 keeps meaning D7 when a new topic is added.
 
-**Status (2026-09-17): eleven modules in `libs/`, 285 tests, all green.**
+**Status (2026-09-17): twelve modules in `libs/`, 354 tests, all green.**
 `stl_batch_fix.py` is untouched and still frozen. Built so far: `pool`,
 `indicators`, `blender`, `mesh_io`, `scanner`, `splitter`, `meshfix`,
-`decimator`, `converter`, `welder`. Still to build: **`repairer`** and the
-orchestration — the repair sequence is validated but lives in scratch scripts.
+`decimator`, `converter`, `welder`, `repairer`. Still to build: **the
+orchestration** — the step that decides what to do with a `repairer.Result`.
 
 Raw session narratives are archived under `archive/` when they grow past
 usefulness; this file keeps the conclusions.
@@ -1698,6 +1698,12 @@ still frozen; `main` is at `4c1c0c2` and `refactor` is five commits ahead.
 Still to build: **`repairer`** (PyMeshFix, seam split, NM repair, open-edge
 fill) and the **orchestration** that threads a file through all of it.
 
+> **Superseded 2026-09-17.** `repairer` is built — see D24. The shape it took
+> is not the one sketched here: the seam split is not part of it (`by_shells`
+> is what step 4 needs, and `by_seams` stayed unused), and open-edge fill is
+> PyMeshFix's `fill_small_boundaries` rather than a step of its own. Only the
+> orchestration remains.
+
 ### Open question — is `open_loops_are_printable` worth keeping?
 
 Raised and **not settled**. Recorded mid-discussion so it can be resumed
@@ -2669,6 +2675,77 @@ unnecessary — the destination's existence *is* the commit.
 
 ---
 
+### D24 — `repairer` is the sequence; two reporting measures had to be redefined
+
+**2026-09-17.** The 2026-09-16 sequence is now `libs/repairer.py`, 29 tests.
+Step 4's tool is injectable (`repair(tool=)`), which is what lets the sequence
+tests stub PyMeshFix out and run in 0.026s.
+
+**The scratch scripts were already gone**, so this was rebuilt from the record
+above and re-validated against the saved `_validate/*.stl` outputs rather than
+transcribed. That is the argument for keeping those outputs: they are the only
+surviving copy of what the sequence did.
+
+#### Two measures were wrong in their obvious form
+
+Both were written the natural way, both produced numbers that inverted their
+own meaning, and **both were caught by running the fixtures rather than by
+review**:
+
+| measure | obvious form | what it reported | fix |
+|---|---|---|---|
+| `volume_kept` | `out / in` | all-defects sphere at **−95%** for a correct −4292.4 → +4092.9 repair | compare magnitudes |
+| `lost_vertices` | exact tuple set difference | **382 lost** on a fixture that deleted nothing | nearest-neighbour at `1e-4` |
+
+The vertex one matters beyond this module. PyMeshLab round trips coordinates
+through float64 and returns float32, so a vertex **nothing touched** comes back
+re-rounded — measured, the furthest such move was `1.0e-05`, against `8.0` (the
+sphere's radius) for a real deletion. Five orders of magnitude apart, so the
+tolerance is not a fine judgement, but *exact matching is not the strict
+version of this check — it is a broken one.*
+
+#### PyMeshFix is chaotically sensitive on a defect-dense mesh
+
+costume01 finishes at **834,582f** here against the **835,466f** recorded
+yesterday. The whole difference traces to `welder` splitting **one**
+T-junction first: 891,342 vs 891,343 faces entering step 4 moves PyMeshFix's
+output by **884 faces**. Confirmed by running the sequence with and without the
+weld step, everything else identical.
+
+Both results are correct — nm=0, open=28, 99.99% volume. **So a face count is
+not a regression signal on this class of mesh**; the topology counts are.
+
+#### The orientation guard runs in both positions
+
+Step 2 (whole mesh) and step 4 (per part). Yesterday's consolidated pseudocode
+showed only the first, but `costume_seq.txt` records `part 1: oriented`, so the
+script that produced the numbers had both. Step 2 must precede CLEAN and the
+split or they work on backwards geometry; one signed volume only goes negative
+for a *wholly* inverted model, so a reversed region is caught only per part.
+
+**The per-part guard is cheap insurance, not a proven saving.** The part it
+fired on ended at 6 faces either way — a 212-face, 98-vertex tangle with 56
+non-manifold edges in a 1.5 mm box, which PyMeshFix collapses whichever way it
+faces. Kept because the fixture measurement says an isolated reversed region is
+detectable only there, at the cost of one volume sum per part.
+
+#### What is deliberately not implemented
+
+**Step 4's Blender rung.** The routing table says small-single-shell → Blender,
+and that is real: allbad reaches 840f at +4094.9 through Blender against 836f
+at +4092.9 through PyMeshFix. It is not wired in because there is no repair
+script in `blender_fx/` (only `convert`), and because **the rule cannot be
+applied as written from inside step 4** — every mesh arriving there is
+single-shell by construction, so "multi-shell" never occurs. What the table
+really separates is small fixtures from large models, and nothing measured says
+where the boundary is. Cost of the omission: four faces on one synthetic
+fixture, nothing on either real model.
+
+**CLEAN is still unconditional.** Unchanged from the gap recorded below;
+`scanner` still cannot detect duplicate geometry.
+
+---
+
 ## The 2026-09-16 repair work
 
 One session, archived raw in `archive/REFACTOR_2026-09-16_raw.md` (2,057 lines)
@@ -2820,8 +2897,9 @@ shell count hints, which is useless since two shells is legitimate.
 0.02%. Repair tools are mostly cleaning up after decimation rather than after
 the modeller. Not known whether this is particular to that model or general.
 
-**`repairer` does not exist.** The sequence above runs in scratch scripts;
-`welder` is the only part committed as a module.
+**`repairer` now exists** — see D24. The scratch scripts it was built from had
+already been deleted, so it was rebuilt from this record and re-validated
+against the saved fixture outputs.
 
 ### Method
 
