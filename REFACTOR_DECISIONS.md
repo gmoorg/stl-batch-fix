@@ -4172,3 +4172,60 @@ They are the **only** tool that fixes a uniformly inverted mesh. For seams they
 are one of three options. Their value is therefore narrower than it first
 appeared, but not zero — and they cost nothing, PyMeshLab being already a
 dependency and in-process.
+
+### Measured — the tool order: PyMeshFix first, PyMeshLab after
+
+**2026-09-16.** Proposed order was PyMeshLab (inverted, seams, doubles) then
+PyMeshFix. Tested on a fixture carrying **four defects at once** — a reversed
+cap, a fin, a degenerate face — because every fixture until now had exactly
+one, and the order only matters when defects interact.
+
+Source: 762f, nm=2, open=3, seams 40/1, **51.3%** volume.
+
+| order | result |
+|---|---|
+| **A — PyMeshLab first** | clean filters take nm 2 → 1, then orient **RAISES**: *"Orientability requires manifoldness"*. Pipeline stops at **51.3%**. |
+| **B — PyMeshFix first** | **756f, nm=0, open=0, seams 0/0, 100.0%** in one call. PyMeshLab then runs as a safe no-op. |
+
+**The order is structural, not a preference.** PyMeshLab's orientation filters
+have a hard precondition of `nm == 0` — they raise, they do not degrade — and
+PyMeshFix is good at establishing exactly that. PyMeshFix's own weaknesses
+(`doubles` → half a sphere, `inverted` → no-op) are precisely what the
+PyMeshLab filters clean up afterwards. They compose in one direction only.
+
+#### The sequence
+
+```
+split by shells                       splitter.by_shells
+  -> PyMeshFix                        nm, open edges, seams
+  -> PyMeshLab clean                  remove_null_faces
+                                      merge_close_vertices(0.1%)
+                                      remove_duplicate_faces
+                                      remove_unreferenced_vertices
+  -> PyMeshLab orient                 re_orient_faces_coherently
+                                      re_orient_faces_by_geometry
+  -> verify volume
+merge
+```
+
+**Split first, always.** PyMeshFix turns the `doubles` fixture into half a
+sphere and ate 4,525 support shells on `platform_supported.stl`. Given
+pre-split single shells it is excellent: costume01's three parts went from
+**2,263 non-manifold edges to 0** in 201s with volume preserved to 100.0%.
+
+**`meshing_remove_t_vertices` is excluded deliberately.** It destroyed both
+T-junction fixtures at threshold ≤ 1 — 910 faces to **zero**, reporting
+`nm=0 open=0`. A clean empty mesh, which only a volume check catches.
+
+#### What the order does not solve
+
+**T-junctions.** All three tools fail: PyMeshFix and Blender both dent the
+surface (numerically 99.8% and 99.7% and "clean" — visually gashed), PyMeshLab
+destroys the mesh. Only the commercial service handles it, keeping all 532
+vertices and adding exactly 150 faces. Unowned.
+
+**Where Blender fits** is still open. It is exact on `fin` and `doubles`, blind
+to `inverted` and `seam`, and it **timed out at 420s** on costume01 — the
+`TIMEOUT after 420s` in stdout being why the original run wrote `.failed.stl`
+with no markers. A run with the cap lifted is in progress; until it returns,
+whether Blender can repair a mesh of that shape at all is unknown.
