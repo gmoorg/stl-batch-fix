@@ -101,6 +101,59 @@ def write_ply_from_bm(path, bm):
 # edges, so it found 0 of the 80 on `sphere_allbad`.
 
 
+# --- the three things this script keeps doing ---------------------------------
+#
+# Each of these was written out three or four times with different local names,
+# which is most of why step 6 read like a second, worse copy of step 4.  They
+# are one-liners, but naming them is what makes the repair loop legible: the
+# loop now says *what* it is doing rather than how to count an edge.
+
+
+def count_defects(bm):
+    """`(non_manifold, open)` edge counts — the loop's progress measure.
+
+    Non-manifold is `not is_manifold and not is_boundary`: a boundary edge has
+    one face and is therefore also non-manifold by Blender's definition, so
+    without the second clause every hole would be counted twice.
+    """
+    nm = sum(1 for e in bm.edges if not e.is_manifold and not e.is_boundary)
+    return nm, sum(1 for e in bm.edges if e.is_boundary)
+
+
+def nm_faces_of(bm):
+    """Every face touching an edge with three or more faces.
+
+    A set, because a face touching two bad edges must not be deleted twice.
+    """
+    faces = set()
+    for edge in bm.edges:
+        if len(edge.link_faces) > 2:
+            faces.update(edge.link_faces)
+    return faces
+
+
+def fill_holes(bm, quad_method='BEAUTY', ngon_method='BEAUTY'):
+    """Fill every boundary loop and triangulate the patches.  Returns them.
+
+    `recalc_face_normals` on the new faces is not optional: `holes_fill` does
+    not guarantee the patch agrees with its neighbours, and a patch wound the
+    wrong way is a seam that the next tool has to resolve.
+    """
+    boundary = [e for e in bm.edges if e.is_boundary]
+    if not boundary:
+        return []
+    new_faces = [f for f in bmesh.ops.holes_fill(bm, edges=boundary,
+                                                 sides=0).get('faces', [])
+                 if f.is_valid]
+    if not new_faces:
+        return []
+    bmesh.ops.recalc_face_normals(bm, faces=new_faces)
+    result = bmesh.ops.triangulate(bm, faces=new_faces,
+                                   quad_method=quad_method,
+                                   ngon_method=ngon_method)
+    return [f for f in result.get('faces', []) if f.is_valid]
+
+
 def run_repair_loop(mesh, obj, label):
     prev_nm = prev_open = None
     stall_count = 0
@@ -118,11 +171,7 @@ def run_repair_loop(mesh, obj, label):
 
         # --- 4b: NM face deletion ---
         use_wide = (stall_count == 1 and not wide_used)
-        nm_faces = set()
-        for e in bm.edges:
-            if len(e.link_faces) > 2:
-                for f in e.link_faces:
-                    nm_faces.add(f)
+        nm_faces = nm_faces_of(bm)
         if nm_faces and use_wide:
             extra = set()
             for f in list(nm_faces):
@@ -145,17 +194,8 @@ def run_repair_loop(mesh, obj, label):
             print(label + " pass " + str(repair_pass+1) + ": removed " + str(len(fin_verts)) + " fin verts")
 
         # --- 4d: hole fill ---
-        boundary_edges = [e for e in bm.edges if e.is_boundary]
-        if boundary_edges:
-            result = bmesh.ops.holes_fill(bm, edges=boundary_edges, sides=0)
-            new_faces = result.get('faces', [])
-            if new_faces:
-                # Fix winding on new patch faces before triangulating —
-                # holes_fill doesn't guarantee consistent orientation with neighbors.
-                bmesh.ops.recalc_face_normals(bm, faces=new_faces)
-                tri_result = bmesh.ops.triangulate(bm, faces=new_faces,
-                                                   quad_method='BEAUTY', ngon_method='BEAUTY')
-                new_faces = tri_result.get('faces', [])
+        if any(e.is_boundary for e in bm.edges):
+            new_faces = fill_holes(bm)
             if repair_pass == 0 and new_faces:
                 slivers = [f for f in new_faces if f.is_valid and f.calc_area() < 1e-6]
                 if slivers:
@@ -182,8 +222,7 @@ def run_repair_loop(mesh, obj, label):
                     bmesh.ops.delete(bm, geom=bad, context='FACES')
 
         # --- 4e: convergence check ---
-        nm_now   = sum(1 for e in bm.edges if not e.is_manifold and not e.is_boundary)
-        open_now = sum(1 for e in bm.edges if e.is_boundary)
+        nm_now, open_now = count_defects(bm)
 
         print(label + " pass " + str(repair_pass+1) + ": nm=" + str(nm_now) +
               " boundary=" + str(open_now))
@@ -203,13 +242,9 @@ def run_repair_loop(mesh, obj, label):
         if converged or stalled:
             # Final cleanup: remove any NM faces left by the last holes_fill pass.
             if not converged:
-                _final_nm_faces = set()
-                for _e in bm.edges:
-                    if len(_e.link_faces) > 2:
-                        for _f in _e.link_faces:
-                            _final_nm_faces.add(_f)
-                if _final_nm_faces:
-                    bmesh.ops.delete(bm, geom=list(_final_nm_faces), context='FACES')
+                leftover = nm_faces_of(bm)
+                if leftover:
+                    bmesh.ops.delete(bm, geom=list(leftover), context='FACES')
             break
 
     # Sync back to mesh so the decimation step (which re-imports via mesh) sees the result.
@@ -342,30 +377,19 @@ non_tris = [f for f in bm_final.faces if len(f.verts) != 3]
 if non_tris:
     bmesh.ops.triangulate(bm_final, faces=non_tris, quad_method='BEAUTY', ngon_method='BEAUTY')
     # Clean up any NM edges the triangulation diagonals created.
-    _nm_after_tri = set()
-    for _e in bm_final.edges:
-        if len(_e.link_faces) > 2:
-            for _f in _e.link_faces:
-                _nm_after_tri.add(_f)
-    if _nm_after_tri:
-        bmesh.ops.delete(bm_final, geom=list(_nm_after_tri), context='FACES')
-        # Re-fill the holes just opened; use holes_fill which is more conservative
-        # than the manual loop-walk.
-        _be_refill = [e for e in bm_final.edges if e.is_boundary]
-        if _be_refill:
-            _r_refill = bmesh.ops.holes_fill(bm_final, edges=_be_refill, sides=0)
-            _nf_refill = [f for f in _r_refill.get('faces', []) if f.is_valid]
-            if _nf_refill:
-                _tri2 = bmesh.ops.triangulate(bm_final, faces=_nf_refill,
-                                              quad_method='SHORT_EDGE', ngon_method='EAR_CLIP')
-                # One final NM check — don't re-fill again.
-                _nm2 = set()
-                for _e in bm_final.edges:
-                    if len(_e.link_faces) > 2:
-                        for _f in _e.link_faces:
-                            _nm2.add(_f)
-                if _nm2:
-                    bmesh.ops.delete(bm_final, geom=list(_nm2), context='FACES')
+    after_tri = nm_faces_of(bm_final)
+    if after_tri:
+        bmesh.ops.delete(bm_final, geom=list(after_tri), context='FACES')
+        # Re-fill the holes just opened.  SHORT_EDGE/EAR_CLIP rather than
+        # BEAUTY: these patches sit where geometry was just removed, so the
+        # conservative triangulation is the right one.
+        if fill_holes(bm_final, quad_method='SHORT_EDGE',
+                      ngon_method='EAR_CLIP'):
+            # One final NM check — delete, but do not re-fill again, or this
+            # becomes a loop with no termination argument.
+            leftover = nm_faces_of(bm_final)
+            if leftover:
+                bmesh.ops.delete(bm_final, geom=list(leftover), context='FACES')
 
 # 6b — fill any remaining boundary loops. The mesh is now fully triangulated.
 # Walk each loop explicitly and try a direct face fill; roll back if it
@@ -425,8 +449,7 @@ if boundary_edges:
 
 # 6c — final authoritative validation directly from bm_final.
 # No from_mesh round-trip: bm_final's counts are clean.
-nm_final   = sum(1 for e in bm_final.edges if not e.is_manifold and not e.is_boundary)
-open_final = sum(1 for e in bm_final.edges if e.is_boundary)
+nm_final, open_final = count_defects(bm_final)
 n_faces    = len(bm_final.faces)
 max_open_len = 0.0
 if open_final > 0:
