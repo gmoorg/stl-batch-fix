@@ -4979,3 +4979,102 @@ damage, but that was 2 from a sound surface, where these may be the
 non-manifold geometry itself. The refined gate recorded above — *lost a vertex
 belonging to the sound surface* — is exactly what would answer this
 automatically, and it is not built.
+
+---
+
+## THE REPAIR SEQUENCE — consolidated (2026-09-16, end of session)
+
+`mandy_simp_seq.stl` confirmed clean by eye. The sequence below is validated on
+eight synthetic fixtures, a sphere carrying all six defects at once, and two
+real models, with a commercial repair service as an independent check
+throughout.
+
+### The sequence
+
+```python
+# 1. T-junctions — ours, libs/welder.py
+mesh = welder.repair(mesh).mesh
+
+# 2. Orientation — ONLY when the mesh is genuinely inverted
+if scanner.volume(mesh) < 0:
+    mesh = pml(mesh, [('meshing_re_orient_faces_by_geometry', {})])
+
+# 3. Duplicates — whole mesh, BEFORE the split
+mesh = pml(mesh, [('meshing_remove_null_faces', {}),
+                  ('meshing_merge_close_vertices', {'threshold': PercentageValue(0.1)}),
+                  ('meshing_remove_duplicate_faces', {}),
+                  ('meshing_remove_unreferenced_vertices', {})])
+
+# 4. Remaining non-manifold and open edges, per shell
+parts = [repair_tool(p).mesh for p in splitter.by_shells(mesh)]
+mesh  = splitter.merge(parts, destination=...)
+```
+
+**Step 4's tool depends on the mesh**, and this is the one routing decision the
+measurements force:
+
+| mesh | tool | evidence |
+|---|---|---|
+| small, single-shell | **Blender** | `fin_bl` face-identical to control; allbad step 4 lost 1 (the fin apex) at exactly 100.00% volume where PyMeshFix lost 7 at 99.95% |
+| large, multi-shell | **PyMeshFix** | costume01: 2,263 nm → 0, 28 open, 100% volume, 201s — against Blender's 493 open edges at 488s, and a 420s timeout in the real pipeline |
+
+### Why each step is where it is
+
+- **welder first**: it only adds faces, never moves or deletes, so nothing
+  downstream is disturbed. On real models it usually finds nothing and no-ops.
+- **orientation before everything else**: a backwards surface makes PyMeshFix
+  delete regions — that is the head-deletion case. Fixing it first means every
+  later step works on correct geometry.
+- **duplicates before the split**: deduplication must see both copies.
+  Splitting first separates them and `merge_close_vertices` has nothing to do —
+  measured, `doubles` stayed at 200% volume and 2 shells.
+- **the split before step 4**: PyMeshFix rebuilds one manifold surface and
+  discards the rest, so a multi-shell mesh reaching it unsplit loses
+  components — 4,525 support pillars on one resin model.
+
+### Results
+
+| subject | source | result | preserved |
+|---|---|---|---|
+| all-defects sphere | 1604f, nm=4, open=246, seams 80/2, 2 shells, **−104.82%** | 840f, all zero, **+100.00%** | everything; the one vertex dropped was the fin apex, a defect |
+| `Mandy...-simp` (real) | 188,940f, nm=29, open=34, seams 4/1 | **188,432f, all zero, 99.99%** | **99.7% of faces and vertices** |
+| costume01 (real) | 900,000f, nm=2,263, open=20, 491 shells | 835,426f, nm=0, 28 open, **100.0%** | 201s |
+
+On `Mandy...-simp` the commercial service kept **94.9%** of faces and vertices
+where we kept **99.7%** — it removed 5% of the model to fix 63 defects.
+
+### What each tool is for
+
+| defect | tool | note |
+|---|---|---|
+| **T-junctions** | **welder (ours)** | the only correct implementation available; PyMeshFix and Blender both dent, PyMeshLab destroys the mesh |
+| inverted normals | PyMeshLab `by_geometry` | the only tool that fixes it; nothing else even detects it |
+| seams | PyMeshFix, or `by_geometry` | PyMeshFix re-winds the whole mesh correctly in one call |
+| duplicates | PyMeshLab CLEAN | three filters together; the merge alone makes it worse |
+| degenerate faces | any | all three exact |
+| fins | **Blender** | face-set identical to the control |
+| non-manifold, multi-shell | **PyMeshFix** | after the split |
+
+### Known gaps
+
+**The orientation guard is wrong.** It currently asks *"is there a closed seam
+loop?"*, which fires on `Mandy...-simp` (4 edges / 1 loop) where the step is
+pure churn — it inflated seams to 23/3 and PyMeshFix undid it, with a
+byte-identical final result either way. **`volume < 0` alone** is the correct
+trigger: that distinguishes a genuinely inverted mesh, where the step is
+essential, from a correctly-oriented one with a small seam.
+
+**CLEAN is unconditional and should not be.** On costume01 it tears 1,225 open
+edges that PyMeshFix then closes, for a 40-face difference against not running
+it. It is only needed when duplicate geometry exists, and `scanner` cannot
+currently detect that — the `doubles` fixture reads entirely clean.
+
+**The missing-vertex gate is designed but not built.** It is the only check
+that caught `fin_pmf` deleting two vertices from a sound surface while scoring
+perfectly on nm, open, degenerate, seams, shells, volume and vertex
+displacement. The refinement it needs: *lost a vertex belonging to the sound
+surface* — a fin apex does not count, since removing a fin legitimately removes
+its tip.
+
+**`repairer` does not exist.** The sequence above runs in scratch scripts.
+`welder` is the only part committed as a module.
