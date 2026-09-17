@@ -4640,3 +4640,66 @@ visibly gashed.
 
 So this is the first repair in the session that **our own code does better
 than every external tool**, verified numerically and visually.
+
+### Measured — a sphere with ALL SIX defects, and a fourth failed surface check
+
+**2026-09-16.** Built `sphere_allbad.stl`: a sphere carrying every defect at
+once — reversed cap, 40 T-junctions, a fin, a degenerate face, the whole thing
+duplicated, and then every face reversed.
+
+Source: **1604f, 846v, nm=4, open=246, degenerate=2, seams 80/2, 2 shells,
+volume −104.82%.**
+
+The sequence handles all six, and each step is visible in the trace:
+
+| step | effect |
+|---|---|
+| T-junction fix | open **246 → 6** |
+| CLEAN | 1684f → **841f**, 2 shells → 1, volume −104.82% → −52.41% |
+| PyMeshFix + guarded ORIENT | nm → 0, seams **40/1 → 0/0**, volume → **+99.95%** |
+
+**Final: 836f, 420v, nm=0, open=0, degenerate=0, seams 0/0, one shell,
++99.95%.** Written as `sphere_allbad_seq.stl`.
+
+#### The radius test looked like the surface check and is not
+
+Measuring each vertex's distance from the sphere of radius 10 seemed promising:
+the result has 40 vertices off it, worst 0.1468 mm. But tested against the
+meshes whose condition is already known by eye:
+
+| file | verts | >0.01 mm off | worst | verdict by eye |
+|---|---|---|---|---|
+| `sphere_correct` | 382 | 0 | 0.0000 | clean (control) |
+| `fin_bl` | 382 | 0 | 0.0000 | clean |
+| **`fin_pmf`** | 380 | **0** | **0.0000** | **DENTED** |
+| `tjunction_many_pmf` | 502 | 135 | 0.1528 | DENTED |
+| `tjunction_many_bl` | 414 | **67** | 0.1528 | DENTED |
+| **`tjunction_many_tjfix`** | 532 | **150** | 0.1528 | **clean (ours)** |
+
+**It runs backwards.** The clean result has the *most* off-sphere vertices
+(150) and a dented one has fewer (67) — because the off-sphere vertices are the
+T-junction midpoints, which sit on chords by construction. Preserving more of
+them, which is correct, scores worse.
+
+And `fin_pmf` has **zero** deviation while being visibly dented: PyMeshFix
+deleted 4 faces without moving a vertex, so the dent is a hole in the face
+connectivity, not a displacement. No vertex-position test can see it.
+
+**That is the fourth candidate surface check to fail today**, after nm/open
+counts, volume, and seam counts:
+
+| check | sees `fin_pmf` | sees `tjunction_many` dents |
+|---|---|---|
+| nm / open / degenerate | no | no |
+| volume | 99.96% — no | 99.78% — no |
+| radius deviation | no | **inverted** |
+| **vertex set vs a control** | **yes** | **yes** |
+
+Only comparison against a known-good reference works, and real models have
+none. The gap recorded earlier stands, and is now better characterised: the
+defect is in **face connectivity**, not vertex positions, so any measure built
+on vertex geometry alone will miss it.
+
+**Also noted**: the 40 off-sphere vertices in `allbad_seq` are the fixture's
+own artifact — midpoints of chords are always inside a sphere — not a repair
+defect. The T-junction fix preserving them is correct behaviour.
