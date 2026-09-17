@@ -4867,3 +4867,56 @@ honest measure.
 
 Written as `sphere_allbad_v2.stl` (PyMeshFix step 4) and
 `sphere_allbad_v3.stl` (Blender step 4).
+
+### CORRECTION — `sphere_allbad_v3.stl` loses nothing real; the gate needs refining
+
+**2026-09-16.** The entry above records Blender's step 4 as losing 1 vertex.
+The user pushed back — *"that vertex Blender drop was something we add by
+mistake"* — and checked:
+
+```
+vertices Blender dropped: 1
+   (18.0, 0.0, 0.0)   radius 18.0000   <- THE FIN APEX
+```
+
+It is the **fin's tip**, added deliberately as a defect. Blender did not lose a
+vertex of the model; it removed the thing that was supposed to be removed.
+Deleting it is the correct repair.
+
+**So `v3` has zero real losses:**
+
+| step | lost | |
+|---|---|---|
+| 1. welder | 0 | |
+| 2. `by_geometry` | 0 | |
+| 3. CLEAN | — | merges the duplicate, renumbering by design |
+| 4. Blender | 1 | **the fin apex — a defect, correctly deleted** |
+
+Final: **840f, nm=0, open=0, degenerate=0, seams 0/0, one shell, volume exactly
++100.00%**, confirmed spherical by eye. Every other result today that turned
+out visibly wrong sat at 99.7–99.96%, so exact volume is meaningful here rather
+than another false all-clear.
+
+The 40 vertices at radius 9.853 are the T-junction midpoints, which sit on
+chords rather than the sphere by construction in the generator. Welder
+preserving them is correct.
+
+#### What this does to the missing-vertex gate
+
+A naive *"did the repair lose any vertex?"* test would flag this as damage. It
+is not. The rule has to be **lost a vertex belonging to the sound surface** —
+and a fin apex does not: it hangs off a single non-manifold edge, so whatever
+removes the fin legitimately removes its tip.
+
+Workable refinements, none yet tested:
+
+- ignore vertices that were **non-manifold or on an open boundary** in the
+  input, since those are the ones a repair is entitled to remove;
+- or compare **only against vertices with a closed manifold fan** in the input;
+- or pair the loss count with the defect count it resolved — losing a vertex
+  while clearing a non-manifold edge is a trade, losing one while clearing
+  nothing is damage.
+
+The gate is still the right idea — it is the only check that caught `fin_pmf`,
+where two vertices at radius 10.000 were deleted from a sound surface — but it
+needs to distinguish *removing a defect* from *damaging the model*.
