@@ -354,6 +354,39 @@ def seam_edges(mesh: Mesh) -> np.ndarray:
     return np.ascontiguousarray(found, dtype=np.int64)
 
 
+def diagonal(mesh: Mesh) -> float:
+    """Length of the bounding box's diagonal — one number for "how big".
+
+    The geometry-level twin of `mesh_io.diagonal`, which answers the same
+    question from a *path* by streaming the file.  This one works on a loaded
+    mesh, because the modules that need it — `welder`, `repairer` — must not
+    touch the filesystem.
+
+    **This is what a distance tolerance should be a fraction of.**  A fixed
+    millimetre constant means two different things on a 4 mm part and a 200 mm
+    one, and that is not a theoretical concern here: `welder`'s absolute
+    `1e-6` was measured missing T-junctions at radii 50, 100 and 200 while
+    finding them at 1, 10 and 500.
+
+    The reason is float32.  Measured on the same T-junction at seven radii, the
+    *absolute* error of an edge midpoint grows with the model — 3.0e-08 at
+    r=1, 7.6e-06 at r=200 — while the **relative** error is flat at 2.4e-07.
+    One relative number therefore works at every scale where no absolute one
+    can.  (r=10, 500 and 1000 measure exactly 0.0, which is the midpoint
+    happening to land on a representable float; luck, not a pattern.)
+
+    Returns 0.0 for an empty mesh, so a caller scaling by this gets a zero
+    tolerance rather than a crash — an empty mesh has nothing to measure.
+    """
+    _require_geometry(mesh)
+    verts = mesh.geometry.verts
+    if len(verts) == 0:
+        return 0.0
+    span = verts.max(axis=0).astype(np.float64) - \
+        verts.min(axis=0).astype(np.float64)
+    return float(np.linalg.norm(span))
+
+
 def volume(mesh: Mesh) -> float:
     """Signed volume enclosed by the mesh.
 

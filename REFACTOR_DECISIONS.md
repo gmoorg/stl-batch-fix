@@ -1663,16 +1663,37 @@ use of the Blender boundary.
 > - `mesh_io.load` folds `-0.0` to `0.0` and welds by exact coordinate match
 >   ([mesh_io.py:273]).
 >
-> **INHERITED from the 2026-09-15 entry above — NOT re-verified this session:**
+> **RE-VERIFIED 2026-09-17 (second session), previously inherited:**
 >
-> - PLY survives a Blender round trip with the vertex table intact (v/f 0.500
->   in, 0.501 out after decimation).
-> - `wm.ply_import`, `import_mesh.ply` and `wm.ply_export` exist in Blender
->   4.0.2.
-> - Bambu Studio's import dialog lists no PLY.
+> - Blender is **4.0.2**, as recorded.
+> - `wm.ply_import`, `wm.ply_export`, `import_mesh.ply` and `export_mesh.ply`
+>   **all exist**. Confirmed by running them.
+> - **PLY survives the round trip welded.** A binary PLY written from our
+>   `Geometry` (382 verts, 760 faces) imports as 382 verts, 760 faces, **0 open
+>   edges, 0 non-manifold**, and `remove_doubles` then removes **0 vertices** —
+>   the mesh is already welded on arrival.
 >
-> These were marked verified when written and are probably still true, but the
-> Blender version may have moved. **Re-check before building on them.**
+> **The two paths measured side by side**, same fixture, in Blender:
+>
+> | | STL (current) | PLY |
+> |---|---|---|
+> | verts after load | **2,280** (v/f 3.000) | **382** (v/f 0.503) |
+> | open edges after load | **2,280** — every triangle an island | **0** |
+> | `remove_doubles` removes | **1,898 verts** | **0** |
+> | final verts | 382 | 382 |
+>
+> Both reach the same answer *on this fixture*. One does it by reading the
+> file; the other by destroying the vertex table and reconstructing 1,898
+> vertices with a 0.01 mm proximity guess.
+>
+> **Still inherited, not re-checked**: Bambu Studio's import dialog lists no
+> PLY. It only matters for the deliverable, which PLY was never proposed for.
+>
+> **Honest limit of this evidence**: no case has been found where the weld
+> guess actually goes *wrong*. At r=1 — a 2 mm part — the sphere's edges are
+> still 15.7x the 0.01 mm weld distance, and the face count survives intact.
+> The argument for PLY is that it removes a reconstruction that cannot fail
+> rather than one that has been seen failing.
 >
 > **ARITHMETIC, not measurement:**
 >
