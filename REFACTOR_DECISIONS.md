@@ -3457,6 +3457,30 @@ truth.
 | **doubles / coincident** | **no** | **probably yes** | PyMeshFix is destructive; nothing detects it |
 | wire edges | untested | — | — |
 
+**The commercial service calls the wreckage clean.** Put
+`sphere_doubles_pmf.stl` — half a sphere, 418 faces, volume +2047.4 against a
+control of +4094.9 — through the same service and it reports **0 of
+everything**, then adds 57 verts and 114 faces anyway.
+
+It is not wrong about what it sees. A half-sphere is a perfectly valid
+watertight mesh: no naked edges, no holes, one shell. The tool has no way to
+know that half the model is missing, because **every defect check in this chain
+is local**. None of them compares the file against what it should have been.
+
+That is the general lesson, and it is worth more than the doubles case itself:
+
+| check | question it answers |
+|---|---|
+| naked edges, holes, non-manifold, degenerate | is this mesh self-consistent? |
+| **volume before vs after** | **did the repair destroy anything?** |
+
+Only the second can catch a repair that succeeded by its own standard and
+wrecked the model. It is already in the pipeline as the volume-loss guard, and
+this is the strongest evidence yet for keeping it: three independent
+implementations — `scanner`, PyMeshFix and a commercial service — all call
+`sphere_doubles_pmf.stl` clean, and only the before/after comparison sees the
+damage.
+
 **Still to test in Bambu**, which decides whether the doubles gap matters at
 all: if two coincident shells slice identically to one, the destruction never
 happens because the file would never need repairing.
