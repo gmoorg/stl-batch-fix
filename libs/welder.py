@@ -35,6 +35,23 @@ A single M is the common case and costs one face.  **It is the n=1 case, not
 the definition** — an edge subdivided twice gives `a-M1-M2-c` and costs two,
 in a single split rather than two rounds.
 
+**The split uncovers winding seams rather than creating them**, and the
+distinction was checked rather than assumed (2026-09-17).  On Mandy the seam
+count goes 4/1 to 16/5 across 19 splits, which looks like damage.  Traced: all
+**12** new seam edges were **open** before, none existed before, and none was
+already paired.  An open edge cannot be a seam — a seam needs two faces
+disagreeing and there was only one face — so closing the hole is what makes a
+pre-existing disagreement measurable.
+
+Verified on the directions themselves: for one junction the bottom faces
+traverse (31816, 31443) and (31486, 31816) while the new faces traverse
+(31443, 31816) and (31816, 31486).  Opposite, which is what a correctly wound
+shared edge looks like.  `test_winding_is_preserved` guards this.
+
+It is the same shape as CLEAN's zero-thickness sheets: the surface on either
+side of those junctions genuinely disagrees about which way is out, and the
+repair makes that visible for the orientation step to act on.
+
 **Why this module exists rather than delegating.**  Measured on a 150-junction
 fixture, against every other tool available:
 
