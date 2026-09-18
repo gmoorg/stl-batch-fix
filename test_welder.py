@@ -255,6 +255,74 @@ class TestManyJunctions(unittest.TestCase):
         self.assertIs(twice.mesh, once)
 
 
+class TestCoveredAndUncovered(unittest.TestCase):
+    """The two arrangements from the user's sketches, and why one is a
+    T-junction and the other is a hole.
+
+    Both start from a closed square bipyramid — equator A(0) E(1) D(2) C(3),
+    apexes B(4) above and K(5) below — so everything is paired until one face
+    is changed.
+
+    **Covered**: the face below A-C is subdivided at P, which sits on the line.
+    The far side of the edge is one surface walked across, so splitting X at P
+    closes the hole.
+
+    **Uncovered**: that face is removed and a patch is attached along E-D
+    instead. P still lies on the A-C line and X still ignores it, so it is a
+    T-junction *by the definition* — but splitting X at P would turn one open
+    edge into two, because nothing pairs A-P or P-C. It is a hole, and hole
+    filling is PyMeshFix's job.
+
+    What separates them is the **strip** test: in Covered the chain's faces
+    share an edge with each other; in Uncovered they meet at a single vertex,
+    on opposite sides of the gap.
+    """
+
+    VERTS = [[0, 0, 0], [1, -1, 0], [2, -1, 0], [3, 0, 0],
+             [1.5, 0, 2], [1.5, 0, -2], [1.5, 0, 0]]
+    UPPER = [[0, 4, 1], [1, 4, 2], [2, 4, 3], [3, 4, 0]]
+    LOWER = [[0, 1, 5], [1, 2, 5], [2, 3, 5]]
+
+    def covered(self):
+        return mesh(self.VERTS,
+                    self.UPPER + self.LOWER + [[3, 6, 5], [6, 0, 5]])
+
+    def uncovered(self):
+        return mesh(self.VERTS, self.UPPER + self.LOWER + [[6, 1, 2]])
+
+    def test_covered_is_one_junction(self):
+        found = find(self.covered())
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].chain, (6,))
+
+    def test_covered_repairs_to_a_closed_solid(self):
+        result = repair(self.covered())
+        self.assertTrue(scanner.scan(result.mesh).is_clean)
+
+    def test_uncovered_finds_nothing(self):
+        """P is a T-junction by the definition and this still reports none.
+
+        Splitting X at P would replace one open edge with two: nothing pairs
+        A-P or P-C, because P's only links are into the patch. Reporting it
+        would hand a worse mesh downstream.
+        """
+        self.assertEqual(find(self.uncovered()), ())
+
+    def test_uncovered_would_be_found_without_the_strip_test(self):
+        """The guard earns its place: without it the walk runs A -> K -> C
+        through the surround and claims K, which sits nowhere near the edge.
+
+        Asserted through the fixture rather than the implementation: K is on
+        an open path between A and C, so only the strip test excludes it.
+        """
+        m = self.uncovered()
+        faces = [tuple(t) for t in m.geometry.faces.tolist()]
+        owners = welder._edge_faces([list(t) for t in faces])
+        self.assertEqual(len(owners[(0, 5)]), 1, "A-K should be open")
+        self.assertEqual(len(owners[(3, 5)]), 1, "C-K should be open")
+        self.assertEqual(len(owners[(0, 3)]), 1, "A-C should be open")
+
+
 class TestSeveralJunctionsOnOneFace(unittest.TestCase):
     """One spanning edge subdivided more than once — `find` under-reports and
     `repair` still gets it right.

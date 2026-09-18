@@ -35,22 +35,22 @@ A single M is the common case and costs one face.  **It is the n=1 case, not
 the definition** — an edge subdivided twice gives `a-M1-M2-c` and costs two,
 in a single split rather than two rounds.
 
-**The split uncovers winding seams rather than creating them**, and the
-distinction was checked rather than assumed (2026-09-17).  On Mandy the seam
-count goes 4/1 to 16/5 across 19 splits, which looks like damage.  Traced: all
-**12** new seam edges were **open** before, none existed before, and none was
-already paired.  An open edge cannot be a seam — a seam needs two faces
-disagreeing and there was only one face — so closing the hole is what makes a
-pre-existing disagreement measurable.
+**The split creates no winding seams**, and getting there took a correction
+worth recording.  An earlier version of this search reported 19 junctions on
+Mandy and took the seam count from 4/1 to **16/5**.  That was explained away as
+"the repair uncovers a pre-existing disagreement" — all 12 new seam edges had
+indeed been open before, and an open edge cannot be a seam.
 
-Verified on the directions themselves: for one junction the bottom faces
+The explanation was true and the conclusion was wrong.  Those 19 included the
+`Uncovered` arrangement: faces split *across a hole*, where the far side never
+reaches the spanning edge.  With the strip test below rejecting them, Mandy
+reports **2** junctions and the seam count does not move at all — 4/1 before
+and after, on both real models.
+
+Winding itself was never the problem.  For one junction the bottom faces
 traverse (31816, 31443) and (31486, 31816) while the new faces traverse
-(31443, 31816) and (31816, 31486).  Opposite, which is what a correctly wound
-shared edge looks like.  `test_winding_is_preserved` guards this.
-
-It is the same shape as CLEAN's zero-thickness sheets: the surface on either
-side of those junctions genuinely disagrees about which way is out, and the
-repair makes that visible for the orientation step to act on.
+(31443, 31816) and (31816, 31486): opposite, which is what a correctly wound
+shared edge looks like.  `test_winding_is_preserved` guards that.
 
 **Why this module exists rather than delegating.**  Measured on a 150-junction
 fixture, against every other tool available:
@@ -267,18 +267,45 @@ def _find_in(verts: np.ndarray,
         def position(vertex: int) -> float:
             return float((verts[vertex] - origin) @ along / length_squared)
 
+        def is_strip(path: tuple[int, ...]) -> bool:
+            """Do the faces owning this path's links form a connected strip?
+
+            **This is what separates a subdivided edge from a hole**, and it
+            is the whole reason `welder` does not fire on the `Uncovered`
+            arrangement.  Consecutive links must share an *edge*, not merely a
+            vertex: a subdivided side is one surface walked across, while the
+            far side of a hole is two pieces meeting at a point.
+
+            Measured on the two sketches.  Covered: the chain's faces are
+            `[6,0,5]` and `[3,6,5]`, sharing edge (6,5) — the M-K spoke.
+            Uncovered: `[0,1,5]` and `[2,3,5]`, sharing only vertex 5, on
+            opposite sides of the gap.
+
+            It also resolves the pattern's three-way symmetry for free.  A
+            junction has three open edges and all look alike topologically;
+            only the spanning one's chain is a strip, so the two twins fail
+            here rather than needing a geometric tie-break.
+            """
+            links = [owners[(min(path[i], path[i + 1]),
+                             max(path[i], path[i + 1]))][0]
+                     for i in range(len(path) - 1)]
+            if face in links:
+                return False               # the chain ran back through X
+            return all(len(set(faces[links[i]]) & set(faces[links[i + 1]])) == 2
+                       for i in range(len(links) - 1))
+
         # Walk open edges outward from `a`, admitting only vertices that fall
-        # strictly inside (a, c), until one of them reaches `c`.
+        # strictly inside (a, c), until one of them reaches `c` by a strip.
         stack = [(a, (a,))]
         chain: tuple[int, ...] = ()
         while stack and not chain:
             node, path = stack.pop()
             for nxt in open_at[node]:
                 if nxt == c:
-                    if node != a:          # never the (a, c) edge itself
+                    if node != a and is_strip(path + (c,)):
                         chain = path[1:]
                         break
-                    continue
+                    continue               # never the (a, c) edge itself
                 if nxt in path or len(path) > max_chain:
                     continue
                 if not (0.0 < position(nxt) < 1.0):
