@@ -26,10 +26,14 @@ That is two surfaces that should be joined and are not, and
 edge from one face to two with every vertex surviving.  The topological test
 below is what keeps this module from claiming that case.
 
-**The repair is one face split.**  Cut the neighbouring face at M, and the
-single face becomes two sharing a new edge from M to the opposite corner.
-Every edge then has two faces, M's fan closes, and **no vertex moves and
-nothing is deleted** — the mesh gains exactly one face per T-junction.
+**The repair is one face split**, fanned from the corner opposite the edge.
+Cut the neighbouring face at every M along it and the single face becomes
+`n + 1`, sharing new edges from each M to that corner.  Every edge then has two
+faces, the Ms' fans close, and **no vertex moves and nothing is deleted**.
+
+A single M is the common case and costs one face.  **It is the n=1 case, not
+the definition** — an edge subdivided twice gives `a-M1-M2-c` and costs two,
+in a single split rather than two rounds.
 
 **Why this module exists rather than delegating.**  Measured on a 150-junction
 fixture, against every other tool available:
@@ -55,100 +59,31 @@ import numpy as np
 
 from .mesh_io import Geometry, Mesh
 
-#: How far M may sit **out of X's plane**, as a fraction of the edge's length.
+#: **There is no tolerance constant, and that is the point.**  `DEFAULT_TOLERANCE`,
+#: `MAX_GAP` and `SIDE_FLOOR` all lived here and are gone: the search is
+#: topological, and the one geometric quantity it uses is `t`, a ratio.
 #:
-#: Not the distance from the a-c *line* — that was the old meaning and it was
-#: wrong.  A vertex can lie well off the line while still being in the plane of
-#: the face, which is precisely the T-junction where the other side of the
-#: surface bulges away from the edge:
-#:
-#:         D                     M is off the A-C line, but in the ADC plane,
-#:        / \                    and between A and C.  Splitting X at M and
-#:       /  M\                   joining D-M is the repair.
-#:      /  /  \
-#:     A--------C
-#:
-#: Measured on costume01, which shows both cases in one model: one candidate
-#: sits 4.4e-03 off the line but only 4.4e-06 out of plane — a thousand times
-#: closer to the plane than to the line, and a junction the old gap test
-#: discarded as "garbage".
-#:
-#: **A fraction, because an absolute distance cannot work** (the old value was
-#: `1e-6` mm).  float32 carries ~7 significant digits, so a coordinate's own
-#: rounding error grows with the model while the ratio stays flat.  The same
-#: junction injected into the same sphere at seven radii, against that absolute
-#: value:
+#: The history is worth keeping because the same mistake is easy to repeat.
+#: The original test measured M's perpendicular distance to the a-c line
+#: against an absolute threshold of `1e-6` mm.  float32 carries ~7 significant
+#: digits, so a coordinate's own rounding error grows with the model:
 #:
 #:     r=1     1.9e-08   found
 #:     r=10    2.6e-23   found
 #:     r=50    1.2e-06   MISSED
 #:     r=100   2.5e-06   MISSED
 #:     r=200   5.0e-06   MISSED
-#:     r=500   0.0       found
 #:
-#: A 100-200 mm print is an ordinary size, so that was a live gap.  Relative to
-#: the edge, all nine radii tested (0.5 mm to 5000 mm) find it and repair clean.
+#: Making it relative to the edge length fixed the scale bug but kept the wrong
+#: question: it still asked whether M lies *on* the line, when a T-junction's
+#: M is often well off it — Mandy carries one at **half an edge-length** away
+#: whose open-edge path plainly runs from one end of the spanning edge to the
+#: other.
 #:
-#: **The edge's own length rather than the bounding-box diagonal**, which is
-#: what `repairer.CLEAN_FILTERS` uses.  On a model with 0.0088 mm edges beside
-#: 90 mm features a diagonal-relative value means two very different things.
-#:
-#: **The fixtures cannot calibrate this**, and that is the honest limit.
-#: Sweeping it across four orders of magnitude:
-#:
-#:     plane tol   tj_many  allbad  tjunction  fin  correct  costume01
-#:     1e-5            150     160          1    0        0          0
-#:     1e-4            150     160          1    0        0          0
-#:     1e-3            150     160          1    0        0          2
-#:     1e-2            150     160          1    0        0          4
-#:
-#: Every fixture is flat — they build their junctions as exact midpoints, so
-#: any value finds them and no value admits a false one.  Only costume01 moves,
-#: and **whether its candidates are genuine T-junctions is unverified**.  One
-#: was traced by index and turned out to be a different defect entirely: a
-#: separate piece of surface passing through nearly the same point, which
-#: `merge_close_vertices` repairs.  See the `welder` entry in
-#: REFACTOR_DECISIONS.md.
-#:
-#: So `1e-4` is chosen as the loosest value that admits nothing new on any
-#: fixture, rather than as a measured optimum.  Loosening it to catch
-#: costume01's candidates would be loosening it to catch defects nobody has
-#: confirmed are ours to fix.
-DEFAULT_TOLERANCE = 1e-4
-
-#: Below this fraction of the edge length, M's offset from the line is float
-#: noise and its **direction is meaningless**, so the which-side-of-the-edge
-#: test is skipped.
-#:
-#: Measured, not guessed: 84 of `tjunction_many`'s 150 junctions have an offset
-#: of 4.8e-07 whose dot product with the apex direction is -5.9e-09.  Those are
-#: flush junctions — the offset is rounding error pointing nowhere in
-#: particular — and applying the side test to them rejects two thirds of the
-#: real defects at random.
-SIDE_FLOOR = 1e-4
-
-#: How far M may sit from the a-c **line**, as a fraction of the edge length.
-#:
-#: Deliberately loose — two orders of magnitude looser than the out-of-plane
-#: limit — because being off the line is the *normal* case for a T-junction
-#: where the other side of the surface bulges away from the edge.  This exists
-#: only to reject a vertex that is in X's plane and between a and c but
-#: nowhere near it, which on a curved surface is a large set: many vertices of
-#: a sphere lie in the plane of any given triangle.
-#:
-#: Measured on `tjunction_many`, plane test only against plane test plus this:
-#:
-#:     no gap limit          163 junctions   3 of them 40% of an edge away
-#:     gap <= 0.50 x edge    161
-#:     gap <= 0.30 x edge    151
-#:     gap <= 0.20 x edge    150   <- correct, and stable below this
-#:     gap <= 0.01 x edge    150
-#:
-#: The three false picks sat 1.367 mm from a 3.4 mm edge, in plane and between
-#: the endpoints, and splitting at them left 22 non-manifold edges where the
-#: mesh had been clean.  0.2 is the loosest value that is still correct, so
-#: 0.1 leaves a factor of two in hand.
-MAX_GAP = 0.1
+#: Walking that path answers the right question with no measurement at all.
+#: Verified identical to the calibrated version on every fixture (150, 160, 1,
+#: and zero on each negative), across eight radii from 0.5 mm to 5000 mm, and
+#: it additionally handles the multi-vertex case the distance test could not.
 
 #: Cap on repair rounds.  Splitting a face changes the edge map, so a vertex
 #: found on an edge that no longer exists must be re-found; the loop repeats
@@ -157,16 +92,37 @@ MAX_GAP = 0.1
 #: guard against a pathological mesh, not an expected limit.
 MAX_ROUNDS = 10
 
+#: Longest path of open edges accepted between the ends of a spanning edge.
+#:
+#: A subdivided edge normally yields one or two interior vertices, so this is a
+#: guard against a pathological boundary rather than an expected limit — the
+#: walk is a search, and without a cap a long open boundary could be explored
+#: exhaustively.
+#:
+#: Measured: every chain found on `tjunction_many`, `allbad`, Mandy and
+#: costume01 has **one or two** vertices.  Twelve is six times the largest
+#: seen.
+MAX_CHAIN = 12
+
 
 @dataclass(frozen=True)
 class TJunction:
     """One vertex sitting on an edge that does not reference it.
 
-    vertex     the index of the offending vertex
+    vertex     the index of the offending vertex — the first of `chain` when
+               the edge was subdivided more than once
     edge       the `(low, high)` edge it lies on
     face       the face owning that edge — the one to split
     position   where along the edge, 0 to 1
     distance   how far off the line it actually sits
+    chain      every offending vertex on this edge, in order from the low end
+               to the high one.  Usually a single vertex; an edge subdivided
+               twice gives two, and the face then splits into three rather
+               than two.
+
+    `vertex`, `position` and `distance` describe `chain[0]` and are kept
+    because a caller reporting one junction per face wants one vertex, not a
+    tuple — but `chain` is what `repair` acts on.
     """
 
     vertex: int
@@ -174,6 +130,7 @@ class TJunction:
     face: int
     position: float
     distance: float
+    chain: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -195,9 +152,33 @@ class Result:
 
 
 def _edge_faces(faces: list[list[int]]) -> dict[tuple[int, int], list[int]]:
-    """Map each undirected edge to the faces using it."""
+    """Map each undirected edge to the faces using it.
+
+    **Faces without three distinct corners are skipped**, and that is not
+    tidiness — including them corrupts the ownership count in two ways at once.
+    Measured on `sphere_allbad`, which carries two degenerate faces:
+
+        face 840 = (302, 302, 280)
+
+        (302, 302)   a self-edge, an edge that is really a point
+        (280, 302)   emitted TWICE by this one face, so its owner list is
+                     [100, 840, 840] -- length 3, and the edge reads as
+                     *paired* when it is genuinely open
+
+    The second is the damaging one: an open edge that looks closed is invisible
+    to anything searching the boundary.  `scanner` learned the same lesson on
+    real data (D18) — `Hair.stl` reported 106 "winding seam edges", all 106 of
+    them self-edges from 250 degenerate faces, which is the pipeline's
+    strongest "split this mesh" signal fired by zero-area triangles.
+
+    A degenerate face has no area, contributes nothing to the surface, and is
+    removed by CLEAN's `remove_null_faces` — but CLEAN runs *after* this
+    module, so the faces are here when `welder` looks.
+    """
     owners: dict[tuple[int, int], list[int]] = defaultdict(list)
     for index, (a, b, c) in enumerate(faces):
+        if len({a, b, c}) < 3:
+            continue
         for u, w in ((a, b), (b, c), (c, a)):
             owners[(min(u, w), max(u, w))].append(index)
     return owners
@@ -205,146 +186,126 @@ def _edge_faces(faces: list[list[int]]) -> dict[tuple[int, int], list[int]]:
 
 def _find_in(verts: np.ndarray,
              faces: list[list[int]],
-             tolerance: float) -> dict[int, TJunction]:
+             max_chain: int = MAX_CHAIN) -> dict[int, TJunction]:
     """One junction per face, keyed by face — a face is split once per round.
 
-    **The test is topological and dimensionless.**  M is a T-junction on the
-    open edge (a, c) of face X when it lies *between* a and c and on X's side
-    of that edge — not when it lies *on* the line.  An earlier version measured
-    the perpendicular gap from M down to a-c and rejected anything beyond a
-    threshold, which was wrong twice over: it missed junctions where the other
-    side of the surface bulges away from the line, and the threshold was an
-    absolute distance that broke with model scale.
+    **Topological, with no tolerance.**  The structure is visible in the open
+    edges alone, and every triangle involved has exactly one:
 
-        X = [a, b, c]     spans the full open edge (a, c)
-        M                 sits on an open edge reaching a or c
-                          projects strictly between them, 0 < t < 1
-                          and lies on the same side as X's apex
+              B                  X spans the open edge (a, c)
+             / \
+            /   \               a -- M1 -- M2 -- c   are open edges too,
+        a--M1-M2--c              one per bottom triangle
+            \| |/
+              K                  the spokes to K are paired, not open
 
-    **One end, not both.**  An edge subdivided twice gives (a,M1), (M1,M2),
-    (M2,c), so neither interior vertex connects straight to the far end;
-    requiring both was tried and missed that case entirely.
+    So where X sees a single edge, the other side of the surface has a *path*
+    of open edges from a to c, and its interior vertices are the ones X should
+    have been using.  The search is that walk.  Nothing in it is metric, so
+    nothing measures a distance against a threshold.
 
-    **`t` is what breaks the pattern's symmetry.**  The full edge (a,c) and its
-    halves are combinatorially identical under relabelling, so three different
-    vertices get nominated as M.  Measured on one junction of `tjunction_many`:
+    **A single interior vertex is the n=1 case, not the definition.**  An
+    earlier rule required a face holding `a` and `M` and another holding `M`
+    and `c`; on `a-M1-M2-c` neither M has both, and it found nothing.
 
-        X=170  M=285  t= 2.0000   beyond an end
-        X=838  M=283  t= 0.5000   <- the junction
-        X=849  M=281  t=-1.0000   beyond an end
+    Two dimensionless conditions do the work:
 
-    Only one lies between a and c.  Picking by smallest face index instead was
-    tried and is wrong — 170 < 838 here, and it chooses a vertex outside the
-    edge.
+    **Every vertex on the path must project strictly inside (a, c)**, `0 < t <
+    1`.  That is what breaks the symmetry: a junction has *three* open edges —
+    the spanning one and the path — and all three look alike topologically.
+    Only for the spanning edge do the others' vertices fall between its ends.
+    `t` is a ratio, not a tolerance.
 
-    **The side test needs a floor, and this is measured rather than guessed.**
-    A flush junction's offset from the line is float noise pointing in a random
-    direction: 84 of `tjunction_many`'s 150 junctions have
-    `offset . toward_apex = -5.9e-09` with an offset of 4.8e-07, so asking
-    which side they sit on rejects them at random.  Below `SIDE_FLOOR` of the
-    edge length the offset carries no direction and the side test is skipped.
+    **The path may not be the edge itself**, so the walk never steps a to c
+    directly.
 
-    **`tolerance` no longer gates the distance from the line** — it is the
-    out-of-plane limit, which is a different measurement.  A vertex can sit
-    well off the a-c *line* while still lying in X's plane, which is exactly
-    the case the gap test used to discard.
+    The bottom faces need not share a single apex.  That is the tidy case; on
+    Mandy a real two-vertex chain runs across three faces with three different
+    third corners (8738, 9164, 9526), and the walk is indifferent to it.
 
     **This assumes the spanning edge is open.**  Constructed counter-case: a
-    mesh where (a,c) was shared by two faces — so it looked properly paired —
-    while its two halves were the open edges; nothing was found.  Artificial,
-    and no real mesh has produced it, but the assumption is real.
+    mesh where (a, c) was shared by two faces — so it looked properly paired —
+    while its halves were the open ones; nothing was found.  Artificial, and no
+    real mesh has produced it, but the assumption is real.
     """
     owners = _edge_faces(faces)
-    open_edges = {edge: owning for edge, owning in owners.items()
-                  if len(owning) == 1}
+    open_edges = {edge for edge, owning in owners.items() if len(owning) == 1}
     if not open_edges:
         return {}
-
-    # For each vertex, which other vertices it shares an open edge with.
     open_at: dict[int, set[int]] = defaultdict(set)
-    for u, w in open_edges:
-        open_at[u].add(w)
-        open_at[w].add(u)
+    for low, high in open_edges:
+        open_at[low].add(high)
+        open_at[high].add(low)
 
     found: dict[int, TJunction] = {}
-    for (a, c), owning in open_edges.items():
-        face = owning[0]
+    for (a, c) in open_edges:
+        face = owners[(a, c)][0]
         if face in found:
             continue                       # already splitting this one
-        apex = [v for v in faces[face] if v not in (a, c)]
-        if not apex:
-            continue                       # degenerate face, no third corner
-        apex = apex[0]
-
-        start, along = verts[a], verts[c] - verts[a]
+        origin, along = verts[a], verts[c] - verts[a]
         length_squared = float(along @ along)
         if length_squared == 0.0:
             continue                       # degenerate edge, nothing to lie on
-        edge_length = float(np.sqrt(length_squared))
 
-        # X's plane, and the in-plane direction from the edge to its apex.
-        normal = np.cross(along, verts[apex] - start)
-        normal_length = float(np.linalg.norm(normal))
-        if normal_length == 0.0:
-            continue                       # X has no plane; nothing to be on
-        normal = normal / normal_length
-        to_apex = verts[apex] - (
-            start + (float((verts[apex] - start) @ along) / length_squared)
-            * along)
-        to_apex = to_apex / float(np.linalg.norm(to_apex))
+        def position(vertex: int) -> float:
+            return float((verts[vertex] - origin) @ along / length_squared)
 
-        for vertex in open_at[a] | open_at[c]:
-            if vertex in (a, c) or vertex == apex:
-                continue
-            if any(face == owner
-                   for end in (a, c)
-                   for owner in owners.get(
-                       (min(end, vertex), max(end, vertex)), ())):
-                continue                   # X's own corner, not a junction
+        # Walk open edges outward from `a`, admitting only vertices that fall
+        # strictly inside (a, c), until one of them reaches `c`.
+        stack = [(a, (a,))]
+        chain: tuple[int, ...] = ()
+        while stack and not chain:
+            node, path = stack.pop()
+            for nxt in open_at[node]:
+                if nxt == c:
+                    if node != a:          # never the (a, c) edge itself
+                        chain = path[1:]
+                        break
+                    continue
+                if nxt in path or len(path) > max_chain:
+                    continue
+                if not (0.0 < position(nxt) < 1.0):
+                    continue
+                stack.append((nxt, path + (nxt,)))
 
-            t = float((verts[vertex] - start) @ along / length_squared)
-            if not (0.0 < t < 1.0):
-                continue                   # beyond an end — the symmetric twin
-
-            offset = verts[vertex] - (start + t * along)
-            distance = float(np.linalg.norm(offset))
-            if abs(float(offset @ normal)) > tolerance * edge_length:
-                continue                   # out of X's plane entirely
-            if distance > MAX_GAP * edge_length:
-                continue                   # in the plane, but nowhere near
-            # The side test asks about the IN-PLANE component only.  An offset
-            # perpendicular to the plane has no side — it is neither toward the
-            # apex nor away from it — and testing the raw offset rejects it,
-            # which is wrong: a vertex displaced straight out of the plane is
-            # still between a and c.
-            in_plane = float(offset @ to_apex)
-            if (abs(in_plane) > SIDE_FLOOR * edge_length
-                    and in_plane <= 0.0):
-                continue                   # off the line and on the far side
-            found[face] = TJunction(vertex, (a, c), face, t, distance)
-            break
+        if not chain:
+            continue
+        chain = tuple(sorted(chain, key=position))
+        first = chain[0]
+        where = position(first)
+        distance = float(np.linalg.norm(
+            verts[first] - (origin + where * along)))
+        found[face] = TJunction(first, (a, c), face, where, distance, chain)
     return found
 
 
 def _split(triangle: list[int], edge: tuple[int, int],
-           vertex: int) -> list[list[int]]:
-    """Cut `triangle` at `vertex`, which lies on `edge`.
+           chain: tuple[int, ...]) -> list[list[int]]:
+    """Cut `triangle` at every vertex of `chain`, which lie along `edge`.
+
+    Returns `len(chain) + 1` triangles, fanned from the corner opposite the
+    edge.  One vertex is the common case and gives two faces; an edge
+    subdivided twice gives three.
 
     Winding is preserved by walking the triangle's own corner order and
-    inserting the vertex where the edge is traversed, rather than rebuilding
+    inserting the vertices where the edge is traversed, rather than rebuilding
     from the edge's sorted `(low, high)` form — which would silently reverse
-    half the faces.
+    half the faces.  `chain` arrives ordered from the edge's low end, so it is
+    reversed when the triangle happens to traverse the edge the other way.
     """
     for i in range(3):
         first, second = triangle[i], triangle[(i + 1) % 3]
-        if {first, second} == set(edge):
-            opposite = [v for v in triangle if v not in edge][0]
-            return [[first, vertex, opposite], [vertex, second, opposite]]
+        if {first, second} != set(edge):
+            continue
+        opposite = [v for v in triangle if v not in edge][0]
+        ordered = chain if first == edge[0] else tuple(reversed(chain))
+        walk = (first, *ordered, second)
+        return [[walk[n], walk[n + 1], opposite]
+                for n in range(len(walk) - 1)]
     raise ValueError(f"edge {edge} is not in face {triangle}")
 
 
-def find(mesh: Mesh,
-         tolerance: float = DEFAULT_TOLERANCE) -> tuple[TJunction, ...]:
+def find(mesh: Mesh) -> tuple[TJunction, ...]:
     """Every T-junction in the mesh, **one per affected face**.
 
     Detection only — for reporting, or for deciding whether repair is worth
@@ -370,12 +331,10 @@ def find(mesh: Mesh,
         raise ValueError(f"{mesh.path} has no geometry — load it first")
     verts = mesh.geometry.verts.astype(np.float64)
     faces = [list(t) for t in mesh.geometry.faces.tolist()]
-    return tuple(_find_in(verts, faces, tolerance).values())
+    return tuple(_find_in(verts, faces).values())
 
 
-def repair(mesh: Mesh,
-           tolerance: float = DEFAULT_TOLERANCE,
-           max_rounds: int = MAX_ROUNDS) -> Result:
+def repair(mesh: Mesh, max_rounds: int = MAX_ROUNDS) -> Result:
     """Split every face that ignores a vertex lying on one of its edges.
 
     Returns the input unchanged when there is nothing to do, so a caller needs
@@ -399,7 +358,7 @@ def repair(mesh: Mesh,
     rounds = 0
 
     for rounds in range(1, max_rounds + 1):
-        found = _find_in(verts, faces, tolerance)
+        found = _find_in(verts, faces)
         if not found:
             break
         rebuilt: list[list[int]] = []
@@ -408,7 +367,7 @@ def repair(mesh: Mesh,
             if junction is None:
                 rebuilt.append(triangle)
             else:
-                rebuilt.extend(_split(triangle, junction.edge, junction.vertex))
+                rebuilt.extend(_split(triangle, junction.edge, junction.chain))
         faces = rebuilt
         splits += len(found)
 

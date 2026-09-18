@@ -155,27 +155,45 @@ class TestRepair(unittest.TestCase):
         m, _ = with_tjunction()
         self.assertLess(repair(m).rounds, welder.MAX_ROUNDS)
 
-    def test_a_junction_off_the_edge_beyond_tolerance_is_ignored(self):
-        """A vertex merely passing near an edge must not split it."""
-        verts = [list(v) for v in TETRA_VERTS]
-        verts.append([0.5, 0.5, 0.2])          # near edge (1,2), well off it
-        faces = [list(f) for f in TETRA_FACES]
-        faces[3] = [1, 4, 3]
-        faces.append([4, 2, 3])
-        m = mesh(verts, faces)
-        self.assertEqual(find(m, tolerance=1e-6), ())
+    def test_a_junction_off_the_line_is_still_a_junction(self):
+        """**This reverses an earlier test**, and the reversal is the point.
 
-    def test_tolerance_is_adjustable(self):
-        """The default is not calibrated on real data; a caller must be able
-        to widen it for junctions arriving from a boolean or a decimation."""
+        The old version asserted that a vertex 0.2 off the edge "merely passes
+        near" it and must not split. That was the gap-test premise. A real
+        T-junction's M is often well off the line — the other side of the
+        surface bulges — and Mandy carries one at **half an edge-length** away
+        whose L and R plainly share an edge.
+
+        What makes it a junction is structural: L and R are X's counterparts
+        across that edge, which they betray by sharing an edge with each other.
+        How far M sits from the line does not enter into it.
+        """
         verts = [list(v) for v in TETRA_VERTS]
-        verts.append([0.5, 0.5, 0.001])        # 1 micron off the edge
+        verts.append([0.5, 0.5, 0.2])          # off the line, structurally M
         faces = [list(f) for f in TETRA_FACES]
         faces[3] = [1, 4, 3]
         faces.append([4, 2, 3])
         m = mesh(verts, faces)
-        self.assertEqual(find(m, tolerance=1e-6), ())
-        self.assertEqual(len(find(m, tolerance=1e-2)), 1)
+        found = find(m)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].vertex, 4)
+
+    def test_a_vertex_with_no_counterpart_pair_is_not_a_junction(self):
+        """The condition that replaces the tolerance: L and R must share an
+        EDGE, not merely a vertex.
+
+        Measured on `tjunction_many` — relaxing this to "share a vertex"
+        admitted three faces whose M sat 1.367 mm from a 3.4 mm edge, and
+        splitting at them left 22 non-manifold edges on a clean mesh. In each,
+        L and R met at M alone.
+        """
+        # A tetrahedron with a loose vertex near edge (1,2) but no face
+        # structure joining it: nothing shares an edge with anything.
+        verts = [list(v) for v in TETRA_VERTS]
+        verts.append([0.5, 0.5, 0.0])
+        faces = [list(f) for f in TETRA_FACES]
+        m = mesh(verts, faces)
+        self.assertEqual(find(m), ())
 
     def test_unloaded_raises(self):
         with self.assertRaises(ValueError):
@@ -274,29 +292,41 @@ class TestSeveralJunctionsOnOneFace(unittest.TestCase):
                          "triangles touching at points")
         self.assertGreater(scanner.scan(m).open_edges, 0)
 
-    def test_find_reports_a_lower_bound_not_a_total(self):
-        """`find` returns one junction per face, so a doubly-subdivided edge
-        reports 1 of 2 — and which one is arbitrary, since the search breaks
-        on the first match while iterating a set."""
-        m, _ = self.sphere_with_two_on_one_edge()
-        self.assertEqual(len(find(m)), 1,
-                         "documented behaviour: one per affected face")
+    def test_both_vertices_are_reported_in_one_chain(self):
+        """One entry for the face, carrying **both** vertices.
 
-    def test_repair_still_finds_both(self):
-        """The round loop is what recovers: splitting changes the edge map, so
-        the second junction is found on the next pass."""
+        An earlier version found one of the two and left the other for the
+        next round — and *which* one was arbitrary, since the search broke on
+        the first match while iterating a set. The chain walk follows the open
+        edges from one end of the spanning edge to the other, so it collects
+        every interior vertex in a single pass.
+        """
+        m, (first, second) = self.sphere_with_two_on_one_edge()
+        found = find(m)
+        self.assertEqual(len(found), 1, "one entry per affected face")
+        self.assertEqual(set(found[0].chain), {first, second})
+
+    def test_the_chain_is_ordered_along_the_edge(self):
+        """`_split` walks the triangle's own corner order, so the chain has to
+        arrive sorted by position or the fan would cross itself."""
+        m, _ = self.sphere_with_two_on_one_edge()
+        chain = find(m)[0].chain
+        verts = m.geometry.verts.astype(float)
+        low, high = find(m)[0].edge
+        along = verts[high] - verts[low]
+        positions = [float((verts[v] - verts[low]) @ along / (along @ along))
+                     for v in chain]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_one_split_makes_three_faces(self):
+        """n interior vertices cost n+1 faces, not 2 — and it is one split,
+        not two. The old mechanism needed a second round to reach the same
+        face count."""
         m, _ = self.sphere_with_two_on_one_edge()
         result = repair(m)
-        self.assertEqual(result.splits, 2)
-        self.assertTrue(scanner.scan(result.mesh).is_clean)
+        self.assertEqual(result.splits, 1)
         self.assertEqual(result.mesh.triangles, m.triangles + 2)
-
-    def test_rounds_is_the_signal_that_this_happened(self):
-        """`tjunction_many` converges in 2 rounds; a face carrying more than
-        one junction needs 3. That makes `rounds` the cheap way for a caller
-        to know `find`'s count was low."""
-        m, _ = self.sphere_with_two_on_one_edge()
-        self.assertGreater(repair(m).rounds, 2)
+        self.assertTrue(scanner.scan(result.mesh).is_clean)
 
     def test_no_vertex_is_lost(self):
         m, _ = self.sphere_with_two_on_one_edge()
