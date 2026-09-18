@@ -45,6 +45,7 @@ class Indicator(Enum):
     FAILED = 'failed'                # transient failure; delete to retry
     UNREPAIRED = 'unrepaired'        # non-manifold edges remained
     OPEN_EDGES = 'open_edges'        # nm clean, open edges remained
+    DESTROYED = 'destroyed'          # the repair deleted geometry
     TIMED_OUT = 'timed_out'          # killed by the watchdog
     UNDECIMATED = 'undecimated'      # every decimator failed; still oversized
 
@@ -53,11 +54,28 @@ class Indicator(Enum):
 #: absent: it sits beside a *successful* output as evidence that the repair
 #: moved the bounding box, so treating it as an indicator would skip files that
 #: actually worked.
+#:
+#: **`DESTROYED` is distinct from `FAILED`, and the difference is retryability.**
+#: `FAILED` means a transient problem — delete the marker and the next run tries
+#: again.  A destructive repair is not transient: the same input gives the same
+#: result, so retrying wastes the time and produces the same broken mesh.
+#:
+#: It is also distinct from `UNREPAIRED` and `OPEN_EDGES`, which say what
+#: *remained*.  This one says what was *lost*, and that changes which file
+#: belongs in the marker: a half-model is worse than an unrepaired one, so the
+#: marker carries the source rather than the repair.
+#:
+#: Measured on a real file (2026-09-17): decimating Mandy with
+#: `fast_simplification` and running the repair sequence produced a mesh at
+#: **46.27% of the input volume** — PyMeshFix found the surface non-orientable
+#: and cut two thirds of it away.  Every topological check called the result
+#: clean, because a half model is a perfectly valid closed surface.
 _OUTPUT_MARKERS: tuple[tuple[str, Indicator], ...] = (
     ('.broken.stl', Indicator.BROKEN),
     ('.failed.stl', Indicator.FAILED),
     ('.unrepaired.stl', Indicator.UNREPAIRED),
     ('.open.stl', Indicator.OPEN_EDGES),
+    ('.destroyed.stl', Indicator.DESTROYED),
     ('.timeout.stl', Indicator.TIMED_OUT),
     ('.undecimated.stl', Indicator.UNDECIMATED),
 )

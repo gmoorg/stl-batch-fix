@@ -12,12 +12,13 @@ tests do not catch.
 Decisions are grouped by topic. Numbers are global and stable across topics, so
 a commit message citing D7 keeps meaning D7 when a new topic is added.
 
-**Status (2026-09-17): twelve modules in `libs/`, 402 tests, all green, no
+**Status (2026-09-17): thirteen modules in `libs/`, 427 tests, all green, no
 skips.**
 `stl_batch_fix.py` is untouched and still frozen. Built so far: `pool`,
 `indicators`, `blender`, `mesh_io`, `scanner`, `splitter`, `meshfix`,
-`decimator`, `converter`, `welder`, `repairer`. Still to build: **the
-orchestration** — the step that decides what to do with a `repairer.Result`.
+`decimator`, `converter`, `welder`, `repairer`, `processor`. Still to build:
+**the batch walk** — the step that feeds files to `processor` through `pool`
+and reports across a whole collection.
 
 Raw session narratives are archived under `archive/` when they grow past
 usefulness; this file keeps the conclusions.
@@ -3346,6 +3347,66 @@ is not stated anywhere in the module.
 
 The third now looks best and was not on the list before this discussion. Not
 yet decided.
+
+---
+
+### D27 — `processor` is the module that judges, and `DESTROYED` is a new indicator
+
+**2026-09-17.** `libs/processor.py`, 19 tests. Everything below it reports
+without an opinion — `repairer.ok` says the sequence ran, not that the mesh is
+good — so one module has to turn the measurements into an `Indicator`.
+
+    decimate -> repair -> scan -> decide -> write
+
+**The output is written only when the result is provably clean** (the user's
+rule): `scanner.scan().is_clean`, no non-manifold edges and no open edges.
+Anything else writes a marker and leaves the output path empty.
+
+#### `DESTROYED` — a twelfth indicator, because none of the eleven fit
+
+The user's correction: the existing indicators were nearly right, and using
+`FAILED` for a destructive repair was wrong.
+
+| existing | says |
+|---|---|
+| `FAILED` | **transient** — delete the marker and the next run retries |
+| `UNREPAIRED`, `OPEN_EDGES` | what **remained** |
+| `UNDECIMATED` | still oversized |
+
+A destructive repair is none of those. It is not transient — the same input
+gives the same result, so retrying wastes the time and produces the same broken
+mesh — and it describes what was **lost**, not what remained. `DESTROYED`, with
+`.destroyed.stl`, added to `indicators` where the vocabulary lives.
+
+**And it changes which mesh the marker carries**, which is the other half of
+the user's answer:
+
+| outcome | marker holds | why |
+|---|---|---|
+| `DESTROYED` | **the source** | a half model is worse than an unrepaired one |
+| `UNREPAIRED`, `OPEN_EDGES` | **the repaired mesh** | decimated, within budget, nothing lost |
+| `UNDECIMATED`, `FAILED` | the source | there is no useful repair to keep |
+
+#### The ordering inside `_decide` is load-bearing
+
+**Destruction is tested before cleanliness.** A half model scores `nm=0
+open=0` — it is a perfectly valid closed surface, just not the one that went
+in — so asking "is it clean" first answers wrongly with total confidence.
+
+That is not hypothetical: decimating Mandy ourselves produced a repair at
+**46.27%** of volume that every topological check called clean, because
+PyMeshFix cut a non-orientable surface apart and kept one piece. Verified
+end to end — the processor marks that file `destroyed` and falls back to the
+source, while Bambu's decimation of the same model passes as `process` at
+99.99%.
+
+`MIN_VOLUME_KEPT = 0.90`, and the gap either side is wide rather than fine:
+sound repairs measure 99.99%, 99.99% and 95.35%; the destroyed one 46.27%.
+The known exception is a `doubles`-style input, where two coincident copies
+legitimately halve and would be marked destroyed — the safe direction to be
+wrong in, and no real model in the collection has the defect.
+
+`_decide` is pure, so every judgement is tested without a filesystem.
 
 ---
 
