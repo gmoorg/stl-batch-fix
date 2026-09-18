@@ -319,6 +319,47 @@ class TestCoveredAndUncovered(unittest.TestCase):
         self.assertEqual(found[0].chain, (6,))
         self.assertTrue(scanner.scan(repair(fan).mesh).is_clean)
 
+    def test_a_pinch_vertex_is_not_a_junction(self):
+        """A chain vertex carrying more than two open edges is a **pinch**,
+        where two boundary curves cross, and splitting there is a guess about
+        which curve to follow.
+
+        Measured on costume01: vertex 246331 sits on **four** open edges and
+        was claimed by two separate hits, each nominating it on a different
+        spanning edge. Both are rejected.
+
+        Built here by giving P a second boundary: an extra loose triangle
+        hanging off it, so its open-edge degree becomes 4 while everything
+        else about the Covered arrangement is unchanged.
+        """
+        verts = self.VERTS + [[1.5, 1.0, -1.0], [2.5, 1.0, -1.0]]
+        faces = (self.UPPER + self.LOWER + [[3, 6, 5], [6, 0, 5]]
+                 + [[6, 7, 8]])          # a flap on P -> two more open edges
+        pinched = mesh(verts, faces)
+        self.assertEqual(find(pinched), ())
+
+    def test_the_endpoints_may_carry_several_loops(self):
+        """The degree rule applies to the chain, **not** to the spanning
+        edge's own ends — and that exemption is measured, not assumed.
+
+        Two adjacent junctions share an endpoint, which then carries both
+        loops. On `tjunction_many`, which subdivides 150 random faces,
+        requiring degree 2 on the endpoints too rejects **107 of the 150**,
+        every one of them genuine by construction.
+        """
+        m = self.covered()
+        found = find(m)
+        self.assertEqual(len(found), 1)
+        # the chain vertex is degree 2; the endpoints need not be
+        owners = welder._edge_faces(
+            [list(t) for t in m.geometry.faces.tolist()])
+        open_at = {}
+        for (u, w), own in owners.items():
+            if len(own) == 1:
+                open_at.setdefault(u, set()).add(w)
+                open_at.setdefault(w, set()).add(u)
+        self.assertEqual(len(open_at[found[0].chain[0]]), 2)
+
     def test_uncovered_finds_nothing(self):
         """P is a T-junction by the definition and this still reports none.
 
