@@ -256,26 +256,31 @@ class TestManyJunctions(unittest.TestCase):
 
 
 class TestCoveredAndUncovered(unittest.TestCase):
-    """The two arrangements from the user's sketches, and why one is a
-    T-junction and the other is a hole.
+    """The two arrangements from the user's sketches — **one rule, not two.**
 
     Both start from a closed square bipyramid — equator A(0) E(1) D(2) C(3),
     apexes B(4) above and K(5) below — so everything is paired until one face
     is changed.
 
     **Covered**: the face below A-C is subdivided at P, which sits on the line.
-    The far side of the edge is one surface walked across, so splitting X at P
-    closes the hole.
+    An open-edge path A -> P -> C exists and its faces form a strip, so
+    splitting X at P closes the hole.
 
-    **Uncovered**: that face is removed and a patch is attached along E-D
-    instead. P still lies on the A-C line and X still ignores it, so it is a
-    T-junction *by the definition* — but splitting X at P would turn one open
-    edge into two, because nothing pairs A-P or P-C. It is a hole, and hole
-    filling is PyMeshFix's job.
+    **Uncovered**: that face is removed and a patch attached along E-D instead.
+    P still lies on the A-C line and X still ignores it, so it is a T-junction
+    *by the definition* — but there is no open-edge path from A to C through
+    it. Splitting X at P would turn one open edge into two, because nothing
+    pairs A-P or P-C. It is a hole, and hole filling is PyMeshFix's job.
 
-    What separates them is the **strip** test: in Covered the chain's faces
-    share an edge with each other; in Uncovered they meet at a single vertex,
-    on opposite sides of the gap.
+    **The Uncovered rule is the Covered rule**, which was checked rather than
+    assumed: a variant built as a three-face fan under A-C rather than two
+    faces gives the same open edges (A-C, A-P, C-P), the same single hit, and
+    the same `open=0 nm=0` repair. How the far side is triangulated does not
+    matter; whether the path exists does.
+
+    The discriminator is the **strip** test: in Covered the chain's faces share
+    an edge with each other; in Uncovered they meet at a single vertex, on
+    opposite sides of the gap.
     """
 
     VERTS = [[0, 0, 0], [1, -1, 0], [2, -1, 0], [3, 0, 0],
@@ -298,6 +303,21 @@ class TestCoveredAndUncovered(unittest.TestCase):
     def test_covered_repairs_to_a_closed_solid(self):
         result = repair(self.covered())
         self.assertTrue(scanner.scan(result.mesh).is_clean)
+
+    def test_the_far_side_may_be_triangulated_any_way(self):
+        """**The Uncovered rule is the Covered rule.**
+
+        The same region under A-C, covered by a fan of two faces meeting at P
+        rather than the two the `covered` fixture uses. Same open edges, same
+        hit, same repair — because what matters is whether the open-edge path
+        from A to C exists, not how the far side happens to be cut up.
+        """
+        fan = mesh(self.VERTS,
+                   self.UPPER + self.LOWER + [[0, 6, 5], [6, 3, 5]])
+        found = find(fan)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].chain, (6,))
+        self.assertTrue(scanner.scan(repair(fan).mesh).is_clean)
 
     def test_uncovered_finds_nothing(self):
         """P is a T-junction by the definition and this still reports none.
