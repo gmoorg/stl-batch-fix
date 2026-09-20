@@ -1,34 +1,9 @@
-"""Read what a mesh file says about itself, without loading the mesh.
+"""Probe, load, and write meshes.
 
-Everything here answers a question from the header, or by streaming — nothing
-welds a mesh or builds connectivity.  That is deliberate: these answers decide
-whether a file is queued at all and in what order, so they must be cheap enough
-to ask about every file in a collection before any work starts.
-
-    probe(path, destination) -> Mesh(path, destination, kind, triangles, ...)
-
-The one rule worth stating up front: **an unknown count is None, never zero.**
-An ASCII STL has no triangle count in its header and an OBJ has no header at
-all, so the honest answer is "ask Blender". Returning 0 would make those files
-sort as the cheapest work in the queue when they may be the most expensive.
-
-Geometry — the expensive half — lives behind an explicit step:
-
-    loaded = load(mesh)            # a NEW Mesh, with .geometry attached
-    write(loaded)                  # to its own destination
-
-`Mesh` is frozen and every operation returns a new one, so a mesh in a queue
-can never quietly have become a 400 MB object while it sat there.  The two
-sizes are worth keeping in mind: a probed `Mesh` is a couple of hundred bytes,
-a loaded one is the whole welded mesh in RAM (measured 383 MB for 2.55M
-triangles).  That is the reason loading is a separate call and not a property
-that quietly happens on first access — a worker's memory budget is decided
-before it starts, and an implicit load would blow it from inside an attribute
-lookup.
-
-One writer, deliberately.  `write` takes a `Mesh`, so a caller never assembles
-a header itself, and there is exactly one place that knows an STL facet is 50
-bytes with a real normal in the first 12.
+`probe` returns cheap metadata; an unknown triangle count is None, never zero.
+`load` returns a new frozen `Mesh` carrying welded geometry. `write` writes its
+destination, and PLY helpers preserve the vertex table at the Blender boundary.
+Loading is explicit because it materially changes memory use.
 """
 
 from __future__ import annotations
@@ -145,25 +120,11 @@ class Mesh:
 
 
 def kind(path: str) -> Kind:
-    """Classify `path` by content, falling back to extension for OBJ.
+    """Classify by content, using the extension only for OBJ.
 
-    An OBJ is identified by name — its content has no reliable magic, and
-    Blender validates it at import.  STL is sniffed, because the extension says
-    nothing about the encoding.
-
-    **The ASCII tiebreaker matters.** Some exporters (SolidWorks, older Slic3r)
-    write a `solid <name>` text header onto a *binary* file, so "starts with
-    solid" is not enough.  When the header looks like text but the binary
-    triangle count is consistent with the file size, the file is binary.
-
-    Known limit, deliberately kept: only the first 256 bytes are read, so a
-    valid ASCII STL whose solid name runs past ~240 characters before the first
-    `facet normal` is misread as binary.  The failure is one-directional — such
-    a file is then parsed as binary, where the count field is garbage and the
-    size cross-check rejects it as invalid rather than repairing wrong bytes.
-    So the cost is a false "invalid" report on a file nobody produces, against
-    a larger read on every file in a collection.  Revisit only if a real file
-    is ever reported invalid with a long solid name.
+    A binary STL can start with `solid`, so its header count and file size break
+    that tie. Only 256 bytes are sniffed: an unusually long ASCII solid name may
+    be rejected as invalid, rather than silently parsed as binary.
     """
     if path.lower().endswith('.obj'):
         return Kind.OBJ
@@ -334,22 +295,10 @@ def load(mesh: Mesh) -> Mesh:
 
 
 def write(mesh: Mesh) -> None:
-    """Write a loaded `mesh` to its own destination, as a binary STL.
+    """Write loaded geometry as binary STL to `mesh.destination`.
 
-    The one writer.  Every step that produces geometry ends here, so there is a
-    single place that knows the byte layout.
-
-    There is no `path` argument: the mesh carries its destination, so a caller
-    cannot write it somewhere the indicator scan will not look for its markers.
-
-    The normals used to be left zeroed, on the reasoning that slicers recompute
-    them from the winding.  Slicers do, but viewers do not all agree: given a
-    zero normal some fall back to the winding and some to a guess, so the same
-    file could render inside-out in one program and correctly in another.  That
-    made a genuine comparison between two outputs impossible — one file with
-    normals and one without are not being drawn the same way.  Computing them
-    is a cross product over the face array, negligible beside the repair that
-    produced the mesh.
+    There is no path override: output and marker names must agree. Face normals
+    are computed from winding; degenerate faces receive zero normals.
     """
     if mesh.geometry is None:
         raise ValueError(f"{mesh.path} has no geometry to write — load it first")
@@ -397,27 +346,11 @@ _PLY_HEADER_END = b'end_header\n'
 
 
 def write_ply(mesh: Mesh, path: str) -> None:
-    """Write a loaded `mesh` to `path` as a binary little-endian PLY.
+    """Write a narrow binary little-endian PLY for Blender scratch work.
 
-    **For the Blender scratch boundary only.**  PLY is never a deliverable —
-    Bambu Studio's import dialog does not list it — and never an input format;
-    it exists so a mesh can cross into Blender and back *with its vertex table
-    intact*.
-
-    That is a correctness matter, not a convenience.  STL stores no vertex
-    sharing, so a mesh written as STL arrives as loose triangles and has to be
-    welded back by proximity — and Blender's `remove_doubles` did that at
-    0.01 mm absolute, which was measured deleting sub-millimetre detail: a
-    0.2 mm bead on a 20 mm sphere lost 22 of its 389 vertices, a 0.1 mm bead
-    lost 49, while the large sphere was untouched.  PLY carries the table, so
-    nothing is reconstructed and nothing is guessed.
-
-    **Takes an explicit `path`, unlike `write`.**  `write` deliberately has no
-    path argument, because its output is the deliverable and must land where
-    the indicator scan looks for markers.  This writes a temp file that is read
-    back moments later and deleted, so it has no destination in that sense —
-    binding it to `mesh.destination` would let a scratch file be mistaken for a
-    result.
+    Unlike deliverable STL, PLY preserves the welded vertex table across the
+    subprocess boundary. `path` is explicit because this is a temporary file,
+    not `mesh.destination`.
     """
     if mesh.geometry is None:
         raise ValueError(f"{mesh.path} has no geometry to write — load it first")
@@ -454,23 +387,10 @@ def write_ply(mesh: Mesh, path: str) -> None:
 
 
 def read_ply(path: str, mesh: Mesh) -> Mesh:
-    """Read a binary PLY at `path` and return `mesh` carrying that geometry.
+    """Read Blender's binary PLY and attach its geometry to `mesh`.
 
-    The counterpart of `write_ply`, and it takes the `Mesh` whose identity the
-    result should have — normally the part that was sent to Blender — so the
-    repaired geometry comes back attached to the right path and destination
-    rather than to a temp file's.
-
-    **No welding step.**  `load` has to weld, because a binary STL stores each
-    triangle's corners separately and the sharing must be recovered (measured:
-    exactly 6.0x duplication).  A PLY already has the table, so the faces index
-    straight into the vertices as written — which is the whole reason this
-    format is used here.
-
-    Raises `ValueError` on anything that is not the narrow dialect `write_ply`
-    emits and Blender's exporter produces.  That is deliberate: a silent
-    fallback would turn an unreadable scratch file into a plausible-looking
-    mesh, and this sits in the middle of a repair.
+    The vertex table is preserved, so no welding is needed. Reject other PLY
+    dialects instead of guessing inside a repair round trip.
     """
     with open(path, 'rb') as f:
         data = f.read()

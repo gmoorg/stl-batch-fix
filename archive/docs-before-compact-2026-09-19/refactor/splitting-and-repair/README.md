@@ -1,0 +1,36 @@
+# Splitting and debris — discussed 2026-09-15, partly settled
+
+Read [context](overview.md) when needed. Entries retain their original chronology; later corrections can supersede earlier proposals.
+
+**Current lookup:** [D22](d22.md) covers edge-connected shells, [D24](d24.md) builds the repair sequence, [D26](d26.md) gives its current orientation order, and [D27](d27.md) defines the outcome decision. Automatic seam splitting remains out of the default path. The early “split upfront” note was [reopened](correction-the-split-upfront-decision-was-taken-against-existing.md); “not yet measured” and “pending verification” were answered later. The welder's relative-tolerance note describes an intermediate design; see [current state](../current-state.md) and the [status map](../history-status.md).
+
+- [Settled — the split moves from recovery to planning](settled-the-split-moves-from-recovery-to-planning.md)
+- [Idea, not yet designed — debris by bounding box, not face count](idea-not-yet-designed-debris-by-bounding-box-not-face-count.md)
+- [Measured — `scanner.shells()` is too slow, and that is my bug](measured-scanner-shells-is-too-slow-and-that-is-my-bug.md)
+- [Not yet measured](not-yet-measured.md)
+- [Scratch files and interrupts (superseded by D21)](scratch-files-and-interrupts-superseded-by-d21.md)
+- [Decided — drop the Blender decimation rung; mark the failure instead](decided-drop-the-blender-decimation-rung-mark-the-failure-instea.md)
+- [Idea — nm ratio as a debris signal (unmeasurable from current logs)](idea-nm-ratio-as-a-debris-signal-unmeasurable-from-current-logs.md)
+- [Discussion point — measured part data, and what it says about the drop rule](discussion-point-measured-part-data-and-what-it-says-about-the-d.md)
+- [Discussion point — a flawless small shell may still be a print hazard](discussion-point-a-flawless-small-shell-may-still-be-a-print-haz.md)
+- [D18 — Self-edges are not winding seams (and what that says about oracles)](d18.md)
+- [Measured — seam frequency across the collection (2026-09-16)](measured-seam-frequency-across-the-collection-2026-09-16.md)
+- [Pending verification — two models the user will restore](pending-verification-two-models-the-user-will-restore.md)
+- [CORRECTION — the split-upfront decision was taken against existing evidence](correction-the-split-upfront-decision-was-taken-against-existing.md)
+- [Verified on the restored Mandy — the detector is correct, and the seam is not the point](verified-on-the-restored-mandy-the-detector-is-correct-and-the-s.md)
+- [Correction — `Done/` is not a pipeline output tree](correction-done-is-not-a-pipeline-output-tree.md)
+- [D19 — Done: the Blender decimation rung is removed](d19.md)
+- [D20 — `shells()` uses scipy; a pure-numpy replacement was tried and rejected](d20.md)
+- [D21 — Intermediates live in the destination folder and die when the next step commits](d21.md)
+- [D22 — Shells are edge-connected, not vertex-connected](d22.md)
+- [Decided — scan the merged mesh as the final step](decided-scan-the-merged-mesh-as-the-final-step.md)
+- [D23 — `Mesh` carries its destination, and a split gives each part its own](d23.md)
+- [D24 — `repairer` is the sequence; two reporting measures had to be redefined](d24.md)
+- [D25 — The pipeline is tested against the control, and that found a real bug](d25.md)
+- [D26 — Orientation is unconditional, runs once, and after the split](d26.md)
+- [The T-junction pattern is topological, but topology alone is not sufficient](the-t-junction-pattern-is-topological-but-topology-alone-is-not.md)
+- [D27 — `processor` is the module that judges, and `DESTROYED` is a new indicator](d27.md)
+- [OPEN — our decimation makes a mesh PyMeshFix will not repair](open-our-decimation-makes-a-mesh-pymeshfix-will-not-repair.md)
+- [costume01 is a broken source, and should stop being the benchmark](costume01-is-a-broken-source-and-should-stop-being-the-benchmark.md)
+- [FIXED — `welder`'s tolerance is now relative to the edge length](fixed-welder-s-tolerance-is-now-relative-to-the-edge-length.md)
+- [OPEN BUG — absolute tolerances break with model scale (found 2026-09-17)](open-bug-absolute-tolerances-break-with-model-scale-found-2026-0.md)

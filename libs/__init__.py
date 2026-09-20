@@ -1,6 +1,5 @@
-"""Reusable modules with no knowledge of this project's domain.
+"""Modules for the in-progress STL refactor.
 
-Nothing in here may import the pipeline, mention meshes, or assume what the
-work items are.  A module earns its place in `libs/` by being usable in an
-unrelated program without edits.
+Only `pool` and `blender.Runner` are intended to be domain independent. The
+other modules own mesh data, operations, or pipeline decisions.
 """

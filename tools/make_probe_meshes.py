@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Regenerate the single-defect probe meshes used to survey repair behaviour.
 
-    .venv/bin/python tools/make_probe_meshes.py [outdir]
+    ../.venv/bin/python tools/make_probe_meshes.py [outdir]
 
 Default outdir is /mnt/sda2/STL/_validate, which is inside the collection and
 therefore **deletable** — that is why this generator exists. The meshes it
 writes are disposable; this file is the durable artefact.
 
-Distinct from `make_fixtures.py`, which builds the committed fixtures
-`test_pipeline.py` depends on. These are for answering "does anything
+Distinct from `tests/tests/make_fixtures.py`, which builds the committed fixtures
+`tests/tests/test_pipeline.py` depends on. These are for answering "does anything
 downstream actually care about defect X" by hand: load them in a slicer, upload
 them to an online repair service, compare against the control.
 

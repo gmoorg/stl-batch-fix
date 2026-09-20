@@ -1,43 +1,9 @@
-"""Count a mesh's topological defects, from the geometry in memory.
+"""Measure topology from a loaded mesh's vertex and face arrays.
 
-    scan(mesh)                  -> Scan(open_edges, non_manifold, ...)
-    open_loops(mesh)            -> the open boundaries, measured
-    winding_seams(mesh)         -> where the surface reverses
-    shells(mesh)                -> connected components, largest first
-
-Every question here is answered from the same edge map, which is why they are
-one module rather than four: building it is the work, and the old code built it
-up to four times for one mesh.
-
-**Why this runs so often.** A defect count is the pipeline's decision variable,
-not a report — it decides whether a repair is needed, whether one worked, and
-whether a file may be written out as finished.  The old pipeline scanned after
-decimation, after Blender, and twice around PyMeshFix: eight call sites, each
-re-reading the file from disk and rebuilding the map.
-
-**Nothing is trusted to self-report.**  PyMeshFix and Blender both claim
-success on meshes that still have defects, so a claim is only ever a hint; the
-scan is what decides.  That distrust is load-bearing and predates this module.
-
-**The counting rule**, in one place so it cannot drift between callers:
-
-    an edge used by exactly 1 face   is an OPEN edge (a hole's boundary)
-    an edge used by exactly 2 faces  is sound
-    an edge used by 3 or more faces  is NON-MANIFOLD (the surface branches)
-
-**On the old byte-level implementation.**  `_build_edge_counts` worked on the
-raw 50-byte STL records and packed each vertex into a 192-bit int in a
-per-triangle Python loop.  That was not gratuitous: an unwelded STL has no
-vertex sharing, so identity had to be recovered from coordinate bytes, and one
-int per edge beat seven tuple/float objects five-fold on peak RSS.  With welded
-faces the whole problem is gone — the indices *are* the identity — so this is
-vectorised numpy, and the 192-bit keys, the `-0.0` folding and the
-`_LARGE_MESH_TRI_LIMIT` ceiling all go with it.
-
-**That ceiling mattered.**  `scan_mesh_errors` returned `(-1, -1)` above two
-million triangles, and `_post_verify` translated that into "UNVERIFIED" — on
-exactly the meshes that are both hardest to scan and most likely to be broken.
-There is no ceiling here.
+An edge used by one face is open; one used by three or more is non-manifold.
+`scan` counts defects, `winding_seams` finds opposing face directions, and
+`shells` returns edge-connected components. A missing geometry array raises
+instead of producing an unverified zero count. No size ceiling is imposed.
 """
 
 from __future__ import annotations
@@ -157,20 +123,9 @@ def scan(mesh: Mesh) -> Scan:
 
 
 def open_loops(mesh: Mesh) -> tuple[Loop, ...]:
-    """Group the open edges into boundaries and measure each one.
+    """Return open-edge boundary components, largest diameter first.
 
-    Returned largest first.  A caller decides what to do with the sizes; this
-    only measures them.
-
-    The measurement exists because the pipeline's success condition used to be
-    `open == 0`, a mathematical standard rather than a manufacturing one.  On
-    one model that cost the head and torso: four open edges spanning 0.01 mm
-    triggered a Blender repair, which closed the pinhole and punched 28 new
-    holes, which triggered PyMeshFix again, which finished at 44.94% of the
-    original volume — cut ragged at the waist.  Every hole in that cascade was
-    smaller than a third of the finest layer the collection prints at, so none
-    of them could reach the plate.  The repair destroyed half a model to fix
-    nothing that existed at print scale.
+    This measures hole span without deciding printability or whether to repair.
     """
     _require_geometry(mesh)
     verts, faces = mesh.geometry.verts, mesh.geometry.faces
@@ -238,25 +193,10 @@ def open_loops_are_printable(mesh: Mesh, min_layer: float) -> bool:
 
 
 def winding_seams(mesh: Mesh) -> tuple[int, int]:
-    """Find edges where two faces disagree about which way the surface faces.
+    """Count edges whose two faces traverse them in the same direction.
 
-    Returns `(seam_edges, closed_loops)`.
-
-    On a consistently wound surface the two faces sharing an edge traverse it
-    in *opposite* directions.  Traversing it the same way means the surface
-    reverses there — and when those edges form closed loops, they bound two
-    regions whose winding cannot be reconciled: hair over a scalp, cloth over a
-    body, a separately sculpted part fused to its host.
-
-    **The loop count is what matters, not the edge count.**  Measured on one
-    model:
-
-        head deleted by PyMeshFix    40 seam edges, 7 closed loops, 0 loose ends
-        renders and prints fine       5 seam edges, 0 closed loops, 4 loose ends
-
-    A few seam edges with dangling ends are local noise that stops on its own.
-    A closed loop encircles something, and PyMeshFix will delete what it
-    encircles unless the mesh is split at the seam first.
+    Return `(seam_edges, closed_loops)`. A closed loop marks a winding boundary,
+    but does not by itself predict whether PyMeshFix will damage the mesh.
     """
     edges = seam_edges(mesh)
     if len(edges) == 0:
@@ -265,12 +205,9 @@ def winding_seams(mesh: Mesh) -> tuple[int, int]:
 
 
 def _count_closed_loops(seam: np.ndarray) -> int:
-    """How many of these seam edges form closed rings.
+    """Count seam components whose every vertex has degree two.
 
-    A closed loop is a connected run where every vertex has exactly two seam
-    edges — no ends, no branches.  That is the distinction that matters: a few
-    seam edges with dangling ends are local noise that stops on its own, while
-    a closed loop encircles a region PyMeshFix will delete.
+    Open chains and branched components are not closed loops.
     """
     adjacency: dict[int, list[int]] = {}
     for a, b in seam:
@@ -347,7 +284,7 @@ def seam_edges(mesh: Mesh) -> np.ndarray:
     # strongest "split this mesh" signal, fired by zero-area triangles.
     #
     # The original `find_winding_seams` has the same flaw, so the differential
-    # test in `test_scanner.py` cannot catch it — agreement is not correctness
+    # test in `tests/tests/test_scanner.py` cannot catch it — agreement is not correctness
     # when both sides share a mistake.  Degenerate faces are counted by
     # `scan().degenerate`, which is where they belong.
     found = found[found[:, 0] != found[:, 1]]
@@ -355,28 +292,10 @@ def seam_edges(mesh: Mesh) -> np.ndarray:
 
 
 def diagonal(mesh: Mesh) -> float:
-    """Length of the bounding box's diagonal — one number for "how big".
+    """Return the loaded mesh's bounding-box diagonal, or 0 if empty.
 
-    The geometry-level twin of `mesh_io.diagonal`, which answers the same
-    question from a *path* by streaming the file.  This one works on a loaded
-    mesh, because the modules that need it — `welder`, `repairer` — must not
-    touch the filesystem.
-
-    **This is what a distance tolerance should be a fraction of.**  A fixed
-    millimetre constant means two different things on a 4 mm part and a 200 mm
-    one, and that is not a theoretical concern here: `welder`'s absolute
-    `1e-6` was measured missing T-junctions at radii 50, 100 and 200 while
-    finding them at 1, 10 and 500.
-
-    The reason is float32.  Measured on the same T-junction at seven radii, the
-    *absolute* error of an edge midpoint grows with the model — 3.0e-08 at
-    r=1, 7.6e-06 at r=200 — while the **relative** error is flat at 2.4e-07.
-    One relative number therefore works at every scale where no absolute one
-    can.  (r=10, 500 and 1000 measure exactly 0.0, which is the midpoint
-    happening to land on a representable float; luck, not a pattern.)
-
-    Returns 0.0 for an empty mesh, so a caller scaling by this gets a zero
-    tolerance rather than a crash — an empty mesh has nothing to measure.
+    This is the in-memory counterpart of `mesh_io.diagonal(path)`. Relative
+    geometric tolerances can use it; absolute thresholds vary with model scale.
     """
     _require_geometry(mesh)
     verts = mesh.geometry.verts
@@ -388,35 +307,10 @@ def diagonal(mesh: Mesh) -> float:
 
 
 def volume(mesh: Mesh) -> float:
-    """Signed volume enclosed by the mesh.
+    """Return signed enclosed volume using the divergence theorem.
 
-    The divergence-theorem sum over tetrahedra from the origin to each face:
-    positive when the surface faces outward, negative when it is inside-out.
-
-    **It is the only check that sees several things nothing else does**, which
-    is why it lives here beside the topological counts rather than in a caller:
-
-    - an **inside-out mesh**.  A sphere with every face reversed is identical
-      to a correct one on nm, open edges, degenerate faces, seams and shell
-      count; only the sign differs (-4094.9 against +4094.9).  Confirmed that
-      no other tool sees it either — PyMeshFix is a no-op, a commercial repair
-      service reports "0 Inverted normals", and Bambu renders and slices it
-      normally.  On that evidence it is a non-defect *in isolation*.
-    - a **reversed region after a seam split**, which is not a non-defect at
-      all: the region comes back with negative volume, and flipping it is the
-      whole repair.  Measured on a sphere with a reversed cap: split gives
-      regions of +3120.5 and -974.3, and flipping the second reconstructs the
-      control exactly.
-    - a **repair that destroyed geometry**.  PyMeshFix turned two coincident
-      spheres into +2047.4 — half of one — while every local check, ours and a
-      commercial service's, called the result clean.  A half sphere is a
-      perfectly valid watertight mesh; only the comparison against what the
-      file was before sees the loss.
-
-    That last point is the general one: every other check here asks *is this
-    mesh self-consistent*.  This is the only one that can support *did
-    something destroy it*, and only by comparison — the number alone means
-    nothing without a before.
+    Outward winding is positive. Compare magnitudes before and after repair to
+    find gross geometry loss; topology alone can call a partial mesh clean.
     """
     _require_geometry(mesh)
     if len(mesh.geometry.faces) == 0:
@@ -427,49 +321,12 @@ def volume(mesh: Mesh) -> float:
 
 
 def shells(mesh: Mesh) -> tuple[np.ndarray, ...]:
-    """Connected components, as face-index arrays, largest first.
+    """Return edge-connected face components, largest first.
 
-    **Two faces are in the same shell when they share an EDGE** — two vertices,
-    not one.  Surfaces that meet at a single point are separate shells.
-
-    That distinction is not pedantic, it is the one that matters here.  A vertex
-    where two surfaces touch is non-manifold by construction, and PyMeshFix
-    rebuilds *one* manifold surface and discards the rest — so handing it a
-    vertex-joined pair as a single component gives it exactly the input that
-    makes it delete geometry, which is the failure the split exists to prevent.
-
-    Measured on `Mandy_Body_Dinamuuu3D.stl`: vertex connectivity reports 39
-    components with a largest of 1,315,986 faces; edge connectivity reports 40,
-    splitting that one into 941,571 + 374,415 joined at a single vertex.  The
-    edge-connected answer matches PyMeshLab's
-    `generate_splitting_by_connected_components` exactly, component for
-    component and face for face — which is the behaviour the pipeline was built
-    around.
-
-    Returned as indices into the original face array rather than as meshes, so
-    a caller that only wants a count pays nothing for geometry it will not use.
-
-    **Why scipy.**  The predecessor was a per-face Python `find()` loop, and
-    5-10x the cost of loading the mesh.  Measured on the same model:
-
-        union-find (vertex-connected)   12.75s raw    5.72s decimated
-        scipy, vertex-connected          0.42s        0.14s
-        scipy, edge-connected            2.52s        0.92s   <- this code
-
-    Edge connectivity costs more than vertex connectivity — it needs a lexsort
-    over `3 * faces` edge rows to find which faces share one — and that is the
-    price of the correct answer.  Still 5x faster than the loop it replaced,
-    and at 0.92s on the mesh the pipeline actually sees (decimation runs first,
-    D13) it remains cheaper than `scan()` itself at 2.58s.
-
-    **A pure-numpy replacement was tried first and was slower on real
-    geometry.**  Pointer-jumping label propagation is 15-24x faster than
-    union-find on synthetic meshes and **2x slower** on Mandy: it converges in
-    O(log diameter) passes only when chains actually collapse, and a 1.3M-face
-    organic shell took **194 passes** at 0.13s each.  The synthetic benchmark
-    that endorsed it — a long thin strip — has three components and converges
-    in 11.  Do not retry it without a fixture whose component structure
-    resembles a real model.
+    Faces touching at only one vertex remain separate parts. The scipy sparse
+    adjacency implementation is faster than the former Python union-find loop
+    on the measured real meshes; see D20 and D22. Return face indices so callers
+    that only need a count avoid constructing submeshes.
     """
     _require_geometry(mesh)
     faces = mesh.geometry.faces

@@ -1,22 +1,8 @@
-"""What the filesystem already says about a source file.
+"""Read existing outputs and markers for a source file.
 
-Detection only.  This module decides nothing: it looks for the marker files a
-previous run may have left, reports the last one it finds, and stops there.
-Whether a finding means skip, convert or process is the caller's judgement.
-
-Two trees are involved, which is the reason this is a module rather than a
-handful of `os.path.exists` calls at a call site:
-
-    SOURCE tree                 <input>/stl-exported/<rel>.stl
-    OUTPUT tree                 <output>/<rel>.stl        and its markers
-
-The source tree holds exports — an ASCII STL or OBJ converted to binary by a
-previous run.  Finding one means "use this file instead of the original", not
-"skip".  The output tree holds the repaired file and the markers describing how
-a previous attempt ended; any of those means the file has been dealt with.
-
-Markers are named `<base>.<signal>.stl` and are full copies of the mesh, so
-they open in any STL viewer.  Deleting one is how a file is retried.
+An export in `stl-exported/` replaces the source path; an output or marker
+means a previous attempt already dealt with the file. Markers are full mesh
+copies. This module reports the finding; the caller chooses what to do.
 """
 
 from __future__ import annotations
@@ -50,26 +36,9 @@ class Indicator(Enum):
     UNDECIMATED = 'undecimated'      # every decimator failed; still oversized
 
 
-#: Output-tree markers, checked in this order.  `.original.stl` is deliberately
-#: absent: it sits beside a *successful* output as evidence that the repair
-#: moved the bounding box, so treating it as an indicator would skip files that
-#: actually worked.
-#:
-#: **`DESTROYED` is distinct from `FAILED`, and the difference is retryability.**
-#: `FAILED` means a transient problem — delete the marker and the next run tries
-#: again.  A destructive repair is not transient: the same input gives the same
-#: result, so retrying wastes the time and produces the same broken mesh.
-#:
-#: It is also distinct from `UNREPAIRED` and `OPEN_EDGES`, which say what
-#: *remained*.  This one says what was *lost*, and that changes which file
-#: belongs in the marker: a half-model is worse than an unrepaired one, so the
-#: marker carries the source rather than the repair.
-#:
-#: Measured on a real file (2026-09-17): decimating Mandy with
-#: `fast_simplification` and running the repair sequence produced a mesh at
-#: **46.27% of the input volume** — PyMeshFix found the surface non-orientable
-#: and cut two thirds of it away.  Every topological check called the result
-#: clean, because a half model is a perfectly valid closed surface.
+#: Output markers take precedence over exports. `.original.stl` is absent:
+#: it accompanies a successful output. DESTROYED carries a source fallback;
+#: UNREPAIRED and OPEN_EDGES carry the repaired mesh.
 _OUTPUT_MARKERS: tuple[tuple[str, Indicator], ...] = (
     ('.broken.stl', Indicator.BROKEN),
     ('.failed.stl', Indicator.FAILED),
@@ -119,34 +88,11 @@ def export_path(source: str, input_folder: str) -> str:
 
 def check(source: str, input_folder: str, output_file: str,
           copy_extensions: frozenset[str] | set[str] | None = None) -> Finding:
-    """Report what the filesystem already says about `source`.
+    """Report the first applicable filesystem finding for `source`.
 
-    `output_file` is where the repaired result would be written; the markers
-    are its siblings, named from the same base.  It is passed in rather than
-    derived so this module needs no opinion about output layout.
-
-    `copy_extensions` is the set of suffixes that are **not meshes** — images,
-    READMEs, archives shipped alongside a model.  Pass it and a matching file
-    short-circuits everything else, reporting COPY_AS_IS or ALREADY_COPIED.
-    The set is injected rather than hardcoded because which extensions count is
-    the caller's policy, not a fact about the filesystem.
-
-    That branch runs first, and not merely for speed: none of the mesh markers
-    can exist for a `.png`, so testing for a `.broken.stl` beside it is
-    meaningless work.  ALREADY_COPIED is deliberately separate from
-    ALREADY_FIXED — the same existence test, but "copied" and "repaired" are
-    different claims, and collapsing them would make any count of repaired
-    files wrong.
-
-    **Otherwise the output tree is checked first and the first match wins.**
-    Only one ordering rule matters: anything in the output tree outranks the
-    export, because converting a file that is not going to be processed is
-    wasted work.  Beyond that the order is arbitrary — every output-tree
-    finding means the file has already been dealt with, so which one is named
-    changes the message and not the outcome.
-
-    Returning on the first match is the point: once the answer is known, the
-    remaining `os.path.exists` calls cannot change it.
+    Companion extensions, when supplied, yield COPY_AS_IS or ALREADY_COPIED.
+    Otherwise output markers and the output file take precedence over an export;
+    `output_file` is supplied so this module does not own output layout.
     """
     if copy_extensions:
         suffix = os.path.splitext(source)[1].lower()

@@ -1,86 +1,11 @@
-"""Run the repair sequence: the four steps, in the order that was measured.
+"""Apply the current mesh repair sequence without writing a file.
 
-    is_available()      -> at startup: can this machine repair at all?
-    repair(mesh)        -> Result(mesh, steps, faces_in, faces_out, ...)
-
-**Policy, not a tool.**  `welder`, `meshfix`, `splitter` and PyMeshLab each do
-one thing and decide nothing; this decides what runs, in what order, and on
-what.  It is the one module in the repair set that is allowed to have an
-opinion.
-
-The sequence, validated end to end on two real models and an all-defects
-sphere:
-
-    1. welder.repair          T-junctions
-    2. CLEAN                  duplicates, before the split
-    3. split -> per part: by_geometry, then repair -> merge
-
-**Orientation is unconditional, and runs once, after the split.**  It was
-previously guarded by `volume < 0` in two places; both are gone.  A signed
-total only goes negative when **more than half the model is inverted**, which
-is not how real models break — the guard fired *zero times* on Mandy's 38 parts
-and costume01's 2, both of which contain genuinely inverted faces.  What it
-blocked on Mandy: 15 inward-facing faces fixed against 1 broken.
-
-The position is what makes it safe.  Run before the split it also erased the
-seam signal the splitters read (`sphere_seam`: 40 edges / 1 closed loop -> 0/0),
-blinding `by_shells` and `by_seams`.  After the split there is nothing left to
-blind.
-
-**Why this order**, each answer measured rather than reasoned:
-
-- **welder first** — it only adds faces, never moves or deletes one, so nothing
-  downstream is disturbed by having run it.  It is also the only tool that
-  repairs a T-junction correctly: PyMeshFix and Blender both treat the open
-  edges as a hole to close and dent the surface doing it, and PyMeshLab's
-  `meshing_remove_t_vertices` destroys the mesh outright (see DO_NOT_RETRY).
-- **orientation early** — a backwards surface makes PyMeshFix delete regions
-  rather than flip them, which is the head-deletion case.  Fix it before
-  anything else acts on the geometry.
-- **duplicates before the split** — deduplication has to see both copies.
-  Measured: splitting first left the `doubles` fixture at 200% volume in 2
-  shells, because each copy became its own part and neither could see the
-  other.
-- **split before the repair tool** — PyMeshFix rebuilds *one* manifold surface
-  and discards the rest.  Unsplit, it ate 4,525 support pillars off a resin
-  model, and took a figure's head off another.
-
-**Results on real input:**
-
-    all-defects sphere   1604f nm=4 open=246 2 shells vol -4292.4
-                      ->  836f, every count zero, vol +4092.9
-    Mandy...-simp     188,940f nm=29 open=34 seams 4/1
-                      -> 188,432f, every count zero, 99.99% volume, 4s
-    costume01         900,000f nm=2,263 open=20 491 shells
-                      -> 834,582f nm=0 open=28 99.99% volume, ~260s
-
-**PyMeshFix is chaotically sensitive on a defect-dense mesh, and the number to
-quote is the topology, not the face count.**  Yesterday's run of this sequence
-reached 835,466f on costume01; this module reaches 834,582f, and the entire
-difference traces to `welder` splitting **one** T-junction beforehand.  That
-single extra face — 891,342 vs 891,343 entering step 4 — moves PyMeshFix's
-output by **884 faces**.  Reproduced deliberately by running the sequence with
-and without the weld step: everything else was identical.
-
-Both results are correct (nm=0, open=28, 99.99% volume) and neither is a
-regression.  On a mesh carrying 1,871 non-manifold edges PyMeshFix's cut
-choices are not stable under a one-face perturbation, so a face-count
-comparison across versions means nothing here.
-
-**A note on the all-defects figure**: it reaches 840f at +4094.9 when step 4
-runs Blender rather than PyMeshFix, against 836f at +4092.9.  Four faces on one
-synthetic fixture, recorded so the difference is not rediscovered as a
-regression.  It is **not** an argument for switching — see `_repair_part` for
-why the choice is settled.
-
-On `Mandy...-simp` a commercial repair service kept 94.9% of faces; this keeps
-**99.7%**.  It removed 5% of the model to fix 63 defects.  Our detection matched
-that service exactly on both counts we share: nm=29, open=34.
-
-**Nothing here touches the disk.**  A loaded mesh in, a loaded mesh out, as
-with `decimator` and `meshfix` — the caller decides whether the result is worth
-writing, and `scanner` decides whether it is sound.  This module does not judge
-its own output.
+`repair` welds T-junctions, runs duplicate cleanup before splitting, splits
+edge-connected shells, orients each part, repairs each with PyMeshFix by
+default, then merges and reports measurements. `splitter.by_seams` is not in
+this sequence. `processor` judges the result; `repairer.ok` only means the
+sequence completed. `blender_part` provides the PLY-based Blender operation,
+but defect-based routing between it and PyMeshFix is not implemented yet.
 """
 
 from __future__ import annotations
@@ -120,45 +45,9 @@ class Step(Enum):
     MERGE = 'merge'                  # 3c. back into one mesh
 
 
-#: The four PyMeshLab filters that remove duplicate geometry, run together.
-#:
-#: **All four, always.**  `merge_close_vertices` alone is not a cheaper
-#: subset — it is actively worse: measured on the `doubles` fixture it collapsed
-#: the vertices while leaving both face sets behind, giving **1,140
-#: non-manifold edges at 200% volume**.  It needs the duplicate-face removal
-#: after it to be a repair at all.
-#:
-#: The threshold is a `PercentageValue` of the bounding-box diagonal, not an
-#: absolute distance.  `MERGE_DIST = 0.01mm`, tuned for Blender's
-#: `remove_doubles`, was the one setting here that *increased* non-manifold
-#: edges (2,263 -> 2,359).
-#:
-#: **`remove_duplicate_faces` looks destructive and is not.**  On costume01 it
-#: takes open edges from 17 to 1,319, which was recorded for a week as CLEAN
-#: "tearing" the model.  That reads the symptom as the cause.
-#:
-#: Of the 1,170 duplicate faces on that mesh, **1,166 have OPPOSITE winding** —
-#: they are zero-thickness sheets, not redundant copies.  A closed surface
-#: cannot carry two coincident faces of opposite winding, because such a flap
-#: encloses no volume; it reads as clean only because the two faces alibi each
-#: other's edges.  Removing one removes the alibi, and the open edges it
-#: "creates" were always there, masked.
-#:
-#: Measured on a tetrahedron, both directions — neither tears anything:
-#:
-#:     sound tetra + an opposite flap    nm=3        -> 4f, nm=0, open=0
-#:     tetra MISSING a face, sheet in it open=0 nm=3 -> 4f, nm=0, open=0
-#:
-#: In the second case the filter **repairs outright**: one face of the sheet
-#: becomes the missing surface and the redundant one goes.
-#:
-#: So the 40-face cost on costume01 is not damage — it is the price of
-#: surfacing 1,166 hidden defects so the repair step can close them.  Skipping
-#: CLEAN would ship a model that *reads* clean while carrying them.
-#:
-#: **Deleting both faces of a sheet is rejected**, not untried: the sheet may be
-#: large and both faces may be the only surface in that region, so removing
-#: both would cut a real hole rather than expose one.
+#: Run the whole cleanup sequence before splitting: merging alone can leave
+#: duplicate faces and apparent non-manifold edges. The threshold is relative
+#: to the bounding-box diagonal. See docs/refactor/implementation-evidence.md.
 CLEAN_FILTERS: tuple[tuple[str, dict], ...] = (
     ('meshing_remove_null_faces', {}),
     ('meshing_merge_close_vertices', {'threshold': 0.1}),
@@ -166,31 +55,8 @@ CLEAN_FILTERS: tuple[tuple[str, dict], ...] = (
     ('meshing_remove_unreferenced_vertices', {}),
 )
 
-#: Filters that were tried and must not be tried again, with what they did.
-#:
-#: Kept in code rather than only in the design doc because each one *looks*
-#: like the obvious thing to reach for next, and the failure of two of them is
-#: invisible to every check this project has except a volume comparison.
-#: How far a vertex may move and still count as the same vertex.
-#:
-#: **A tolerance is not optional here, and exact matching is not the strict
-#: version of this check — it is a broken one.**  PyMeshLab round trips
-#: coordinates through float64 and hands back float32, so a vertex nothing
-#: touched comes back re-rounded.  Measured on `sphere_doubles`, where nothing
-#: is deleted: exact tuple comparison reported **382 vertices lost**, while the
-#: furthest any input vertex sat from its nearest output vertex was 1.0e-05.
-#:
-#: At 1e-4 the same fixture reports 0, and the fixtures that genuinely lose
-#: geometry still report it: 6 on the all-defects sphere, 3 on `fin`.  The gap
-#: between float noise (1e-5) and a real deletion (8.0, the sphere's radius) is
-#: five orders of magnitude, so the threshold is not a fine judgement.
-#:
-#: **KNOWN BUG (2026-09-17): this is an absolute distance and will break with
-#: model scale**, the same way `welder.DEFAULT_TOLERANCE` was measured to —
-#: both the noise floor and the real-deletion distance scale with the model,
-#: and every fixture here is r=10.  Untested above that.  The fix is to scale
-#: by the bounding-box diagonal, as `CLEAN_FILTERS` already does.  See the OPEN
-#: BUG entry in REFACTOR_DECISIONS.md.
+#: Allow float re-rounding when counting retained vertices. This absolute
+#: threshold is a known scale risk; see docs/refactor/open-issues.md.
 LOST_VERTEX_TOLERANCE = 1e-4
 
 DO_NOT_RETRY = {
@@ -207,34 +73,11 @@ DO_NOT_RETRY = {
 
 @dataclass(frozen=True)
 class StepResult:
-    """What one step did, for the record.
+    """Measurements recorded after one repair step.
 
-    step            which step
-    faces_in/out    face counts either side of it
-    detail          what it found or changed, in one line
-    second_elapsed  wall time
-    scan            `scanner.Scan` of the mesh AFTER this step, or None when
-                    the step produced no single mesh to scan (the split)
-    volume          signed volume after this step, or None likewise
-    orphans         vertices no face references after this step
-
-    Every step reports even when it changed nothing, because "the orientation
-    guard did not fire" is as much a fact about a mesh as "it did" — and a run
-    that skipped a step silently is indistinguishable from one where the step
-    was never wired up.
-
-    **The scan is what makes a step's effect attributable**, and it is not
-    optional because face counts alone cannot tell a repair from a wound: a
-    step that removes 1,384 faces and closes holes looks identical to one that
-    removes 1,384 faces and tears 1,299 open edges.  That was not hypothetical
-    — the CLEAN step was blamed collectively in the decisions doc for a week,
-    and two guesses at which of its four filters was responsible were wrong,
-    because nothing recorded the counts between them.
-
-    Cost, measured on costume01 (900k faces): the filters themselves are
-    0.1-1.8s each and a scan is the same order, against a ~270s repair.  Cheap
-    enough that making it conditional would cost more in complexity than it
-    saves in time.
+    `scan` and `volume` describe the resulting mesh; both are None for a split
+    that produces several parts. Every executed step is recorded, including a
+    no-op, so a caller can attribute changes instead of inferring from face count.
     """
 
     step: Step
@@ -253,33 +96,11 @@ class StepResult:
 
 @dataclass(frozen=True)
 class Result:
-    """What the sequence produced.
+    """Mesh and measurements from the repair sequence.
 
-    mesh            the repaired mesh, or the input unchanged when it failed
-    ok              True when every step ran; False when one could not
-    problem         why, when `ok` is False; None otherwise
-    steps           a `StepResult` per step actually run, in order
-    faces_in/out    face counts for the whole sequence
-    volume_in/out   signed volume either side — the only measure that sees a
-                    repair having destroyed geometry
-    parts           how many pieces the split produced
-    second_elapsed  wall time for the sequence
-    lost_vertices   input vertices absent from the output — see below
-
-    `ok` says the sequence ran, **not** that the mesh is clean.  Nothing here
-    judges its own output: `scanner.scan()` is the verdict, and the caller asks
-    for it.  That separation is what stopped an earlier version of this project
-    writing out meshes a library had called successfully repaired.
-
-    **`lost_vertices` is the check that caught what four numeric checks
-    missed** — a mesh scoring perfectly on non-manifold, open edge, degenerate,
-    seam and volume counts while visibly dented, because PyMeshFix had deleted
-    two vertices from a sound surface to close a hole that was not there.
-
-    It needs one refinement before it can gate anything, and that is not built:
-    the rule is *lost a vertex belonging to the sound surface*.  A fin apex
-    does not count — it hangs off a single non-manifold edge, so removing the
-    fin legitimately removes its tip.  Reported, not acted on.
+    `ok` reports execution, not cleanliness. `mesh` may be intermediate on
+    failure. `lost_vertices` reports input vertices with no nearby output vertex;
+    it is diagnostic only, since legitimate removal of a fin can lose its apex.
     """
 
     mesh: Mesh
@@ -296,22 +117,11 @@ class Result:
 
     @property
     def volume_kept(self) -> float:
-        """Output volume as a fraction of input, **by magnitude**.  1.0 is
-        perfect.
+        """Return `abs(volume_out) / abs(volume_in)`; use 1 for zero input.
 
-        The general check for a repair having destroyed geometry.  Every other
-        measure asks whether a mesh is self-consistent; a half sphere is
-        perfectly watertight and passes all of them.  Only the comparison
-        against what the file was before sees the loss.
-
-        **Magnitudes, because an inverted input has a negative volume and the
-        repair's whole job is to flip the sign.**  A signed ratio reports the
-        all-defects sphere as -95% when it went -4292.4 -> +4092.9, which is a
-        correct repair — the number said "catastrophe" about the best result in
-        the suite.  `volume_out` keeps its sign for a caller that wants it.
-
-        It is a ratio, not a verdict: `doubles` legitimately reports 0.50,
-        because two coincident spheres becoming one *is* the repair.
+        Magnitude handles an intentional orientation flip. This ratio detects gross
+        loss but is not a verdict: removing coincident duplicate shells can
+        legitimately reduce volume.
         """
         if self.volume_in == 0.0:
             return 1.0
@@ -376,61 +186,14 @@ def _count_lost(before: np.ndarray, after: np.ndarray,
 
 
 def _repair_part(part: Mesh) -> tuple[Mesh, str]:
-    """Step 4's repair tool, run on one part.  Returns `(mesh, detail)`.
+    """Orient one split part, then repair it with PyMeshFix.
 
-    **PyMeshFix.  This is settled — do not re-open it by benchmarking the two
-    tools against each other again.**
-
-    The one thing that decides it: **PyMeshFix re-winds a reversed surface and
-    Blender does not.**  Orientation is fixed here, per part, immediately above
-    this call, and step 3b's `by_geometry` plus PyMeshFix's own re-winding are
-    what make `inverted`, `seam`, `shell_inverted` and `allbad` come out right.
-    Handing those to Blender instead returns the input's winding unchanged.
-
-    `blender_part` exists and works, and is better at one thing — holes and
-    fins, where it reaches `fin` at 760f/+4094.9 losing only the fin's own apex
-    against PyMeshFix's 756f and 3.  It is injectable via `repair(tool=)` for a
-    caller who has measured that their parts need it.
-
-    **What is NOT an open question**: which tool is generally better.  The two
-    do different jobs, so a fixture-by-fixture comparison produces a table that
-    reads like a contest and answers nothing — and worse, it is misleading,
-    because rows like `seam` and `inverted` show Blender "failing" at defects
-    steps 2 and 3b have already fixed before any part reaches step 4.  Running
-    either tool alone on a raw fixture tests a configuration this pipeline
-    never produces.
+    Orientation runs unconditionally after splitting, without a signed-volume
+    guard. A PyMeshFix failure returns the oriented part with a reason.
     """
     notes = []
 
-    # Orientation, **unconditionally**, and this is the one place it runs.
-    #
-    # It used to be guarded by `volume < 0` here and in a step before the
-    # split.  Both are gone, because a signed total only goes negative when
-    # **more than half the model is inverted** — which is not how a real model
-    # breaks.  Measured: the guard fired **zero times** on Mandy's 38 parts and
-    # costume01's 2, on models that demonstrably contain inverted faces.  A
-    # guard that never fires on the case it exists for is not a safety measure.
-    #
-    # What it was blocking, measured on Mandy: **15 inward-facing faces fixed
-    # against 1 outward-facing face broken**, scattered across four parts of a
-    # 188,940-face model.  Stray reversed faces are the common defect and no
-    # volume test can see them.
-    #
-    # `by_geometry` needs no trigger because it is idempotent on correct
-    # geometry — it decides outward by ray casting, so on a sound part it is a
-    # no-op.  The guard was protecting against a cost, not a risk: +50% on
-    # Mandy (6s to 9s) and +15% on costume01 (266s to 307s).
-    #
-    # It does move seam counts — 19 on Mandy, 151 on costume01 — which is the
-    # effect the record warned about.  Measured consequence: **none**.  Final
-    # results are identical with and without, because re-winding a face changes
-    # its agreement with its neighbours and PyMeshFix then resolves it.  On
-    # Mandy's part 0 the closed-loop count went 1 -> 0, an improvement.
-    #
-    # **Position matters and is the reason this is safe.**  Before the split it
-    # also erased the seam signal that `by_shells` and `by_seams` read
-    # (`sphere_seam` went 40 edges/1 loop -> 0/0).  Here the split has already
-    # happened, so there is nothing left to blind.
+    # A signed-volume guard misses local inversions; orient each split part.
     part = _run_filters(part, (('meshing_re_orient_faces_by_geometry', {}),))
     notes.append('oriented')
 
@@ -448,37 +211,11 @@ def _repair_part(part: Mesh) -> tuple[Mesh, str]:
 
 
 def blender_part(part: Mesh, timeout: float = 600) -> tuple[Mesh, str]:
-    """Step 4 through Blender instead of PyMeshFix.  Pass as `repair(tool=)`.
+    """Repair a split part in Blender using a PLY round trip.
 
-    **Costs a file boundary**, which is the whole argument against it: the part
-    is written out, Blender is launched, and the result read back.  PyMeshFix
-    runs on the arrays in this process.
-
-    **And the boundary is STL, which the user has flagged as the wrong format
-    for it (2026-09-17).**  STL carries no vertex table, so each write splits
-    the mesh into loose triangles — measured at exactly **6.0x** duplication of
-    every vertex — and each read has to re-weld it.  On Mandy that is 38 round
-    trips per repair.
-
-    **The round-trip cost has not been measured**, and that is the first thing
-    to settle: if it is not a real fraction of the 9s repair, the argument for
-    changing format is only a correctness one.  PLY carries the vertex table
-    and was recorded as surviving Blender intact, but that check is from
-    2026-09-15 and has not been re-run.  See the re-opened PLY entry in
-    REFACTOR_DECISIONS.md, where the claims are labelled by provenance.
-
-    What it buys, measured on prepared single-shell parts — which is what step
-    4 hands it, and is *not* what the frozen script does to a raw file:
-
-        all-defects sphere   840f at +4094.9   (PyMeshFix: 836f at +4092.9)
-        fin                  760f at 100.00%, losing only the fin's own apex
-
-    Two of the script's six steps are disabled in `blender_fx/repair.blender`,
-    because `repairer` already did them and did them better — see
-    `blender.REPAIR_SCRIPT`.
-
-    Returns the part unchanged with a reason when Blender fails, so a caller
-    can tell "not repaired" from "repaired badly".
+    Pass this as `repair(tool=...)` to replace the default PyMeshFix part tool.
+    PLY preserves the vertex table; the result is reattached to the original
+    part's identity. Failure returns the input part with a reason.
     """
     with tempfile.TemporaryDirectory(prefix='repairer-blender-') as folder:
         source = os.path.join(folder, 'part.ply')
@@ -507,23 +244,13 @@ def repair(mesh: Mesh,
            min_shell_faces: int = splitter.MIN_SHELL_FACES,
            tool: Callable[[Mesh], tuple[Mesh, str]] = _repair_part,
            ) -> Result:
-    """Run the four-step repair sequence over `mesh`.
+    """Run weld, clean, split, per-part repair, and merge on a loaded mesh.
 
-    Takes a loaded mesh and returns a loaded mesh.  Nothing is written, and
-    nothing here decides whether the result is good enough — ask
-    `scanner.scan()`, and compare `Result.volume_kept` against what the file
-    was before.
-
-    `tool` is step 4's repair, run per part.  It defaults to PyMeshFix and is
-    injectable so a caller can substitute one without this module growing a
-    routing table for a decision that has one measured answer.
-
-    A failure returns the **input mesh unchanged** with `ok=False`, never a
-    partial result: the caller must be able to tell "not repaired" from
-    "repaired badly" and write the marker rather than ship the file.
-
-    Raises `ValueError` if the mesh is not loaded — a programming error at the
-    call site, not a property of the data.
+    No file is written and `ok` is not a clean-mesh verdict. The current
+    default part tool is PyMeshFix; `tool` can replace it, including with
+    `blender_part`. This injection point is not the planned defect-based tool
+    routing. A failure returns `ok=False` with the mesh reached at failure,
+    which may be an intermediate after earlier steps.
     """
     if mesh.geometry is None:
         raise ValueError(
@@ -612,7 +339,7 @@ def repair(mesh: Mesh,
 def _failed(mesh: Mesh, problem: str, steps: tuple[StepResult, ...] = (),
             faces_in: int | None = None, volume_in: float = 0.0,
             elapsed: float = 0.0) -> Result:
-    """A `Result` carrying the input mesh unchanged and the reason."""
+    """A failed `Result` carrying the mesh reached and the reason."""
     faces = faces_in if faces_in is not None else (
         len(mesh.geometry.faces) if mesh.geometry is not None else 0)
     return Result(mesh, False, problem, steps, faces, faces,

@@ -1,6 +1,6 @@
 """End-to-end tests for the repair sequence, against known-correct answers.
 
-Separate from `test_repairer.py`, which tests the sequence's *structure* with
+Separate from `tests/tests/test_repairer.py`, which tests the sequence's *structure* with
 step 4 stubbed out. This runs the real tools on real defective meshes and asks
 whether the output is **right**, not whether the machinery ran.
 
@@ -32,8 +32,10 @@ import unittest
 from libs import mesh_io, repairer, scanner
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PROBES = os.path.join(HERE, 'tests', 'probes')
-GENERATOR = os.path.join(HERE, 'tools', 'make_probe_meshes.py')
+TEST_ROOT = os.path.dirname(HERE)
+PROJECT_ROOT = os.path.dirname(TEST_ROOT)
+PROBES = os.path.join(TEST_ROOT, 'probes')
+GENERATOR = os.path.join(PROJECT_ROOT, 'tools', 'make_probe_meshes.py')
 
 #: The control's signed volume. Every fixture is that sphere plus one defect,
 #: so this is what a correct repair must reconstruct.
@@ -386,7 +388,7 @@ class TestToleranceScaling(unittest.TestCase):
     RADII = (1.0, 10.0, 50.0, 100.0, 200.0, 1000.0)
 
     def sphere_with_junction(self, radius):
-        sys.path.insert(0, os.path.join(HERE, 'tools'))
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, 'tools'))
         from make_probe_meshes import build_tjunction, sphere
         from libs.mesh_io import Geometry, Kind, Mesh
         verts, faces = sphere(r=radius)

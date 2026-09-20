@@ -1,37 +1,8 @@
-"""Reduce a mesh to a face budget, by whichever library is available.
+"""Reduce a loaded mesh to a face budget.
 
-    is_available()                      -> at startup: can anything decimate?
-    decimate(mesh, max_faces, ...)      -> Mesh in, Mesh out
-
-One entry point, two implementations behind it.  Both run the same
-Garland-Heckbert quadric edge collapse and differ only in how much machinery
-sits around it, which is where the cost is.  Measured, 2.55M triangles -> 900k:
-
-    fast_simplification   ~5.6s    ~915 MB    numpy arrays
-    pymeshlab             42.0s    1557 MB    numpy arrays
-
-Size does not select the decimator.  fast_simplification handles a 2.55M mesh
-in less memory than PyMeshLab needs for 1.2M, so there is no band where a mesh
-is too big for one and has to go to the other; PyMeshLab is for when
-fast_simplification *fails*, not for when the mesh is large.
-
-**Nothing here touches the disk.**  Both rungs work on the arrays directly —
-PyMeshLab takes numpy in (`Mesh(vertex_matrix=, face_matrix=)`) and gives it
-back, so `load_new_mesh`/`save_current_mesh` would be a round trip through the
-filesystem inside our own process for no reason.
-
-**There was a third rung, Blender, and it was removed** — see D19.  It never
-ran: 104 of 104 decimations in the step log took fast_simplification, with no
-failure and no fallback.  What justified removing it is not that record, which
-is only the meshes fast_simplification happened to handle, but that a manual
-fallback exists: Bambu Studio's own simplify.  A mesh that defeats both rungs
-here is a file to mark and handle by hand, not a lost model — so the Blender
-rung bought one manual step on a case that has not occurred, against a script,
-a subprocess, temp files and a format boundary.
-
-**Decimation may leave non-manifold edges.**  That is expected and is not this
-module's problem to solve — the repair steps downstream exist for it.  What is
-returned is a decimated mesh, not a clean one.
+Try `fast_simplification`, then PyMeshLab if needed. Both work on arrays and
+may introduce defects; downstream repair owns that check. Neither this module
+nor its result writes a file.
 """
 
 from __future__ import annotations

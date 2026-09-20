@@ -399,7 +399,9 @@ class TestSeveralJunctionsOnOneFace(unittest.TestCase):
         """A sphere whose face 200 has its edge subdivided at t=1/3 and t=2/3,
         leaving the neighbour spanning it whole."""
         sys.path.insert(0, os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 'tools'))
+            os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__)))),
+            'tools'))
         from make_probe_meshes import sphere
         verts, faces = sphere(r=10.0)
         verts, faces = verts.tolist(), faces.tolist()

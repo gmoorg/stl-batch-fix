@@ -1,42 +1,9 @@
-"""Decide what happens to one file: decimate, repair, judge, write.
+"""Decimate, repair, judge, and optionally write one file.
 
-    process(mesh, max_faces, ...) -> Outcome(indicator, mesh, ...)
-
-**This is the module that judges.**  Everything below it reports and repairs
-without an opinion — `repairer.ok` says the sequence ran, not that the mesh is
-good, and `scanner` counts defects without deciding what they mean.  Somebody
-has to turn those numbers into one of `indicators.Indicator`, and that is here.
-
-    decimate -> repair -> scan -> decide -> write
-
-**The output is written only when the result is provably clean**, and that is
-the user's rule rather than an inference.  `scanner.scan().is_clean` is the
-whole test: no non-manifold edges, no open edges.  A mesh that merely looks
-finished has been wrong three times in this project's history — meshes have
-passed non-manifold, open-edge, degenerate, seam *and* volume checks while
-visibly damaged — so "the library said it worked" is never enough.
-
-**Which mesh the marker carries depends on the defect**, and the distinction
-matters more than it first appears:
-
-    DESTROYED    the repair deleted geometry.  The SOURCE is the fallback,
-                 because a half-model is worse than an unrepaired one, and the
-                 marker is not `FAILED` because the failure is not transient —
-                 retrying gives the same result.
-    UNREPAIRED   non-manifold edges remain.  The REPAIRED mesh is the fallback:
-    OPEN_EDGES   it is decimated, within the face budget, and every vertex that
-                 went in came out.
-
-Measured on a real file: decimating Mandy ourselves and repairing produced a
-mesh at **46% of the input volume** — PyMeshFix found the surface
-non-orientable and cut two thirds away.  Writing that as the fallback print
-would be handing over a model with its body missing.  The same pipeline on a
-differently-decimated copy of the same model finished at 99.99%.
-
-**Decimation is never skipped**, and its failure is its own marker.  A file
-that cannot be reduced is one the printer will reduce itself, reintroducing
-the defects this tool exists to remove — so `UNDECIMATED` is a distinct
-outcome from a repair failure, not a lesser one.
+`process` returns an `Outcome` without I/O. It checks destructive volume loss
+before topology: a partial model can have zero mesh defects. `write` commits a
+clean mesh or a full-mesh marker. A marker uses the source for destructive or
+failed work, and the repaired mesh when geometry survives but defects remain.
 """
 
 from __future__ import annotations
@@ -49,24 +16,9 @@ from . import decimator, indicators, mesh_io, repairer, scanner
 from .indicators import Indicator
 from .mesh_io import Mesh
 
-#: How much of the input volume must survive for the repair to count as
-#: non-destructive, as a fraction.
-#:
-#: **Magnitudes, not signed values** — an inverted input has a negative volume
-#: and turning it outward is the repair, so a signed ratio calls a correct
-#: result negative.
-#:
-#: Measured on real files.  A sound repair keeps essentially everything:
-#: Mandy 99.99%, costume01 99.99%, the all-defects sphere 95.35% (its lost 5%
-#: being the duplicate geometry it was built with).  A destroyed one is not
-#: near the line: Mandy's own decimation came back at **46.27%** after
-#: PyMeshFix cut a non-orientable surface apart.  The gap is wide, so 0.90 is
-#: not a fine judgement — anything under it has lost a limb, not a detail.
-#:
-#: `doubles`-style inputs are the known exception: two coincident copies
-#: legitimately halve, and such a file will be marked destroyed.  That is the
-#: safe direction to be wrong in, and no real model in the collection has the
-#: defect.
+#: Compare volume magnitudes: repairing an inverted mesh can flip its sign.
+#: 0.90 detects observed catastrophic loss; coincident duplicate shells can
+#: legitimately fall below it. See docs/refactor/implementation-evidence.md.
 MIN_VOLUME_KEPT = 0.90
 
 

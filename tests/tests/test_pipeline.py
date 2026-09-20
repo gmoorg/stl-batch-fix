@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """End-to-end pipeline tests: does a mesh come out the other side correct?
 
-    .venv/bin/python test_pipeline.py            # all of it, a few seconds
-    .venv/bin/python test_pipeline.py body arms  # named fixtures only
+    ../.venv/bin/python tests/tests/test_pipeline.py            # all tests
+    ../.venv/bin/python tests/tests/test_pipeline.py body arms  # named fixtures
 
 Each test runs the real process_file() on a real STL and compares the OUTPUT
 MESH against the INPUT MESH.  Nothing here asserts that a helper returns a
@@ -17,7 +17,7 @@ The four properties checked:
     faces     near the decimation target, not far below it
 
 Fixtures are small generated meshes (~516 KB in total, tests/fixtures/, built
-by make_fixtures.py) rather than models from the collection.  Two reasons: the
+by `tests/tests/make_fixtures.py`) rather than models from the collection. Two reasons: the
 collection is meant to be deletable, and a 208 MB fixture set does not belong
 in a repository.  Size is not what makes a code path interesting — MAX_FACES
 and _LARGE_MESH_TRI_LIMIT are configurable, so the tests lower both and a
@@ -36,12 +36,14 @@ import tempfile
 import time
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+TEST_ROOT = os.path.dirname(HERE)
+PROJECT_ROOT = os.path.dirname(TEST_ROOT)
+sys.path.insert(0, PROJECT_ROOT)
 import numpy as np
 import stl_batch_fix as fix
 
-FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        'tests', 'fixtures')
+FIXTURES = os.path.join(TEST_ROOT, 'fixtures')
 
 # Thresholds for the test run.  Both are configuration in the real script, so
 # lowering them puts small meshes on the same code paths large ones take.
@@ -114,7 +116,8 @@ class PipelineCase(unittest.TestCase):
         src = os.path.join(FIXTURES, f'{cls.fixture}.stl')
         if not os.path.exists(src):
             raise unittest.SkipTest(
-                f'{src} missing — run: python make_fixtures.py')
+                f'{src} missing — run: '
+                '../.venv/bin/python tests/tests/make_fixtures.py')
 
         cls.root = tempfile.mkdtemp(prefix=f'pipeline-{cls.fixture}-')
         inp = os.path.join(cls.root, 'STL')

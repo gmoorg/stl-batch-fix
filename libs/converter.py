@@ -1,37 +1,8 @@
-"""Walk a source tree and hand every usable mesh to a consumer.
+"""Prepare a source tree and emit each mesh to a consumer.
 
-The preparation stage: it decides what each file *is*, copies the things that
-are not meshes, converts the ones that cannot be measured as they stand, and
-emits the rest.  What the consumer does with them — sort them, queue them, log
-them — is not this module's business.
-
-    prepare(source_root, output_root, emit,
-            copy_extensions=..., convert=..., workers=4)
-
-`emit(mesh)` is called once per file that resolved to a mesh, **one at a time**
-— `prepare` serialises it, so a consumer needs no locking of its own even
-though the conversion phase runs several workers.  The lock is uncontended
-during the walk and costs microseconds across a whole collection, which beats a
-contract reading "serial here, concurrent there, lock accordingly": a caller
-cannot forget a lock that is not theirs to take.
-
-**Order is not promised**: binary files arrive during the walk and converted
-ones afterwards, so a consumer that needs them sorted sorts what it collects.
-That is no loss — the repair queue has to be sorted by triangle count for
-memory admission regardless (D13), and only the consumer knows that.
-
-Returning a `queue.Queue` instead was considered and rejected.  It would be
-thread-safe for free and would let a consumer start work before the walk
-finished — but nothing *can* start early, because the queue has to be complete
-before it can be sorted, and `Pool`'s selector shuts a worker down rather than
-waiting, so a queue that filled gradually would shed every worker and end the
-run.  The overlap a queue buys is overlap this pipeline cannot use, against a
-sentinel protocol and a thread for the caller to manage.
-
-Failures are emitted too, as a `Mesh` with `is_valid=False` and a `problem`.
-A file that simply cannot be converted would otherwise be the one thing in the
-pipeline that vanishes without appearing in any count — the consumer can
-ignore it, but it cannot report what it never sees.
+`prepare` copies companion files, converts ASCII STL/OBJ when needed, and
+emits valid and failed meshes. Emission is serialized even when conversion
+uses workers. Arrival order is unspecified; the consumer owns sorting.
 """
 
 from __future__ import annotations

@@ -1,39 +1,9 @@
-"""Cut a mesh into independently-repairable pieces, and put them back.
+"""Split loaded meshes by shells or winding seams, then merge parts.
 
-    by_shells(mesh)   -> tuple[Mesh, ...]    parts that do not touch
-    by_seams(mesh)    -> tuple[Mesh, ...]    regions whose winding disagrees
-    merge(parts)      -> Mesh                one mesh again
-
-Geometry only.  Nothing here decides *whether* to split, repairs anything, or
-touches the filesystem — `scanner` finds what could be cut, this does the
-cutting, and the caller sequences them.
-
-**A mesh that does not split comes back as a list of one.**  Both functions
-promise that, and it is the point rather than a convenience: it removes the
-"did it split?" branch from every caller.  The pipeline reads as one path —
-
-    parts = splitter.by_shells(mesh)
-    parts = [p for part in parts for p in splitter.by_seams(part)]
-    parts = [repairer.repair(p) for p in parts]
-    mesh  = splitter.merge(parts)
-
-— with no conditionals, and nothing downstream ever learns whether it is
-looking at a whole model or a fragment.  The old code threaded an `is_part`
-flag through nineteen call sites to answer that question; there is nothing left
-to ask.
-
-**Shells first, then seams.**  Shell components are maximal, so a shell part
-can never need shell-splitting again.  Seam regions are cut on a different
-criterion — winding, not connectivity — so a single shell can still hold
-several, which is why the second pass runs over the parts of the first.  The
-reverse order would have seam detection reasoning across pieces that are not
-even touching.
-
-**Why split at all**, measured: PyMeshFix rebuilds *one* manifold surface and
-discards the rest, so a multi-shell mesh reaching it unsplit comes back as its
-largest shell alone — 562,288 faces in, 394,432 out, a model's head gone.  Cut
-first and each piece is preserved: 100.0% and 100.2% of volume on the two
-regions of that same mesh.
+`by_shells` uses edge connectivity and drops components below `min_faces` when
+larger parts exist. `by_seams` is available but the current repair sequence
+does not call it. Both return a one-item tuple when nothing splits. Parts get
+their own destinations; neither function writes files.
 """
 
 from __future__ import annotations
@@ -48,22 +18,8 @@ from scipy.sparse.csgraph import connected_components
 from . import scanner
 from .mesh_io import Geometry, Mesh
 
-#: Shells below this many faces are debris rather than parts.
-#:
-#: Flat, not a fraction of the largest shell.  The old rule was
-#: `max(100, largest // 1000)`, and the ratio is what went wrong: it discards
-#: more the bigger the model gets.  On a 2M-face figure it set the floor at
-#: 1,315 faces, and 562 after decimation — a magnet peg or a locating pin is
-#: smaller than that and is a part, not debris.
-#:
-#: Measured on the collection, this is a wide gap rather than a fine judgement:
-#:
-#:     Mandy_Body_Dinamuuu3D   39 real shells, smallest 750 faces
-#:     whole-costume01         444 shells, of which 443 are under 100 faces
-#:
-#: So 100 keeps every real part with 7.5x margin and still rejects the specks.
-#: Lower is not free: at a floor of 10, whole-costume01 splits into 381 parts,
-#: each one a separate repair and merge.
+#: Fixed debris floor; scaling it with the largest shell discarded real small
+#: parts. Corpus measurements are in docs/refactor/implementation-evidence.md.
 MIN_SHELL_FACES = 100
 
 
@@ -137,26 +93,11 @@ def by_seams(mesh: Mesh,
              min_faces: int = MIN_SHELL_FACES,
              name: Callable[[Mesh, int, int], str] = _default_name,
              ) -> tuple[Mesh, ...]:
-    """Split along closed winding-seam loops, largest first.
+    """Split on closed winding-seam loops when explicitly called.
 
-    Returns `(mesh,)` when there is nothing to cut on — no seam edges, or no
-    closed loop among them.
-
-    **Only closed loops justify a cut.**  A few seam edges with loose ends are
-    local noise that stops on its own; a closed loop encircles a region whose
-    winding cannot be reconciled with its host — hair over a scalp, cloth over
-    a body, a separately sculpted part fused on.  Measured on one model: the
-    mesh PyMeshFix answered by deleting the head had 40 seam edges in 7 closed
-    loops, while one that repairs cleanly had 5 edges in 0 loops.
-
-    **This is not a reliable predictor of what PyMeshFix will do**, and must
-    not be used as one.  A sphere with its cap reversed has 40 seam edges in 1
-    closed loop and PyMeshFix re-winds it correctly, returning the same 760
-    faces, where splitting first gives 880 faces and 2 new non-manifold edges.
-    The mesh that genuinely needed splitting had 40 seam edges too.  Nothing
-    measurable beforehand separates the two cases, which is why the live
-    pipeline splits on *measured volume loss after the fact* rather than on
-    this signal.  See the re-opened split-upfront decision.
+    Open seam fragments do not justify a cut. A closed loop is only a candidate:
+    it does not predict whether PyMeshFix will damage the mesh, so the current
+    repair sequence does not invoke this function automatically.
     """
     edges, loops = scanner.winding_seams(mesh)
     if loops == 0:
@@ -205,28 +146,11 @@ def by_seams(mesh: Mesh,
 
 def merge(parts: tuple[Mesh, ...] | list[Mesh],
           destination: str | None = None) -> Mesh:
-    """Reassemble parts into one mesh.
+    """Concatenate parts' arrays into one mesh; do not geometrically union.
 
-    `destination` is where the whole file belongs.  It must be given whenever
-    the parts carry part-destinations, because the merged mesh is the parent
-    again and inheriting `parts[0]`'s `<base>.part.0.stl` would write the whole
-    model to a part's path — and hang the parent's markers off it.  Omit it
-    only when the parts were never renamed.
-
-    `merge((mesh,))` returns that mesh unchanged — no copying, no library call.
-    That matters because it is the common path: most files never split, and the
-    single-part case must not pay for machinery it does not need.
-
-    Concatenation, not a geometric union: each part's vertices are appended and
-    its face indices shifted by the running offset.  Parts that were split
-    apart are not re-joined, and coincident vertices at an old cut line are not
-    welded — the next `mesh_io.load` does that, and `scanner` is what decides
-    whether the result is sound.
-
-    The old code merged through PyMeshLab's
-    `generate_by_merging_visible_meshes` on *files*, which meant writing every
-    part out and reading them back.  With arrays in hand it is two
-    `concatenate` calls.
+    Supply `destination` when parts have their own paths, or markers would attach
+    to a part path. A single part is returned without geometry copying. Coincident
+    vertices at former cuts are not welded here; the caller must rescan the result.
     """
     parts = tuple(parts)
     if not parts:

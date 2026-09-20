@@ -1,28 +1,8 @@
-"""Run a script in headless Blender, with a deadline.
+"""Run headless Blender with a deadline and captured output.
 
-Domain-free: this module knows how to launch Blender, wait for it, kill it if
-it overruns, and clean up after itself.  It knows nothing about meshes, about
-what the script does, or about what its output means.  The caller renders the
-script and interprets the result.
-
-    result = run(script_text, timeout=420)
-    if result.is_timed_out:
-        ...
-    elif result.exit_code == 0 and 'MY_MARKER' in result.stdout_capture:
-        ...
-
-Two things it deliberately does not do:
-
-**No budget arithmetic.** `timeout` is seconds, supplied by the caller. How
-much of a mesh's remaining time Blender may have — and what to reserve for the
-steps after it — is pipeline policy that changes with the pipeline.
-
-**No `/proc` walking.** Measured: Blender is a *direct* child of the process
-that spawns it and has no children of its own, so `Popen.kill()` reaches it.
-Walking `/proc` for grandchildren is what a supervisor needs when it kills an
-intermediate process — killing that middle process alone leaves Blender alive
-and reparented to init, holding its memory. That belongs with whatever
-supervises child processes, not here.
+`Runner` owns process launch, timeout, kill, and capture. The caller supplies
+a rendered script and interprets its markers. `convert` produces binary STL;
+`repair` uses binary PLY at both ends. Budget policy belongs to the caller.
 """
 
 from __future__ import annotations
@@ -243,33 +223,11 @@ def convert(source: str, destination: str, timeout: float = 600,
 def repair(source: str, destination: str,
            timeout: float = 600, executable: str = 'blender',
            ) -> tuple[bool, Result]:
-    """Repair the binary PLY at `source`, writing the result to `destination`.
+    """Run the repair script from binary PLY `source` to `destination`.
 
-    **PLY, not STL, and both ends must be** — see `REPAIR_SCRIPT`.  Write the
-    input with `mesh_io.write_ply` and read the output with `mesh_io.read_ply`;
-    handing this an STL produces no output and an exit code of 0, which reads
-    as a silent failure.
-
-    `merge_dist` used to be a parameter here and is gone with the weld step it
-    configured.  An absolute 0.01 mm, it was measured deleting sub-millimetre
-    detail — the point of the format change was to remove the guess, not to
-    calibrate it.
-
-    Returns `(ok, result)`.  `ok` means the script ran to completion and wrote
-    a file — **not** that the mesh is clean: the script exits 2 with
-    `BLENDER_UNREPAIRED` when non-manifold edges remain, and that is a real
-    outcome a caller may still want to keep.  The full `Result` comes back
-    because a repair can run for minutes and its output is the only sign of
-    life.
-
-    Unlike `convert`, this is **not** a lossless operation — it fills holes,
-    deletes non-manifold faces and may move geometry.  `scanner` decides
-    whether what came back is worth keeping, and `repairer.Result` carries the
-    volume and lost-vertex comparisons that catch a destructive repair.
-
-    A file boundary is unavoidable here: Blender is a subprocess, so the mesh
-    must be written out and read back.  That is the cost `meshfix` does not
-    pay, and the reason PyMeshFix is step 4's default.
+    Return `(ok, Result)`. `ok` means Blender wrote output with an accepted exit
+    code, not that the result is clean. The caller rescans and judges volume loss.
+    Both paths must be PLY; `convert` separately writes binary STL.
     """
     script = REPAIR_SCRIPT.format(src=source, dst=destination)
     result = Runner(executable).run(script, timeout=timeout)
