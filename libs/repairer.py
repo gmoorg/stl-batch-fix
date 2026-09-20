@@ -20,14 +20,8 @@ from enum import Enum
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import blender, mesh_io, meshfix, scanner, splitter, welder
-from .mesh_io import Geometry, Mesh
-
-try:
-    import pymeshlab as _pymeshlab
-    _PYMESHLAB = True
-except ImportError:                                   # pragma: no cover
-    _PYMESHLAB = False
+from . import blender, mesh_io, meshfix, meshlab, scanner, splitter, welder
+from .mesh_io import Mesh
 
 
 class Step(Enum):
@@ -134,37 +128,7 @@ def is_available() -> bool:
     PyMeshFix does step 4 and PyMeshLab does steps 2 and 3; neither has an
     in-process substitute.  `welder` and `splitter` are ours and always there.
     """
-    return meshfix.is_available() and _PYMESHLAB
-
-
-def _run_filters(mesh: Mesh,
-                 filters: tuple[tuple[str, dict], ...]) -> Mesh:
-    """Apply PyMeshLab filters to the arrays and hand back a new `Mesh`.
-
-    Arrays in and arrays out: `load_new_mesh`/`save_current_mesh` would round
-    trip through the filesystem inside our own process for no reason, the same
-    reasoning as in `decimator`.
-
-    A `float` threshold is wrapped as a `PercentageValue` here rather than at
-    the call site, so `CLEAN_FILTERS` stays plain data that can be read and
-    compared without importing PyMeshLab.  **There is no `AbsoluteValue`** —
-    the absolute form is `PureValue`, and passing a bare float raises.
-    """
-    ms = _pymeshlab.MeshSet()
-    ms.add_mesh(_pymeshlab.Mesh(
-        vertex_matrix=mesh.geometry.verts.astype(np.float64),
-        face_matrix=mesh.geometry.faces.astype(np.int32)))
-    for name, params in filters:
-        prepared = {
-            key: (_pymeshlab.PercentageValue(value)
-                  if isinstance(value, float) else value)
-            for key, value in params.items()
-        }
-        ms.apply_filter(name, **prepared)
-    current = ms.current_mesh()
-    return mesh.with_geometry(Geometry(
-        np.ascontiguousarray(current.vertex_matrix(), dtype=np.float32),
-        np.ascontiguousarray(current.face_matrix(), dtype=np.int64)))
+    return meshfix.is_available() and meshlab.is_available()
 
 
 def _count_lost(before: np.ndarray, after: np.ndarray,
@@ -194,7 +158,8 @@ def _repair_part(part: Mesh) -> tuple[Mesh, str]:
     notes = []
 
     # A signed-volume guard misses local inversions; orient each split part.
-    part = _run_filters(part, (('meshing_re_orient_faces_by_geometry', {}),))
+    part = meshlab.apply_filters(
+        part, (('meshing_re_orient_faces_by_geometry', {}),))
     notes.append('oriented')
 
     result = meshfix.repair(part)
@@ -255,7 +220,7 @@ def repair(mesh: Mesh,
     if mesh.geometry is None:
         raise ValueError(
             f"{mesh.path} has no geometry — load it before repairing")
-    if not _PYMESHLAB:
+    if not meshlab.is_available():
         return _failed(mesh, "pymeshlab is not installed")
 
     started = time.monotonic()
@@ -297,7 +262,7 @@ def repair(mesh: Mesh,
         # 2. Duplicates, before the split so deduplication sees both copies.
         mark = time.monotonic()
         was = len(mesh.geometry.faces)
-        mesh = _run_filters(mesh, CLEAN_FILTERS)
+        mesh = meshlab.apply_filters(mesh, CLEAN_FILTERS)
         record(Step.CLEAN, was, len(mesh.geometry.faces),
                f"{len(CLEAN_FILTERS)} filters", mark, mesh)
 

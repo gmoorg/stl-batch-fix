@@ -24,7 +24,7 @@ Preserve the legacy user interface while replacing its internals with the shared
 | `TIMEOUT_PART` | Budget for one mesh/part |
 | `TIMEOUT` | Whole split-file ceiling; `0` means practical 24-hour cap |
 | `BLENDER_RESERVE_PCT` | Part budget reserved for work after Blender |
-| `MAX_FACES` | Final per-file slicer budget; `0` disables decimation |
+| `MAX_FACES` | Decimation target, kept below the approximately 1M slicer limit; `0` disables decimation |
 | `RECURSIVE` | Walk subdirectories |
 
 The target has one `RunConfig` shared by CLI, TUI, parent, and child. The TUI observes structured events; it must not create another pool or parse logs as state.

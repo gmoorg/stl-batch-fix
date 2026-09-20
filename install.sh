@@ -85,17 +85,18 @@ else
 fi
 
 # ── fast-simplification ───────────────────────────────────────────────────────
-# Primary decimator. Same quadric edge collapse as PyMeshLab/Blender, but
+# Required decimator. Same quadric edge collapse as PyMeshLab/Blender, but
 # operating on numpy arrays instead of a full mesh database: measured ~7.5s /
 # 1.1 GB where PyMeshLab needs 42s / 1.6 GB and Blender OOMs, on a 2.55M
-# triangle mesh. Without it the pipeline falls back to PyMeshLab, then Blender.
+# triangle mesh. Without it the pipeline cannot meet its decimation contract.
 echo "→ fast-simplification"
 if "$PYTHON" -c "import fast_simplification" 2>/dev/null; then
     ok "fast-simplification already installed"
 else
     warn "fast-simplification not found — installing..."
     "$PYTHON" -m pip install fast-simplification && ok "fast-simplification installed" || {
-        warn "fast-simplification install failed — decimation falls back to PyMeshLab/Blender (slower, more memory)"
+        fail "fast-simplification install failed — it is REQUIRED for decimation"
+        exit 1
     }
 fi
 

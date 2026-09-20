@@ -28,7 +28,7 @@ import unittest
 
 import numpy as np
 
-from libs import repairer, scanner
+from libs import meshlab, repairer, scanner
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.repairer import CLEAN_FILTERS, Result, Step, StepResult, repair
 
@@ -115,26 +115,6 @@ class TestContract(unittest.TestCase):
         names = [name for name, _ in repairer.CLEAN_FILTERS]
         self.assertNotIn('meshing_remove_t_vertices', names)
         self.assertIn('meshing_remove_t_vertices', repairer.DO_NOT_RETRY)
-
-    @needs_tools
-    def test_the_clean_threshold_is_wrapped_not_passed_raw(self):
-        """`CLEAN_FILTERS` holds a plain float so the tuple stays readable
-        data; `_run_filters` wraps it as a `PercentageValue`.
-
-        That wrapping is load-bearing and was untested: PyMeshLab **raises** on
-        a bare float ("must be a pymeshlab.Percentage object"), so losing the
-        wrap breaks CLEAN on every mesh. It fails loudly rather than silently —
-        `ok=False` with the exception as `problem` — but nothing asserted it,
-        so a regression would first appear mid-batch on real files.
-        """
-        threshold = dict(CLEAN_FILTERS)['meshing_merge_close_vertices']
-        self.assertIsInstance(threshold['threshold'], float,
-                              "CLEAN_FILTERS should stay plain data")
-        # The wrap happens inside _run_filters; that it succeeds at all is the
-        # assertion, since the raw float raises.
-        doubled = mesh(TETRA_VERTS, TETRA_FACES + TETRA_FACES)
-        result = repairer._run_filters(doubled, CLEAN_FILTERS)
-        self.assertEqual(len(result.geometry.faces), 4)
 
     def test_clean_keeps_all_four_filters(self):
         """`merge_close_vertices` alone is worse than nothing: it collapsed
@@ -350,7 +330,7 @@ class TestWhyCleanIsAllFourFilters(unittest.TestCase):
         self.assertTrue(scanner.scan(doubled).is_clean,
                         "the fixture must read clean before any filter — "
                         "that is what makes the doubles case dangerous")
-        alone = repairer._run_filters(
+        alone = meshlab.apply_filters(
             doubled, (('meshing_merge_close_vertices',
                        {'threshold': 0.1}),))
         self.assertGreater(scanner.scan(alone).non_manifold, 0,
@@ -358,7 +338,7 @@ class TestWhyCleanIsAllFourFilters(unittest.TestCase):
 
     def test_the_full_set_repairs_what_merge_alone_breaks(self):
         """The same input through all four comes out as one tetrahedron."""
-        result = repairer._run_filters(self.doubled(), CLEAN_FILTERS)
+        result = meshlab.apply_filters(self.doubled(), CLEAN_FILTERS)
         self.assertEqual(len(result.geometry.faces), len(TETRA_FACES))
         self.assertTrue(scanner.scan(result).is_clean)
 
@@ -371,11 +351,11 @@ class TestWhyCleanIsAllFourFilters(unittest.TestCase):
         because it walks faces), but they do occur, so the filter is not dead
         weight.
         """
-        merged = repairer._run_filters(
+        merged = meshlab.apply_filters(
             self.doubled(), CLEAN_FILTERS[:3])       # all but the last
         orphans = (len(merged.geometry.verts)
                    - len(np.unique(merged.geometry.faces)))
-        full = repairer._run_filters(self.doubled(), CLEAN_FILTERS)
+        full = meshlab.apply_filters(self.doubled(), CLEAN_FILTERS)
         after = (len(full.geometry.verts)
                  - len(np.unique(full.geometry.faces)))
         self.assertEqual(after, 0, "the last filter should leave no orphans")
@@ -415,7 +395,7 @@ class TestZeroThicknessSheets(unittest.TestCase):
         sound = mesh(self.VERTS, self.FACES)
         flapped = mesh(self.VERTS, self.FACES + [[0, 1, 2]])
         self.assertEqual(scanner.scan(flapped).non_manifold, 3)
-        fixed = repairer._run_filters(
+        fixed = meshlab.apply_filters(
             flapped, (('meshing_remove_duplicate_faces', {}),))
         self.assertTrue(scanner.scan(fixed).is_clean)
         self.assertEqual(len(fixed.geometry.faces),
@@ -429,7 +409,7 @@ class TestZeroThicknessSheets(unittest.TestCase):
         missing surface and the redundant one goes, so the filter **repairs**
         rather than opening anything."""
         masked = mesh(self.VERTS, self.FACES[1:] + [[0, 2, 1], [0, 1, 2]])
-        fixed = repairer._run_filters(
+        fixed = meshlab.apply_filters(
             masked, (('meshing_remove_duplicate_faces', {}),))
         self.assertTrue(scanner.scan(fixed).is_clean)
         self.assertEqual(len(fixed.geometry.faces), len(self.FACES))
@@ -440,7 +420,7 @@ class TestZeroThicknessSheets(unittest.TestCase):
         both faces may be the only surface in that region, so removing both
         would cut a real hole rather than expose one."""
         masked = mesh(self.VERTS, self.FACES[1:] + [[0, 2, 1], [0, 1, 2]])
-        fixed = repairer._run_filters(
+        fixed = meshlab.apply_filters(
             masked, (('meshing_remove_duplicate_faces', {}),))
         self.assertEqual(len(fixed.geometry.faces), 4,
                          "a face of the sheet survives as real surface")

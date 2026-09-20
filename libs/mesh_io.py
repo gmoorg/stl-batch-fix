@@ -119,6 +119,20 @@ class Mesh:
                     self.is_valid, self.problem, self.geometry)
 
 
+def require_geometry(mesh: Mesh) -> None:
+    """Raise if `mesh` has no in-memory geometry to inspect or rewrite."""
+    if mesh.geometry is None:
+        raise ValueError(
+            f"{mesh.path} has no geometry to operate on — load it first")
+
+
+def ensure_parent_dir(path: str) -> None:
+    """Create the parent directory for a file path when it is not empty."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 def kind(path: str) -> Kind:
     """Classify by content, using the extension only for OBJ.
 
@@ -319,9 +333,7 @@ def write(mesh: Mesh) -> None:
     buf[:, 0:12] = nrm.astype(np.float32).view(np.uint8)
     buf[:, 12:48] = tv.reshape(n, 9).view(np.uint8)
 
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
+    ensure_parent_dir(path)
     with open(path, 'wb') as f:
         f.write(b'\0' * 80)
         f.write(struct.pack('<I', n))
@@ -377,9 +389,7 @@ def write_ply(mesh: Mesh, path: str) -> None:
     records['n'] = 3
     records['v'] = faces
 
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
+    ensure_parent_dir(path)
     with open(path, 'wb') as f:
         f.write(header)
         f.write(verts.tobytes())

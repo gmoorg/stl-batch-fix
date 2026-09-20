@@ -12,16 +12,18 @@ on the first attempt — it raised on every mesh with a seam candidate — and t
 differential check is what caught it, before any test encoded the bug.
 """
 
+import os
 import unittest
 from collections import defaultdict
 
 import numpy as np
 
 from libs import scanner
-from libs.mesh_io import Geometry, Kind, Mesh
+from libs.mesh_io import Geometry, Kind, Mesh, ensure_parent_dir, require_geometry
 from libs.scanner import (
-    Loop, Scan, largest_open_loop, open_loops, open_loops_are_printable, scan,
-    seam_edges, shell_count, shells, volume, winding_seams,
+    Loop, Scan, face_edges, largest_open_loop, open_loops,
+    open_loops_are_printable, scan, seam_edges, shell_count, shells, volume,
+    winding_seams,
 )
 
 #: A unit tetrahedron, consistently wound: 4 faces, 6 edges, every edge shared.
@@ -43,6 +45,23 @@ def tetra(faces=None):
 
 def unloaded():
     return Mesh('/test.stl', '/test.out.stl', Kind.BINARY_STL, 4, True)
+
+
+class TestHelpers(unittest.TestCase):
+
+    def test_face_edges_matches_the_project_edge_contract(self):
+        edges = face_edges(np.array(TETRA_FACES, dtype=np.int64))
+        self.assertEqual(edges.shape, (12, 2))
+        self.assertTrue(np.all(edges[:, 0] <= edges[:, 1]))
+
+    def test_require_geometry_raises_on_unloaded_mesh(self):
+        with self.assertRaises(ValueError):
+            require_geometry(unloaded())
+
+    def test_ensure_parent_dir_creates_missing_directories(self):
+        target = '/tmp/layer1/layer2/test.stl'
+        ensure_parent_dir(target)
+        self.assertTrue(os.path.isdir('/tmp/layer1/layer2'))
 
 
 class TestScan(unittest.TestCase):

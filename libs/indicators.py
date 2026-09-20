@@ -49,6 +49,10 @@ _OUTPUT_MARKERS: tuple[tuple[str, Indicator], ...] = (
     ('.undecimated.stl', Indicator.UNDECIMATED),
 )
 
+_MARKER_SUFFIX: dict[Indicator, str] = {
+    indicator: suffix for suffix, indicator in _OUTPUT_MARKERS
+}
+
 EXPORT_DIRNAME = 'stl-exported'
 
 
@@ -84,6 +88,11 @@ def export_path(source: str, input_folder: str) -> str:
     rel = os.path.relpath(os.path.abspath(source), input_folder)
     base, _ = os.path.splitext(rel)
     return os.path.join(input_folder, EXPORT_DIRNAME, base + '.stl')
+
+
+def marker_suffix(indicator: Indicator) -> str | None:
+    """Return the output filename suffix for a marker indicator."""
+    return _MARKER_SUFFIX.get(indicator)
 
 
 def check(source: str, input_folder: str, output_file: str,

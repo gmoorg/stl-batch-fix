@@ -21,7 +21,7 @@ import unittest
 
 import numpy as np
 
-from libs import decimator, processor, repairer, scanner
+from libs import decimator, indicators, processor, repairer, scanner
 from libs.indicators import Indicator
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.processor import MIN_VOLUME_KEPT, Outcome, process, write
@@ -236,21 +236,18 @@ class TestWriting(unittest.TestCase):
     def test_every_marker_indicator_has_a_suffix(self):
         """A missing entry would silently write nothing."""
         for indicator in (Indicator.FAILED, Indicator.DESTROYED,
-                          Indicator.UNREPAIRED, Indicator.OPEN_EDGES,
-                          Indicator.UNDECIMATED, Indicator.BROKEN,
-                          Indicator.TIMED_OUT):
+                      Indicator.UNREPAIRED, Indicator.OPEN_EDGES,
+                      Indicator.UNDECIMATED, Indicator.BROKEN,
+                      Indicator.TIMED_OUT):
             with self.subTest(indicator=indicator):
-                self.assertIn(indicator, processor._MARKER_SUFFIX)
+                self.assertIsNotNone(indicators.marker_suffix(indicator))
 
     def test_the_marker_names_match_what_indicators_reads(self):
         """Written here, found by the next run's scan — or the pipeline
         reprocesses every failed file forever."""
-        from libs import indicators as ind
-        known = dict(ind._OUTPUT_MARKERS)
-        for indicator, suffix in processor._MARKER_SUFFIX.items():
+        for suffix, indicator in indicators._OUTPUT_MARKERS:
             with self.subTest(indicator=indicator):
-                self.assertIn(suffix, known)
-                self.assertIs(known[suffix], indicator)
+                self.assertEqual(indicators.marker_suffix(indicator), suffix)
 
 
 if __name__ == '__main__':

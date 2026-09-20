@@ -284,6 +284,11 @@ The following concerns are limited to tests of `libs/` and coverage needed for t
 
 ### T16 — Final face-budget test missing
 
-`tests/tests/test_processor.py`:L52–102 and `tests/tests/test_repair_pipeline.py`:L181–192: 🟡 missing final-budget case: the T-junction probe proves repair can increase face count, but no test checks the practical final face budget. Use a near-limit fixture where repair growth is large enough to matter, then assert the chosen over-budget outcome.
+**Not a finding under the owner's requirement.** `max_faces` is the
+decimation target, not a hard post-repair ceiling. The configured `900,000`
+target deliberately leaves headroom below the approximately 1M slicer limit;
+repair may add faces, especially when the welder restores missing
+subdivision. Re-decimating after repair would risk recreating the defects just
+repaired.
 
-**Your comment:** _Add your note here._
+**Owner decision:** no final-face-budget gate or T16 regression is required.

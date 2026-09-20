@@ -1,12 +1,4 @@
-"""Tests for libs.decimator — the ladder, not the algorithms.
-
-Both rungs are third-party quadric edge collapse; testing *that* would be
-testing fast_simplification. What is ours is the ladder: which rung runs, what
-happens when one fails, and that a mesh already within budget is left alone.
-
-Rungs are forced by patching the module's availability flags, so a test can
-reach the second rung without needing the first to genuinely break.
-"""
+"""Tests for libs.decimator — the required decimator contract."""
 
 import os
 import struct
@@ -109,20 +101,18 @@ class TestAvailability(DecimatorCase):
     def test_is_available_is_false_with_nothing_at_all(self):
         """Decimation is a deliverable: a false here means do not start.
 
-        There is no Blender fallback any more (D19), so both Python rungs
-        missing means the run cannot produce its deliverable at all.
+        The required decimator missing means the run cannot produce its
+        deliverable at all.
         """
-        with mock.patch.object(decimator, '_FASTSIMP', False), \
-             mock.patch.object(decimator, '_PYMESHLAB', False):
+        with mock.patch.object(decimator, '_FASTSIMP', False):
             self.assertFalse(is_available())
 
     def test_available_rungs_reports_what_is_missing(self):
         with mock.patch.object(decimator, '_FASTSIMP', False):
-            self.assertEqual(available_rungs(), (Rung.PYMESHLAB,))
+            self.assertEqual(available_rungs(), ())
 
     def test_there_is_no_blender_rung(self):
-        """D19: removed. A mesh defeating both rungs is marked, not handed to
-        a subprocess — Bambu Studio's own simplify is the manual fallback."""
+        """There is no alternate decimation rung."""
         self.assertFalse(hasattr(Rung, 'BLENDER'))
         self.assertNotIn('blender', [r.value for r in available_rungs()])
 
@@ -192,64 +182,50 @@ class TestFastSimplification(DecimatorCase):
         self.assertEqual(set(os.listdir(self.dir)), before)
 
 
-@unittest.skipUnless(decimator._PYMESHLAB, "pymeshlab not installed")
-class TestPyMeshLabRung(DecimatorCase):
-
-    def test_it_runs_when_fastsimp_is_missing(self):
-        with mock.patch.object(decimator, '_FASTSIMP', False):
-            result = decimate(self.loaded(), max_faces=1000)
-        self.assertIs(result.rung, Rung.PYMESHLAB)
-        self.assertLess(result.faces_out, result.faces_in)
+class TestFastSimplificationFailure(DecimatorCase):
 
     def test_it_runs_when_fastsimp_fails(self):
-        """The fallback exists for failure, not only for absence."""
+        """The failure explains why the undecimated marker is needed."""
         with mock.patch.object(decimator, '_decimate_fastsimp',
                                side_effect=RuntimeError("boom")):
             result = decimate(self.loaded(), max_faces=1000)
-        self.assertIs(result.rung, Rung.PYMESHLAB)
-        self.assertEqual(len(result.attempts), 1)
-        self.assertIs(result.attempts[0][0], Rung.FAST_SIMPLIFICATION)
+        self.assertEqual([r for r, _ in result.attempts],
+                         [Rung.FAST_SIMPLIFICATION])
         self.assertIn('boom', result.attempts[0][1])
 
-    def test_it_returns_a_loaded_mesh_too(self):
+    def test_missing_fast_simplification_is_a_failure(self):
+        mesh = self.loaded()
         with mock.patch.object(decimator, '_FASTSIMP', False):
-            result = decimate(self.loaded(), max_faces=1000)
-        self.assertTrue(result.mesh.is_loaded)
-
-    def test_it_writes_no_files_either(self):
-        """PyMeshLab runs in-process; a disk round trip would be for nothing."""
-        mesh = self.loaded()                    # the fixture's own file first
-        before = set(os.listdir(self.dir))
-        with mock.patch.object(decimator, '_FASTSIMP', False):
-            decimate(mesh, max_faces=1000)
-        self.assertEqual(set(os.listdir(self.dir)), before)
+            result = decimate(mesh, max_faces=1000)
+        self.assertIs(result.rung, Rung.FAILED)
+        self.assertIs(result.mesh, mesh)
+        self.assertIn('not installed', result.attempts[0][1])
 
 
-class TestEveryRungFails(DecimatorCase):
+
+
+class TestFastSimplificationFailureResult(DecimatorCase):
 
     def test_the_input_is_returned_unchanged(self):
         """Decimation is a deliverable: the caller must be able to tell
         'not decimated' from 'decimated badly' and mark the file."""
         mesh = self.loaded()
         with mock.patch.object(decimator, '_decimate_fastsimp',
-                               side_effect=RuntimeError("a")), \
-             mock.patch.object(decimator, '_decimate_pymeshlab',
-                               side_effect=RuntimeError("b")):
+                       side_effect=RuntimeError("boom")):
             result = decimate(mesh, max_faces=1000)
         self.assertIs(result.rung, Rung.FAILED)
         self.assertIs(result.mesh, mesh)
         self.assertFalse(result.ran)
         self.assertEqual(result.faces_out, result.faces_in)
 
-    def test_every_attempt_is_recorded_in_order(self):
-        """A silent fallback is indistinguishable from a first-choice success."""
+    def test_failure_is_recorded(self):
+        """The failure explains why the undecimated marker is needed."""
         with mock.patch.object(decimator, '_decimate_fastsimp',
-                               side_effect=RuntimeError("a")), \
-             mock.patch.object(decimator, '_decimate_pymeshlab',
-                               side_effect=RuntimeError("b")):
+                               side_effect=RuntimeError("boom")):
             result = decimate(self.loaded(), max_faces=1000)
         self.assertEqual([r for r, _ in result.attempts],
-                         [Rung.FAST_SIMPLIFICATION, Rung.PYMESHLAB])
+                         [Rung.FAST_SIMPLIFICATION])
+        self.assertIn('boom', result.attempts[0][1])
 
 
 if __name__ == '__main__':

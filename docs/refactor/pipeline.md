@@ -18,11 +18,11 @@ load and validate finite, non-empty source
        rescan and preserve failure evidence after each tool
   → require every meaningful part to remain acceptable
   → merge accepted parts
-  → judge merged geometry, topology, and final face budget
+  → judge merged geometry and topology
   → write atomically, or write a full-mesh non-success marker
 ```
 
-Current code runs the central path but always chooses PyMeshFix for a part. Blender routing, original-to-decimated preservation, meaningful-component retention, finite validation, and the final budget gate remain open.
+Current code runs the central path but always chooses PyMeshFix for a part. Blender routing, original-to-decimated preservation, meaningful-component retention, and finite validation remain open. The face target applies before repair; repair is not followed by blind re-decimation.
 
 ## Why this order
 
@@ -42,4 +42,4 @@ Current code runs the central path but always chooses PyMeshFix for a part. Blen
 - Automatic seam splitting: a seam loop did not reliably predict damage; keep it as measured recovery.
 - Dropping every small shell: face count does not establish debris versus required detail.
 - Fixed authoring-unit tolerances: users rescale models, and absolute thresholds failed at different scales.
-- Re-decimating after repair without another repair cycle: it can recreate repaired defects.
+- Re-decimating after repair without another repair cycle: it can recreate repaired defects. The pre-repair decimation target deliberately leaves headroom under the approximate slicer limit.

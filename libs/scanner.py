@@ -14,7 +14,7 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
-from .mesh_io import Mesh
+from .mesh_io import Mesh, require_geometry
 
 
 @dataclass(frozen=True)
@@ -76,24 +76,20 @@ def _require_geometry(mesh: Mesh) -> None:
     written out as finished having been checked by nothing.  Here that case
     cannot be represented, because it raises instead.
     """
-    if mesh.geometry is None:
-        raise ValueError(
-            f"{mesh.path} has no geometry to scan — load it first")
+    require_geometry(mesh)
 
 
-def _edges_of(faces: np.ndarray) -> np.ndarray:
-    """Every face's three edges as vertex-index pairs, each sorted low-high.
-
-    Sorting each pair makes an edge's identity independent of the direction the
-    face traverses it, which is what lets two faces sharing an edge be counted
-    as sharing it.  Direction is not lost to the caller that needs it —
-    `winding_seams` derives it separately, because there the traversal
-    direction is the whole signal.
-    """
+def face_edges(faces: np.ndarray) -> np.ndarray:
+    """Every face's three edges as vertex-index pairs, each sorted low-high."""
     edges = np.concatenate([faces[:, [0, 1]],
                             faces[:, [1, 2]],
                             faces[:, [2, 0]]])
     return np.sort(edges, axis=1)
+
+
+def _edges_of(faces: np.ndarray) -> np.ndarray:
+    """Backwards-compatible alias for the project's face-edge primitive."""
+    return face_edges(faces)
 
 
 def _degenerate_mask(faces: np.ndarray) -> np.ndarray:
@@ -115,7 +111,7 @@ def scan(mesh: Mesh) -> Scan:
         return Scan(0, 0, 0, 0)
 
     degenerate = int(_degenerate_mask(faces).sum())
-    _, counts = np.unique(_edges_of(faces), axis=0, return_counts=True)
+    _, counts = np.unique(face_edges(faces), axis=0, return_counts=True)
     return Scan(open_edges=int((counts == 1).sum()),
                 non_manifold=int((counts > 2).sum()),
                 faces=len(faces),

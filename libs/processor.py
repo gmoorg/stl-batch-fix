@@ -97,6 +97,13 @@ def _decide(source: Mesh,
                    scan=scan, decimation=decimated, repair=repaired)
 
 
+def _decimation_failure_reason(result: decimator.Result) -> str:
+    """Explain every failed decimation attempt for the undecimated marker."""
+    attempts = '; '.join(f"{rung.value}: {why}"
+                         for rung, why in result.attempts)
+    return f"every decimator failed ({attempts})"
+
+
 def process(mesh: Mesh, max_faces: int,
             tool=None) -> Outcome:
     """Decimate, repair and judge one loaded mesh.  Nothing is written.
@@ -118,10 +125,8 @@ def process(mesh: Mesh, max_faces: int,
         # Its own outcome, not a lesser repair failure.  A file that cannot be
         # reduced will be reduced by the printer instead, which reintroduces
         # exactly the defects this tool removes.
-        attempts = '; '.join(f"{rung.value}: {why}"
-                             for rung, why in decimated.attempts)
         return Outcome(Indicator.UNDECIMATED, None, 'source',
-                       f"every decimator failed ({attempts})",
+                       _decimation_failure_reason(decimated),
                        decimation=decimated)
 
     repaired = (repairer.repair(decimated.mesh, tool=tool) if tool
@@ -148,15 +153,13 @@ def write(outcome: Outcome, source_path: str, output_file: str) -> str | None:
         mesh_io.write(outcome.mesh.with_destination(output_file))
         return output_file
 
-    suffix = _MARKER_SUFFIX.get(outcome.indicator)
+    suffix = indicators.marker_suffix(outcome.indicator)
     if suffix is None:                                 # pragma: no cover
         return None
     base, extension = os.path.splitext(output_file)
     marker = f"{base}{suffix}"
 
-    parent = os.path.dirname(marker)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
+    mesh_io.ensure_parent_dir(marker)
 
     if outcome.marker == 'repaired' and outcome.repair is not None:
         mesh_io.write(outcome.repair.mesh.with_destination(marker))
@@ -166,15 +169,3 @@ def write(outcome: Outcome, source_path: str, output_file: str) -> str | None:
         shutil.copy2(source_path, marker)
     return marker
 
-
-#: Which marker file each outcome writes.  The names are `indicators`' own, so
-#: a marker written here is found by the next run's scan.
-_MARKER_SUFFIX: dict[Indicator, str] = {
-    Indicator.FAILED: '.failed.stl',
-    Indicator.DESTROYED: '.destroyed.stl',
-    Indicator.UNREPAIRED: '.unrepaired.stl',
-    Indicator.OPEN_EDGES: '.open.stl',
-    Indicator.UNDECIMATED: '.undecimated.stl',
-    Indicator.BROKEN: '.broken.stl',
-    Indicator.TIMED_OUT: '.timeout.stl',
-}

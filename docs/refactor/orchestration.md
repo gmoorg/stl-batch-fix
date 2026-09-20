@@ -21,6 +21,8 @@ CLI or TUI → RunConfig
 ## Required behavior
 
 1. Validate configuration and dependencies once.
+  `fast_simplification` is required for startup; PyMeshLab remains required
+  for the separate shell split/merge operations.
 2. Classify every source once; copy companions and normalize OBJ/ASCII STL to probed binary STL.
 3. Preserve identity and relative output paths; reject destination collisions.
 4. Admit jobs by worker and memory limits, preferably smallest measurable first.

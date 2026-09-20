@@ -2,6 +2,12 @@
 
 Public interfaces omit some optional arguments. Read the code before changing a contract.
 
+The modules are **independent of the legacy batch script**, not independent of
+the mesh-processing domain. They expose reusable mesh and tool boundaries
+without importing `stl_batch_fix.py`, depending on its globals, or assuming
+its CLI, TUI, worker lifecycle, or filesystem layout. The legacy script remains
+reference material until the refactor is complete.
+
 ## Data and tools
 
 ### `mesh_io`
@@ -17,6 +23,13 @@ Public interfaces omit some optional arguments. Read the code before changing a 
 - **Interface:** `scan`, `open_loops`, `open_loops_are_printable`, `winding_seams`, `volume`, `shells`, `shell_count`, `diagonal`.
 - **Implementation:** derives indexed edges from loaded arrays; shells are edge-connected and use SciPy connectivity.
 - **Tried/rejected:** pure NumPy shells were too slow. Edge counts alone were rejected as a success oracle: closed, zero-area, non-finite, or incomplete models can score clean.
+
+### `meshlab`
+
+- **For:** own the PyMeshLab dependency boundary for in-memory mesh operations.
+- **Interface:** `is_available`, `to_mesh`, `from_mesh`, `apply_filters`.
+- **Implementation:** converts project geometry (`float32`/`int64`) to PyMeshLab's `float64`/`int32` arrays, wraps float filter parameters as `PercentageValue`, and converts results back without a filesystem round trip.
+- **Tried/rejected:** keeping these methods in `repairer` mixed tool mechanics with repair policy. The filter list and order remain in `repairer`.
 
 ### `meshfix`
 
@@ -38,8 +51,8 @@ Public interfaces omit some optional arguments. Read the code before changing a 
 
 - **For:** reduce one loaded mesh to a face budget.
 - **Interface:** `decimate(mesh, max_faces) -> Result`, `available_rungs`, `is_available`.
-- **Implementation:** tries `fast_simplification`, then PyMeshLab; reports the rung and measurements.
-- **Tried/rejected:** split-first gives every part a budget and can exceed the final limit. Blender as a third rung was unnecessary. Decimation can erase or fuse geometry, so compare it with the original.
+- **Implementation:** requires `fast_simplification`; reports its measurements or returns the unchanged mesh with `Rung.FAILED` so the caller writes an undecimated marker.
+- **Tried/rejected:** PyMeshLab and Blender decimation were rejected as fallback rungs. `fast_simplification` is a required deliverable; when it fails, the caller writes an undecimated marker for manual handling. Split-first gives every part a budget and can exceed the final limit. Decimation can erase or fuse geometry, so compare it with the original.
 
 ### `welder`
 
@@ -59,7 +72,7 @@ Public interfaces omit some optional arguments. Read the code before changing a 
 
 - **For:** own the ordered repair sequence and measurements without writing.
 - **Interface:** `repair(mesh, min_shell_faces, tool) -> Result`, `blender_part`, `is_available`.
-- **Implementation:** weld → CLEAN → split; each retained part is oriented and currently sent to PyMeshFix; parts merge afterward. Blender through PLY exists, but defect routing is unfinished. `Result.ok` means the sequence ran, not that it is acceptable.
+- **Implementation:** weld → CLEAN → split; each retained part is oriented and currently sent to PyMeshFix; parts merge afterward. CLEAN's filter policy lives here, while PyMeshLab execution belongs to `meshlab`. Blender through PLY exists, but defect routing is unfinished. `Result.ok` means the sequence ran, not that it is acceptable.
 - **Tried/rejected:** CLEAN after split cannot see coincident copies. Whole-mesh or guarded orientation missed local inversions and erased seam evidence; unconditional per-part orientation worked. Blender cannot be a wholesale replacement for PyMeshFix because they repair different defects.
 
 ### `processor`
@@ -67,7 +80,7 @@ Public interfaces omit some optional arguments. Read the code before changing a 
 - **For:** process, judge, and write one mesh outcome.
 - **Interface:** `process(mesh, max_faces, tool) -> Outcome`, `write(outcome, source_path, output_file)`.
 - **Implementation:** decimates, repairs, scans, then chooses an `Indicator`; loss must be checked before topology because a partial model can be closed.
-- **Tried/rejected:** judging only post-decimation input misses decimation loss. Signed volume can cancel between opposite shells. Finite geometry, component retention, and final-budget gates are missing.
+- **Tried/rejected:** judging only post-decimation input misses decimation loss. Signed volume can cancel between opposite shells. Finite geometry and component retention are still open acceptance concerns. The decimation target is applied before repair; blind re-decimation afterward can recreate repaired defects.
 
 ## Files and execution
 

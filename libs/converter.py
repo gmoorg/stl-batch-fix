@@ -56,6 +56,11 @@ def _output_for(source: str, source_root: str, output_root: str) -> str:
     return os.path.join(output_root, base + out_ext)
 
 
+def _conversion_failure(source: str, destination: str, reason: str) -> Mesh:
+    """Build the invalid mesh record used when normalization did not happen."""
+    return Mesh(source, destination, mesh_io.kind(source), None, False, reason)
+
+
 def prepare(source_root: str,
             output_root: str,
             emit: Callable[[Mesh], None],
@@ -133,9 +138,9 @@ def prepare(source_root: str,
     if convert is None:
         for source, _, destination in pending:
             summary.conversion_failed += 1
-            emit_one(Mesh(source, destination, mesh_io.kind(source), None,
-                          False,
-                          "needs conversion but no converter was supplied"))
+            emit_one(_conversion_failure(
+                source, destination,
+                "needs conversion but no converter was supplied"))
         return summary
 
     def next_item(done, error):
@@ -144,9 +149,8 @@ def prepare(source_root: str,
     def convert_one(item):
         source, export, destination = item
         ok, path = convert(source, export)
-        result = (mesh_io.probe(path, destination) if ok
-                  else Mesh(source, destination, mesh_io.kind(source), None,
-                            False, "conversion failed"))
+        result = (mesh_io.probe(path, destination) if ok else
+              _conversion_failure(source, destination, "conversion failed"))
         # Everything shared goes through emit_one's lock, including these
         # counters.  Two cleverer arrangements were tried first and both were
         # wrong: counting inside the pool's selector looks free, since the pool

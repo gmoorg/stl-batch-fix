@@ -54,6 +54,34 @@ def _default_name(mesh: Mesh, index: int, total: int) -> str:
     return f"{base}.part.{index}{ext or '.stl'}"
 
 
+def _face_regions_after_cut(faces: np.ndarray,
+                            blocked_edges: set[tuple[int, int]]) -> list[np.ndarray]:
+    """Return face-connected regions without crossing selected seam edges."""
+    all_edges = np.sort(np.concatenate([faces[:, [0, 1]],
+                                        faces[:, [1, 2]],
+                                        faces[:, [2, 0]]]), axis=1)
+    owner = np.tile(np.arange(len(faces)), 3)
+    order = np.lexsort((all_edges[:, 1], all_edges[:, 0]))
+    all_edges, owner = all_edges[order], owner[order]
+
+    shared = np.all(all_edges[1:] == all_edges[:-1], axis=1)
+    left, right = owner[:-1][shared], owner[1:][shared]
+    pair_edges = all_edges[:-1][shared]
+    if len(pair_edges):
+        crosses = np.fromiter(
+            ((int(a), int(b)) in blocked_edges for a, b in pair_edges),
+            dtype=bool, count=len(pair_edges))
+        left, right = left[~crosses], right[~crosses]
+
+    graph = coo_matrix((np.ones(len(left), dtype=np.int8), (left, right)),
+                       shape=(len(faces), len(faces)))
+    _, labels = connected_components(graph, directed=False)
+    order = np.argsort(labels, kind='stable')
+    regions = np.split(order, np.flatnonzero(np.diff(labels[order])) + 1)
+    regions.sort(key=len, reverse=True)
+    return regions
+
+
 def by_shells(mesh: Mesh,
               min_faces: int = MIN_SHELL_FACES,
               name: Callable[[Mesh, int, int], str] = _default_name,
@@ -103,37 +131,9 @@ def by_seams(mesh: Mesh,
     if loops == 0:
         return (mesh,)
 
-    faces = mesh.geometry.faces
     seam = scanner.seam_edges(mesh)
     blocked = {(int(a), int(b)) for a, b in seam}
-
-    # Face adjacency through shared edges, with the seam edges left out — so
-    # the flood fill cannot cross the cut line.  Same construction as
-    # `scanner.shells`, minus the blocked edges.
-    all_edges = np.sort(np.concatenate([faces[:, [0, 1]],
-                                        faces[:, [1, 2]],
-                                        faces[:, [2, 0]]]), axis=1)
-    owner = np.tile(np.arange(len(faces)), 3)
-    order = np.lexsort((all_edges[:, 1], all_edges[:, 0]))
-    all_edges, owner = all_edges[order], owner[order]
-
-    shared = np.all(all_edges[1:] == all_edges[:-1], axis=1)
-    left, right = owner[:-1][shared], owner[1:][shared]
-    pair_edges = all_edges[:-1][shared]
-
-    if len(pair_edges):
-        crosses = np.fromiter(
-            ((int(a), int(b)) in blocked for a, b in pair_edges),
-            dtype=bool, count=len(pair_edges))
-        left, right = left[~crosses], right[~crosses]
-
-    graph = coo_matrix((np.ones(len(left), dtype=np.int8), (left, right)),
-                       shape=(len(faces), len(faces)))
-    _, labels = connected_components(graph, directed=False)
-
-    order = np.argsort(labels, kind='stable')
-    regions = np.split(order, np.flatnonzero(np.diff(labels[order])) + 1)
-    regions.sort(key=len, reverse=True)
+    regions = _face_regions_after_cut(mesh.geometry.faces, blocked)
 
     kept = [r for r in regions if len(r) >= min_faces]
     if len(kept) <= 1:
