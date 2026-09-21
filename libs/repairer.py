@@ -130,14 +130,22 @@ class Result:
 
     @property
     def volume_kept(self) -> float:
-        """Return `abs(volume_out) / abs(volume_in)`; use 1 for zero input.
+        """Return `volume_out / volume_in`, or `nan` when there is no scale.
 
-        Magnitude handles an intentional orientation flip. This ratio detects gross
-        loss but is not a verdict: removing coincident duplicate shells can
-        legitimately reduce volume.
+        Both terms are `scanner.component_volume`, so an intentional winding
+        flip still reads as kept while a deleted shell reads as lost.
+
+        Zero input returns `nan` rather than 1.0.  The old default called an
+        unmeasurable mesh perfectly preserved, and the meshes it applied to
+        were exactly the ones needing scrutiny: oppositely wound shells
+        cancelling to zero.  `nan` is not a score, and `processor._decide`
+        refuses it instead of comparing it.
+
+        This ratio detects gross loss but is not a verdict: removing coincident
+        duplicate shells can legitimately reduce volume.
         """
         if self.volume_in == 0.0:
-            return 1.0
+            return float('nan')
         return abs(self.volume_out) / abs(self.volume_in)
 
 
@@ -250,7 +258,12 @@ def repair(mesh: Mesh,
 
     started = time.monotonic()
     faces_in = len(mesh.geometry.faces)
-    volume_in = scanner.volume(mesh)
+    # Per-component magnitude, not the signed total: this pair is what
+    # `volume_kept` divides, and a signed total lets two oppositely wound
+    # shells cancel into a denominator near zero (A02).  The per-step `volume`
+    # recorded below stays signed — it describes one result and is where an
+    # inside-out mesh shows up.
+    volume_in = scanner.component_volume(mesh)
     before = mesh.geometry.verts
     steps: list[StepResult] = []
     destination = mesh.destination
@@ -340,7 +353,7 @@ def repair(mesh: Mesh,
         # caller to discover.
         result = Result(mesh, True, None, tuple(steps), faces_in,
                         len(mesh.geometry.faces), volume_in,
-                        scanner.volume(mesh), len(parts),
+                        scanner.component_volume(mesh), len(parts),
                         time.monotonic() - started,
                         lost_vertices=_count_lost(before, mesh.geometry.verts))
 

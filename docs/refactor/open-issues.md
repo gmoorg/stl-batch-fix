@@ -10,7 +10,8 @@ No final face-budget gate is required; `max_faces` is a decimation target. See t
 
 - Reject zero-face, non-finite, zero-area, or invalid geometry.
 - Compare decimation with the original; current destruction checks begin too late.
-- Preserve meaningful components. The `<100 faces` rule and signed-volume cancellation can approve missing parts.
+- Preserve meaningful components. The `<100 faces` rule can still approve missing parts; signed-volume cancellation no longer can (A02, `scanner.component_volume`), but the component is still dropped — only the false success was fixed.
+- Distinguish a cavity from a second solid. `component_volume` discards the sign per component, so a repair that flips an inner shell outward scores 100%. Containment-aware volume would answer it.
 - Propagate PyMeshFix failure; it can currently become `repairer.ok=True`.
 - Commit output and markers atomically.
 - Define per-part routing between PyMeshFix and Blender, including mixed defects and intermediate acceptance.

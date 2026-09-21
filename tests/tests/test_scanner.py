@@ -21,7 +21,7 @@ import numpy as np
 from libs import scanner
 from libs.mesh_io import Geometry, Kind, Mesh, ensure_parent_dir, require_geometry
 from libs.scanner import (
-    Loop, Scan, face_edges, largest_open_loop, open_loops,
+    Loop, Scan, component_volume, face_edges, largest_open_loop, open_loops,
     open_loops_are_printable, scan, seam_edges, shell_count, shells, volume,
     winding_seams,
 )
@@ -467,6 +467,47 @@ class TestVolume(unittest.TestCase):
     def test_unloaded_raises(self):
         with self.assertRaises(ValueError):
             volume(unloaded())
+
+
+class TestComponentVolume(unittest.TestCase):
+    """A02: the measure that cannot cancel.
+
+    `volume` is signed, so two oppositely wound shells sum to nothing. The
+    measured case: a 760-face sphere at +4094.863122 beside a 4-face
+    tetrahedron at -4094.863180 totalled -0.00006, and deleting the
+    tetrahedron then reported 7,049,393,791% of volume kept.
+    """
+
+    def test_oppositely_wound_shells_do_not_cancel(self):
+        inverted = [[4, 6, 5], [4, 5, 7], [4, 7, 6], [5, 6, 7]]
+        verts = TETRA_VERTS + [[10, 10, 10], [11, 10, 10],
+                               [10, 11, 10], [10, 10, 11]]
+        faces = TETRA_FACES + [f[::-1] for f in inverted]
+        both = mesh(verts, faces)
+
+        self.assertAlmostEqual(volume(both), 0.0, places=4)
+        self.assertAlmostEqual(component_volume(both),
+                               abs(volume(tetra())) * 2, places=4)
+
+    def test_it_agrees_with_volume_on_one_shell(self):
+        """No new disagreement on the ordinary case: one closed body."""
+        self.assertAlmostEqual(component_volume(tetra()),
+                               abs(volume(tetra())), places=6)
+
+    def test_an_inverted_mesh_measures_the_same_as_an_outward_one(self):
+        """Magnitude, so an intentional winding flip is not loss."""
+        faces = np.array(TETRA_FACES, dtype=np.int64)[:, ::-1]
+        self.assertAlmostEqual(component_volume(tetra(faces)),
+                               component_volume(tetra()), places=6)
+
+    def test_an_empty_mesh_measures_zero(self):
+        self.assertEqual(
+            component_volume(mesh(TETRA_VERTS,
+                                  np.zeros((0, 3), dtype=np.int64))), 0.0)
+
+    def test_unloaded_raises(self):
+        with self.assertRaises(ValueError):
+            component_volume(unloaded())
 
 
 class TestShellsAgainstUnionFind(unittest.TestCase):

@@ -24,6 +24,7 @@ Tests needing PyMeshLab or PyMeshFix are skipped when they are absent, so this
 file runs on a machine that cannot repair.
 """
 
+import math
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -155,8 +156,16 @@ class TestVolumeKept(unittest.TestCase):
     def test_real_loss_still_shows(self):
         self.assertAlmostEqual(self.result_with(100.0, 50.0).volume_kept, 0.5)
 
-    def test_zero_input_volume_does_not_divide(self):
-        self.assertEqual(self.result_with(0.0, 0.0).volume_kept, 1.0)
+    def test_zero_input_volume_is_unmeasurable_not_a_pass(self):
+        """A02: the old `1.0` handed out a success verdict for a non-answer.
+
+        Zero input volume is exactly what oppositely wound shells produce when
+        they cancel, so the one case most in need of scrutiny was the one
+        awarded a perfect score.  A ratio with no denominator is not a
+        measurement; `nan` says so, and `_decide` refuses it.
+        """
+        self.assertTrue(math.isnan(self.result_with(0.0, 0.0).volume_kept))
+        self.assertTrue(math.isnan(self.result_with(0.0, 500.0).volume_kept))
 
 
 class TestLostVertices(unittest.TestCase):

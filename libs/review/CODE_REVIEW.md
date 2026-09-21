@@ -21,7 +21,7 @@ Re-verified 2026-09-20 against the working tree by Claude (reproduction scripts)
 | R09 | **fixed** 2026-09-20 | 3 | Was: selector exception kills workers; `start()` returns normally |
 | R10 | confirmed (Codex) | later | Result fields describe a different mesh than the one carried |
 | A01 | confirmed | later | 1 hit, 762→764 faces, 4 open edges remain; caught downstream as OPEN_EDGES |
-| A02 | confirmed | 6 | Component deleted, returns PROCESS, reports 7,049,393,791% volume kept |
+| A02 | **cancellation fixed** 2026-09-21 | 6 | Was PROCESS at 7,049,393,791%, now DESTROYED at 50.00%. The component is **still dropped** — only the false success is fixed. Preservation is R05, still open |
 | A03 | **fixed** 2026-09-21 | 5 | Four routes, not one: STL load, PLY read, the decision gate, and the unreported `cKDTree` crash outside `repair`'s try/except |
 | A04 | **fixed** 2026-09-20 | 4 | Was: 7-byte file classified `ALREADY_FIXED`; no writer was atomic. The fix also covered a writer this finding missed — the companion copy in `converter.py` |
 | A05 | confirmed | later | Both sources map to `/in/stl-exported/model.stl` |

@@ -316,6 +316,46 @@ def volume(mesh: Mesh) -> float:
                            np.cross(tri[:, 1], tri[:, 2])).sum() / 6.0)
 
 
+def component_volume(mesh: Mesh) -> float:
+    """Return the summed **magnitude** of each component's enclosed volume.
+
+    `volume` is signed, which is what makes it useful for spotting an
+    inside-out mesh — and useless as a size for a mesh of several shells.  Two
+    components wound against each other cancel: the measured case summed a
+    760-face sphere at +4094.863122 and a 4-face tetrahedron at -4094.863180
+    to -0.00006, and deleting the tetrahedron then scored 7,049,393,791% of
+    volume kept, passing the loss check by a margin no real repair could.
+
+    Summing magnitudes per component cannot cancel, because the sign is
+    discarded before anything is added.  That keeps the one property the signed
+    measure was chosen for — an intentional winding flip is not loss — while
+    making a deleted shell visible as the loss it is.
+
+    Faces are grouped by `shells`, which returns indices rather than submeshes,
+    so this costs one connectivity pass and no mesh construction.
+
+    **It answers "did the components survive", not "is this the same model".**
+    Discarding the sign per component also discards what the sign meant: an
+    inner shell wound inward is a cavity, and one wound outward is a second
+    solid.  On `sphere_shell_inverted` — a +4094.86 body around a -511.86 inner
+    shell — this reports the same total either way, so a repair that flips the
+    cavity outward scores 100%.  The signed measure surfaced that as 128.57%,
+    by accident rather than by design.  Containment-aware volume is what would
+    answer it properly; see R05 and the component-preservation work.
+    """
+    _require_geometry(mesh)
+    faces = mesh.geometry.faces
+    if len(faces) == 0:
+        return 0.0
+    tri = mesh.geometry.verts[faces].astype(np.float64)
+    # Per-face signed contribution, summed within a component and only then
+    # taken as a magnitude: a component's own faces must still cancel normally
+    # against each other, or a closed shell would not measure as closed.
+    per_face = np.einsum('ij,ij->i', tri[:, 0],
+                         np.cross(tri[:, 1], tri[:, 2])) / 6.0
+    return float(sum(abs(per_face[part].sum()) for part in shells(mesh)))
+
+
 def shells(mesh: Mesh) -> tuple[np.ndarray, ...]:
     """Return edge-connected face components, largest first.
 

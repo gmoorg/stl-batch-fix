@@ -75,7 +75,11 @@ def _decide(source: Mesh,
     # its own check rather than folded into the next one, because "we could not
     # measure this" and "this lost too much" are different answers.
     if not (math.isfinite(repaired.volume_in)
-            and math.isfinite(repaired.volume_out)):
+            and math.isfinite(repaired.volume_out)
+            # The ratio, not only its terms: zero input volume is finite and
+            # divides into nothing, and that is exactly what oppositely wound
+            # shells produce when they cancel (A02).
+            and math.isfinite(repaired.volume_kept)):
         return Outcome(
             Indicator.FAILED, None, 'source',
             f"volume could not be measured: in={repaired.volume_in}, "

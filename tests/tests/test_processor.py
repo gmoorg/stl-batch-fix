@@ -28,6 +28,9 @@ from libs.indicators import Indicator
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.processor import MIN_VOLUME_KEPT, Outcome, process, write
 
+PROBES = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), 'probes')
+
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
 TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
 
@@ -274,6 +277,45 @@ class TestWriting(unittest.TestCase):
         self.assertIs(outcome.indicator, Indicator.FAILED)
         self.assertEqual(outcome.marker, 'source')
         self.assertFalse(outcome.is_clean)
+
+    def test_cancelling_shells_cannot_report_success(self):
+        """A02 end to end, on the committed fixture that demonstrated it.
+
+        A 760-face sphere at +4094.863122 beside a 4-face tetrahedron at
+        -4094.863180: the signed total was -0.00006, the small shell was
+        dropped by the face floor, and dividing by that denominator reported
+        7,049,393,791% of volume kept — passing the loss check by a margin no
+        real repair could produce.  The component is still dropped; what
+        changed is that the run can no longer call that a success.
+        """
+        probe = os.path.join(PROBES, 'opposite_volume_shells.stl')
+        if not os.path.exists(probe):                  # pragma: no cover
+            self.skipTest('probe fixture not generated')
+        loaded = mesh_io_module.load(
+            mesh_io_module.probe(probe, self.output))
+
+        outcome = processor.process(loaded, max_faces=900_000)
+
+        self.assertFalse(outcome.is_clean)
+        self.assertIs(outcome.indicator, Indicator.DESTROYED)
+        self.assertEqual(outcome.marker, 'source')
+        self.assertAlmostEqual(outcome.repair.volume_kept, 0.5, places=2)
+
+    def test_a_zero_scale_mesh_is_not_a_clean_verdict(self):
+        """A02: both volumes are finite, and the ratio between them is not.
+
+        Zero input volume is what oppositely wound shells produce when they
+        cancel exactly, so the A03 finiteness gate waves it through — 0.0 is a
+        perfectly good number — and the loss check then compares against NaN,
+        which is False for `<` like every other comparison.  The ratio has to
+        be tested, not just its terms.
+        """
+        outcome = processor._decide(
+            mesh(), decimation(),
+            repair_result(volume_in=0.0, volume_out=0.0))
+        self.assertFalse(outcome.is_clean)
+        self.assertIs(outcome.indicator, Indicator.FAILED)
+        self.assertEqual(outcome.marker, 'source')
 
     def test_an_unmeasurable_input_volume_is_not_a_clean_verdict(self):
         """The denominator has to be a number too."""

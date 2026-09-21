@@ -20,9 +20,9 @@ reference material until the refactor is complete.
 ### `scanner`
 
 - **For:** measure topology and geometry without repairing it.
-- **Interface:** `scan`, `open_loops`, `open_loops_are_printable`, `winding_seams`, `volume`, `shells`, `shell_count`, `diagonal`.
-- **Implementation:** derives indexed edges from loaded arrays; shells are edge-connected and use SciPy connectivity.
-- **Tried/rejected:** pure NumPy shells were too slow. Edge counts alone were rejected as a success oracle: closed, zero-area, non-finite, or incomplete models can score clean.
+- **Interface:** `scan`, `open_loops`, `open_loops_are_printable`, `winding_seams`, `volume`, `component_volume`, `shells`, `shell_count`, `diagonal`.
+- **Implementation:** derives indexed edges from loaded arrays; shells are edge-connected and use SciPy connectivity. `volume` is signed, which is what makes an inside-out mesh visible; `component_volume` sums each shell's magnitude, so it is the one to divide when asking whether geometry survived. Faces are grouped by `shells`, which returns indices, so no submesh is built.
+- **Tried/rejected:** pure NumPy shells were too slow. Edge counts alone were rejected as a success oracle: closed, zero-area, non-finite, or incomplete models can score clean. Signed volume as a *size* was rejected for multi-shell meshes: two oppositely wound shells cancelled to -0.00006, and dropping one then scored 7,049,393,791% kept (A02).
 
 ### `meshlab`
 
