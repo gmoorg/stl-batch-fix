@@ -486,16 +486,24 @@ if n_faces == 0:
     sys.exit(1)
 print("Faces after repair: " + str(n_faces))
 
-# nm=0 but open edges remain — write the repaired file anyway (slicer handles open edges),
-# then signal the wrapper to also save a .open.stl marker copy.
+# 6d — write output. This now happens whether or not NM edges remain: an
+# incomplete repair is still the caller's best available input for whatever
+# runs next (the pipeline chains this into PyMeshFix), so it is written
+# rather than discarded. Only BLENDER_EMPTY (n_faces == 0, above) writes
+# nothing — there is no partial mesh there to hand onward.
+#
+# Verified by code review, not by an automated fixture: this module requires
+# `bpy` and cannot run outside real Blender, and no small hand-built mesh
+# reliably reaches BLENDER_UNREPAIRED — the repair loop's NM-face deletion is
+# unconditional on its first pass (widening only fires on a stall), so a
+# small defect is simply deleted to nm=0 or to an empty mesh rather than
+# surviving 12 passes unresolved. Forcing genuine non-convergence needs a
+# large/complex real model. `tests/tests/test_blender.py::TestStep` mocks
+# `repair()` to cover `step_blender_repair()`'s own contract (flag check,
+# PLY round trip, failure conversion); the next real model that reaches
+# BLENDER_UNREPAIRED in the pipeline is this fix's actual validation.
 # Tiny gaps (< 0.5mm) are floating-point seams — signal them as OK instead.
 _open_tol = 0.5  # mm
-if nm_final > 0:
-    print("BLENDER_UNREPAIRED: nm=" + str(nm_final) + " open=" + str(open_final))
-    bm_final.free()
-    sys.exit(2)
-
-# 6d — write output.
 # Refresh cached normals — face.normal goes stale after topology edits.
 bm_final.normal_update()
 _dst_partial = dst + ".partial"
@@ -503,7 +511,13 @@ write_ply_from_bm(_dst_partial, bm_final)
 bm_final.free()
 os.replace(_dst_partial, dst)
 
-if open_final > 0 and max_open_len >= _open_tol:
+# nm=0 but open edges remain — write already happened above; this only
+# chooses which status marker to print, mirroring the old exit-2 case, which
+# used to skip the write entirely and is now identical except for that.
+if nm_final > 0:
+    print("BLENDER_UNREPAIRED: nm=" + str(nm_final) + " open=" + str(open_final))
+    sys.exit(2)
+elif open_final > 0 and max_open_len >= _open_tol:
     print("BLENDER_OPEN: open=" + str(open_final) + " max=" + str(round(max_open_len, 4)) + "mm")
 else:
     print("BLENDER_OK")

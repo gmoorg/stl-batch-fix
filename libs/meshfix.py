@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import pipeconfig
 from .mesh_io import Geometry, Mesh
 
 try:
@@ -98,21 +99,10 @@ def is_available() -> bool:
     return _AVAILABLE
 
 
-#: Step 15a. Close boundary loops before cleaning.  `nbe=0` means *every*
-#: boundary regardless of size, and `refine=True` is what emits "Refinement
-#: stage failed to converge" on meshes that had no boundaries to begin with.
-ENABLE_FILL_BOUNDARIES = True
-
-#: Step 15b. `clean()` — remove self-intersecting and degenerate geometry.
-#: **This is the destructive call**: it deletes 36,342 faces from a watertight
-#: Amidara base, 99.6% of that loss being self-intersection removal cascading
-#: through retriangulation. See docs/refactor/amidara-clean-destroys.md.
-ENABLE_CLEAN = True
-
-#: Arguments to `clean()`.  The library default is (10, 3) and we passed
-#: nothing, taking it.  `(1, 1)` keeps 13,300 more faces on Amidara base at
-#: 99.73% volume but leaves 6,187 self-intersections; everything from
-#: inner_loops=3 up converges on the same result.
+#: Arguments to `clean()`.  These match the library default (10, 3), passed
+#: explicitly rather than omitted.  `(1, 1)` keeps 13,300 more faces on
+#: Amidara base at 99.73% volume but leaves 6,187 self-intersections;
+#: everything from inner_loops=3 up converges on the same result.
 CLEAN_MAX_ITERS = 10
 CLEAN_INNER_LOOPS = 3
 
@@ -124,9 +114,10 @@ def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
     alone. The current repair sequence uses the default. Failure returns the
     input mesh with `ok=False`; successful execution still needs a topology scan.
 
-    The module switches above disable either call independently, so what each
-    one costs can be measured rather than argued about. With both off this
-    loads and returns the arrays unchanged, which is the control.
+    `pipeconfig.ENABLE_FILL_BOUNDARIES`/`ENABLE_CLEAN` disable either call
+    independently, so what each one costs can be measured rather than argued
+    about. With both off this loads and returns the arrays unchanged, which
+    is the control.
     """
     if mesh.geometry is None:
         raise ValueError(
@@ -142,9 +133,9 @@ def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
             tin.load_array(
                 np.ascontiguousarray(mesh.geometry.verts, dtype=np.float64),
                 np.ascontiguousarray(mesh.geometry.faces, dtype=np.int32))
-            if fill_holes and ENABLE_FILL_BOUNDARIES:
+            if fill_holes and pipeconfig.ENABLE_FILL_BOUNDARIES:
                 tin.fill_small_boundaries(0, True)
-            if ENABLE_CLEAN:
+            if pipeconfig.ENABLE_CLEAN:
                 tin.clean(CLEAN_MAX_ITERS, CLEAN_INNER_LOOPS)
             verts, faces = tin.return_arrays()
     except Exception as exc:
@@ -163,3 +154,31 @@ def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
         np.ascontiguousarray(faces, dtype=np.int64)))
     return Result(repaired, True, None, capture.out, capture.err,
                   elapsed)
+
+
+def step_meshfix_repair(mesh: Mesh) -> tuple[bool, Mesh, str]:
+    """`pipeconfig`'s uniform step contract, wrapping `repair()`.
+
+    `pipeconfig.ENABLE_PART_TOOL` gates PyMeshFix specifically.
+    `ENABLE_FILL_BOUNDARIES`/`ENABLE_CLEAN` stay inside `repair()` itself —
+    they tune what this one tool call does, not whether a separate tool
+    runs, so splitting them into their own steps would mean reloading
+    PyMeshFix's state for no behavioural reason. `repair()` raises for a
+    caller error (unloaded geometry) rather than returning a `Result` for
+    it — that exception is caught here rather than escaping.
+    """
+    if not pipeconfig.ENABLE_PART_TOOL:
+        return True, mesh, 'skipped (ENABLE_PART_TOOL=False)'
+    try:
+        faces_in = len(mesh.geometry.faces)
+        result = repair(mesh)
+    except Exception as exc:
+        return False, mesh, f"pymeshfix failed: {type(exc).__name__}: {exc}"
+    if not result.ok:
+        return False, mesh, f"pymeshfix failed: {result.problem}"
+    detail = f"pymeshfix {faces_in}f -> {result.mesh.triangles}f"
+    if 'WARNING-' in result.stderr_capture:
+        # PyMeshFix reports cuts and removed triangles here rather than on
+        # stdout, and they are the only warning that a repair was lossy.
+        detail += ' (with warnings)'
+    return True, result.mesh, detail

@@ -14,6 +14,9 @@ import threading
 import time
 from dataclasses import dataclass
 
+from . import mesh_io, pipeconfig
+from .mesh_io import Mesh
+
 
 @dataclass(frozen=True)
 class Result:
@@ -235,6 +238,56 @@ def repair(source: str, destination: str,
           and result.exit_code in (0, 2)
           and os.path.exists(destination))
     return ok, result
+
+
+#: `repair()`'s own timeout default, reused by `step_blender_repair()` —
+#: its signature cannot carry a timeout parameter without breaking the
+#: uniform pipeline contract every step shares. Raise this here if a
+#: slower machine needs it.
+STEP_TIMEOUT = 600
+
+
+def step_blender_repair(mesh: Mesh) -> tuple[bool, Mesh, str]:
+    """`pipeconfig`'s uniform step contract, wrapping `repair()`.
+
+    Takes only a mesh — `timeout` is `STEP_TIMEOUT`, not a parameter, so
+    this matches every other step's signature exactly. `repair()`'s own
+    `ok` already distinguishes a real failure from an incomplete-but-usable
+    result: exit 2 (BLENDER_UNREPAIRED) is accepted here as long as output
+    exists, since the script writes its best effort before signalling that
+    non-manifold edges remain, rather than discarding it. `ok=False` here
+    covers what `repair()` rejects — timeout, an unaccepted exit code, or
+    accepted exit code with no output — plus any exception raised anywhere
+    in this step (launch failure, PLY I/O, unloaded geometry), caught as a
+    whole rather than only around the `repair()` call.
+    """
+    if not pipeconfig.ENABLE_BLENDER_PART:
+        return True, mesh, 'skipped (ENABLE_BLENDER_PART=False)'
+    try:
+        faces_in = len(mesh.geometry.faces)
+        with tempfile.TemporaryDirectory(prefix='blender-step-') as folder:
+            source = os.path.join(folder, 'part.ply')
+            target = os.path.join(folder, 'fixed.ply')
+            mesh_io.write_ply(mesh, source)
+            ok, result = repair(source, target, timeout=STEP_TIMEOUT)
+            if not ok:
+                why = ('timed out' if result.is_timed_out
+                       else f"exit {result.exit_code}")
+                return False, mesh, f"blender failed: {why}"
+            # `read_ply` rather than `load`: the vertex table survived the
+            # round trip, so there is nothing to weld — which is the whole
+            # reason this boundary is PLY. It also carries `mesh`'s identity
+            # across, so the repaired geometry comes back attached to the
+            # part rather than to a temp file.
+            repaired = mesh_io.read_ply(target, mesh)
+    except Exception as exc:
+        return False, mesh, f"blender failed: {type(exc).__name__}: {exc}"
+
+    marker = next((line for line in result.stdout_capture.splitlines()
+                   if line.startswith('BLENDER_')), 'BLENDER_OK')
+    return (True, repaired,
+            f"blender {faces_in}f -> {repaired.triangles}f "
+            f"({marker.split(':')[0]})")
 
 
 def is_available(executable: str = 'blender') -> bool:

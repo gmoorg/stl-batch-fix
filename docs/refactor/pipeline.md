@@ -12,9 +12,8 @@ load and validate finite, non-empty source
   → split into edge-connected shell parts
   → for each retained part separately
        orient by geometry
-       scan and select repair route
-       PyMeshFix for its supported defects
-       Blender through PLY for holes/fins and defined fallback cases
+       Blender through PLY, unconditionally
+       PyMeshFix, unconditionally
        rescan and preserve failure evidence after each tool
   → require every meaningful part to remain acceptable
   → merge accepted parts
@@ -22,7 +21,7 @@ load and validate finite, non-empty source
   → write atomically, or write a full-mesh non-success marker
 ```
 
-Current code runs the central path but always chooses PyMeshFix for a part. Blender routing, original-to-decimated preservation, meaningful-component retention, and finite validation remain open. The face target applies before repair; repair is not followed by blind re-decimation.
+Current code runs Blender then PyMeshFix on every retained part (owner decision, 2026-09-21; `pipeconfig.ENABLE_BLENDER_PART`, default on) — the *order* target below is now shipped, but not the *routing* target: there is still no selector that sends a part to only the tool its measured defects call for. Original-to-decimated preservation, meaningful-component retention, and finite validation remain open. The face target applies before repair; repair is not followed by blind re-decimation.
 
 ## Why this order
 
@@ -32,7 +31,7 @@ Current code runs the central path but always chooses PyMeshFix for a part. Blen
 - **Split before PyMeshFix:** PyMeshFix can rebuild one surface and discard other disconnected shells.
 - **Orient after split:** a whole-mesh volume guard misses local inversions; whole-mesh orientation erased seam evidence. Unconditional per-part orientation fixed tested cases.
 - **Repair parts independently:** no repair call receives all shells. One bad part must prevent whole-file success.
-- **Use both tools:** Blender measured better on holes/fins; PyMeshFix measured better on non-manifold geometry and winding seams. The selector and mixed-defect order need evidence.
+- **Use both tools:** Blender measured better on holes/fins; PyMeshFix measured better on non-manifold geometry and winding seams. The owner chose to run both, unconditionally, Blender then PyMeshFix, rather than wait for a defect-based selector — that selector and any mixed-defect ordering it would imply still need evidence.
 - **Merge before final judgment:** merged counts are authoritative. Test destruction before cleanliness because a missing half can still be watertight.
 
 ## Tried and rejected

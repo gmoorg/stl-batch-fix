@@ -340,7 +340,8 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
         """Measured: splitting first left `doubles` at 200% volume in 2
         shells, because each copy became its own part."""
         result = repairer.repair(load('doubles'))
-        clean = [s for s in result.steps if s.step is repairer.Step.CLEAN][0]
+        clean = [s for s in result.steps
+                if s.step is repairer.Step.CLEAN_UNREFERENCED][0]
         split = [s for s in result.steps if s.step is repairer.Step.SPLIT][0]
         self.assertEqual(clean.faces_out, CONTROL_FACES)
         self.assertEqual(split.faces_in, CONTROL_FACES)

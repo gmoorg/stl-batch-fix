@@ -51,11 +51,12 @@ absent from `repairer.repair` today.
 | 10 | `meshing_remove_duplicate_faces` | remove faces repeated after the merge, which would otherwise read as non-manifold | always |
 | 11 | `meshing_remove_unreferenced_vertices` | drop vertices no face uses any more | always |
 | 12 | `splitter.by_shells` | separate edge-connected components, because PyMeshFix rebuilds one surface and discards the rest — an unsplit multi-shell mesh comes back as its largest shell alone | **conditional** — returns the mesh unchanged when there is one component; components under `MIN_SHELL_FACES=100` are **dropped** |
-| 13 | `splitter.by_seams` | separate regions whose winding contradicts itself | *(not implemented)* — exists and is tested, never called by `repairer` |
-| — | **per part, steps 14–15 run once each** | | |
-| 14 | `meshing_re_orient_faces_by_geometry` | make every face point outward, since a signed-volume check misses locally inverted patches | always, per part — takes `base` from 922 winding-seam edges to 7,659 before step 15 sees it, but **not harmful to the result**: disabling it changes the output by 28 faces and +0.33pp |
-| 15 | `meshfix.repair` → `fill_small_boundaries(0, True)` then `clean()` | close holes, then delete self-intersecting and degenerate geometry | always, per part — **and the destructive step**: removes 36,342 faces from a watertight `base`. See [Amidara](amidara-clean-destroys.md) |
-| 16 | *part failure gate* | stop the whole file rather than merging back a part that could not be repaired | **conditional** — only when step 15 returns `PartFailed` |
+| 13 | `splitter.by_seams` | separate regions whose winding contradicts itself | *(not implemented in the default sequence)* — exists and is tested; `repairer.repair` calls it only when `pipeconfig.ENABLE_SPLIT_SEAMS` is explicitly set True (default False) |
+| — | **per part, steps 14–15b run once each, composed from uniform `step(mesh) -> (ok, mesh, detail)` calls** | | |
+| 14 | `meshing_re_orient_faces_by_geometry` | make every face point outward, since a signed-volume check misses locally inverted patches | always, per part — takes `base` from 922 winding-seam edges to 7,659 before the next steps see it, but **not harmful to the result**: disabling it changes the output by 28 faces and +0.33pp |
+| 14a | `blender.step_blender_repair` → `blender_fx/repair.blender` through PLY | delete wire edges and non-manifold faces, remove fins, fill holes — targets non-manifold geometry and open boundaries specifically | **conditional** — `pipeconfig.ENABLE_BLENDER_PART`, default **on** (owner decision, 2026-09-21; was previously reachable only as an explicit `tool=blender_part` replacement, never in the default sequence) |
+| 15 | `meshfix.step_meshfix_repair` → `fill_small_boundaries(0, True)` then `clean()` | close holes, then delete self-intersecting and degenerate geometry — runs on whatever step 14a produced | **conditional** — `pipeconfig.ENABLE_PART_TOOL`, default on — **and the destructive half**: removes 36,342 faces from a watertight `base` run through this step alone. See [Amidara](amidara-clean-destroys.md) |
+| 16 | *part failure gate* | stop the whole file rather than merging back a part that could not be repaired | **conditional** — only when any of steps 14, 14a, or 15 returns `ok=False` |
 | 17 | `splitter.merge` | concatenate the repaired parts into one mesh. Does **not** weld coincident vertices at former cuts | **conditional** — returns the single part unchanged when there is one |
 | 18 | *finite check* | reject NaN or infinite coordinates before any measurement touches them | always |
 
@@ -78,35 +79,41 @@ absent from `repairer.repair` today.
 
 ## Turning steps off
 
-Every repair step has a module-level switch, so what a step contributes can be
-measured instead of argued about. All default to the shipping behaviour; a
-disabled step still appears in `Result.steps` with `detail` saying it was
-skipped, so a log never silently omits a stage.
+Every repair step has an on/off switch in `pipeconfig`, so what a step
+contributes can be measured instead of argued about. All default to the
+shipping behaviour; a disabled step still appears in `Result.steps` with
+`detail` saying it was skipped, so a log never silently omits a stage.
 
 | step | switch | default |
 |---|---|---|
-| 7 weld | `repairer.ENABLE_WELD` | True |
-| 8 null faces | `repairer.ENABLE_CLEAN_NULL_FACES` | True |
-| 9 merge close | `repairer.ENABLE_CLEAN_MERGE_CLOSE` | True |
-| 10 duplicate faces | `repairer.ENABLE_CLEAN_DUPLICATE_FACES` | True |
-| 11 unreferenced verts | `repairer.ENABLE_CLEAN_UNREFERENCED` | True |
-| 12 shell split | `repairer.ENABLE_SPLIT_SHELLS` | True |
-| 13 seam split | `repairer.ENABLE_SPLIT_SEAMS` | **False** |
-| 14 orient | `repairer.ENABLE_ORIENT` | True |
-| 15 part tool | `repairer.ENABLE_PART_TOOL` | True |
-| 15a fill boundaries | `meshfix.ENABLE_FILL_BOUNDARIES` | True |
-| 15b `clean()` | `meshfix.ENABLE_CLEAN` | True |
+| 7 weld | `pipeconfig.ENABLE_WELD` | True |
+| 8 null faces | `pipeconfig.ENABLE_CLEAN_NULL_FACES` | True |
+| 9 merge close | `pipeconfig.ENABLE_CLEAN_MERGE_CLOSE` | True |
+| 10 duplicate faces | `pipeconfig.ENABLE_CLEAN_DUPLICATE_FACES` | True |
+| 11 unreferenced verts | `pipeconfig.ENABLE_CLEAN_UNREFERENCED` | True |
+| 12 shell split | `pipeconfig.ENABLE_SPLIT_SHELLS` | True |
+| 13 seam split | `pipeconfig.ENABLE_SPLIT_SEAMS` | **False** |
+| 14 orient | `pipeconfig.ENABLE_ORIENT` | True |
+| 15 part tool | `pipeconfig.ENABLE_PART_TOOL` | True |
+| 15a fill boundaries | `pipeconfig.ENABLE_FILL_BOUNDARIES` | True |
+| 15b `clean()` | `pipeconfig.ENABLE_CLEAN` | True |
 | 15b arguments | `meshfix.CLEAN_MAX_ITERS`, `CLEAN_INNER_LOOPS` | 10, 3 |
 
 `ENABLE_SPLIT_SEAMS` is the one switch that is off by default and turns a step
-*on*: `repairer` has never called `by_seams`. Enabling it repairs each seam
-region independently, which is measured as destructive on real models.
+*on*: when True, `repairer.repair` does call `by_seams` on each shell part.
+Enabling it repairs each seam region independently, which is measured as
+destructive on real models.
 
 ```python
-from libs import meshfix, repairer
-repairer.ENABLE_CLEAN_MERGE_CLOSE = False   # step 9
-meshfix.ENABLE_CLEAN = False                # step 15b
+from libs import meshfix, pipeconfig
+pipeconfig.ENABLE_CLEAN_MERGE_CLOSE = False   # step 9
+pipeconfig.ENABLE_CLEAN = False               # step 15b
 ```
+
+The `CLEAN_MAX_ITERS`/`CLEAN_INNER_LOOPS` value-parameters on the row above
+are not yet in `pipeconfig` — only the on/off switches have moved there so
+far; see [open issues](open-issues.md) for the deferred value-parameter
+inventory.
 
 Measured on `Amidara_..._base.stl` (315,482 faces in):
 

@@ -25,21 +25,21 @@ No final face-budget gate is required; `max_faces` is a decimation target. See t
 - **Nothing cleans up after the merge — but measurement says little is needed today.** Owner observation, 2026-09-21. `meshing_remove_duplicate_faces` (step 10) runs *before* the split, justified by its coupling to step 9: `merge_close_vertices` produces duplicate faces and step 10 removes them. That argument says nothing about whether the same cleanup is wanted after the merge, and `splitter.merge` explicitly does **not** weld coincident vertices at former cuts ("the caller must rescan the result").
   Measured: Mandy merges 40 parts into 2,060,200 faces with **zero duplicate faces**, and re-running `remove_duplicate_faces` afterwards changes nothing. A post-merge duplicate pass would be a no-op on the model most likely to need it. The reason is that `by_shells` splits along *existing* component boundaries, so parts share no cut surface — the unwelded-cut concern belongs to `by_seams`, which cuts *through* a surface and is not in the pipeline.
   What does survive: **36 coincident vertex pairs** in Mandy's merged output — separate vertices at identical coordinates where parts abut. Harmless there (`open=0, nm=0`), but it confirms the merge leaves unwelded geometry, and it is the same mechanism behind the `open=6` / `open=141` boundaries measured in the seam-splitting experiments. A post-merge weld is worth having **before** seam splitting is ever enabled, not now; and it must be narrower than CLEAN, since `merge_close_vertices` at bounding-box scale would weld across cut boundaries rather than along them.
-- **Try `fix_connectivity` + fill, then the current step 15 on its output.** Owner's proposal, 2026-09-21. The hypothesis is that the two operations are complementary: the first repairs by *adding* geometry and leaves inverted patches behind, and `clean()` removes bad faces while keeping good ones — so running `clean()` afterwards might delete the inverted patches without the wholesale loss it causes on the raw source, since the winding is already consistent when it arrives.
+- **`fix_connectivity` + fill, then the current step 15 on its output — tested 2026-09-21 and refuted.** Owner's proposal. The hypothesis was that the two operations are complementary: the first repairs by *adding* geometry and leaves inverted patches behind, and `clean()` removes bad faces while keeping good ones — so running `clean()` afterwards might delete the inverted patches without the wholesale loss it causes on the raw source, since the winding is already consistent when it arrives.
 
-  What each does alone on `Amidara_..._base.stl` (315,482f, watertight, 922 winding-seam edges, 11,365 self-intersections):
+  What each does on `Amidara_..._base.stl` (315,482f, watertight, 922 winding-seam edges, 11,365 self-intersections):
 
-  | sequence | faces | open | nm | seam | volume |
-  |---|---:|---:|---:|---:|---:|
-  | step 15 `clean()` alone | 279,140 (**−36,342**) | 0 | 0 | 0 | 97.26% |
-  | `fix_connectivity()` + `fill_small_boundaries(0, True)` | 320,152 (**+4,670**) | 0 | 0 | 0 | **99.81%** |
-  | **both, in that order** | untested | | | | |
+  | sequence | faces | open | nm | seam | self-int (`justproper`) | volume |
+  |---|---:|---:|---:|---:|---:|---:|
+  | step 15 `clean()` alone | 279,140 (**−36,342**) | 0 | 0 | 0 | — | 97.26% |
+  | `fix_connectivity()` + `fill_small_boundaries(0, True)` | 320,152 (**+4,670**) | 0 | 0 | 0 | 15,153 | 99.81% |
+  | **both, in that order (`libs/meshfix.repair()` on the intermediate)** | 279,202 | 0 | 0 | 0 | **0** | 97.49% |
 
-  `PyTMesh.fix_connectivity()` has never been called by this project. Alone it takes winding seams 922 → 0 and opens 2,048 edges; filling closes them again. It is the only operation found that moves in the same direction as the online repair tool, which fixed 1,506 inverted normals by adding 25,478 triangles.
+  `PyTMesh.fix_connectivity()` has never otherwise been called by this project. Alone it takes winding seams 922 → 0 and opens 2,048 edges; filling closes them again. It is the only operation found that moves in the same direction as the online repair tool, which fixed 1,506 inverted normals by adding 25,478 triangles.
 
-  **It is not a working repair by itself.** The owner's inspection found the patched faces inverted, and a direct check confirms **762 of its 4,592 new faces are wound backwards** relative to the geometry they touch — while `scanner.winding_seams` reports 0, because those faces sit on edges shared by more than two faces, which the seam test skips. Self-intersections also rise 11,365 → 15,153. An earlier version of this record called it a full repair; that was wrong, and the volume and face counts are what made it look like one.
+  **It is not a working repair by itself.** The owner's inspection found the patched faces inverted, and an earlier, separately-run check found some of its new faces wound backwards relative to the geometry they touch — while `scanner.winding_seams` reports 0, because those faces sit on edges shared by more than two faces, which the seam test skips. Self-intersections also rise 11,365 → 15,153. An earlier version of this record called it a full repair; that was wrong, and the volume and face counts are what made it look like one.
 
-  Measure the combination against the owner's eye, not against the counters: every metric available today calls the intermediate result clean. Files in `/mnt/sda2/STL/_validate/`: `base_FIXCONN_FILL.stl`. Details in [Amidara](amidara-clean-destroys.md).
+  **The combination is also not a working repair.** Running step 15 on the intermediate produces the cleanest result by every counter in this document — `open=0, nm=0, winding_seams=0`, and self-intersections (`justproper=True`) at exactly **0**, down from the source's 11,365. The owner inspected `base_FIXCONN_FILL_CLEAN.stl` and confirmed `clean()` deleted **original faces present in the source `base.stl`**, not just the patch geometry `fix_connectivity` + fill had added — the same failure mode `clean()` has on the raw source, not a defect confined to the intermediate's inverted-patch artifact. The measurement gap this section exists to close applies to self-intersection counting too, not only topology and volume. No working repair for `base` has been found. Files in `/mnt/sda2/STL/_validate/`: `base_FIXCONN_FILL.stl`, `base_FIXCONN_FILL_CLEAN.stl`. Details in [Amidara](amidara-clean-destroys.md#fix_connectivity--fill-then-step-15-on-its-output--also-refuted).
 - Reject zero-face, non-finite, zero-area, or invalid geometry.
 - Compare decimation with the original; current destruction checks begin too late.
 - Preserve meaningful components. The `<100 faces` rule can still approve missing parts; signed-volume cancellation no longer can (A02, `scanner.component_volume`), but the component is still dropped — only the false success was fixed.
@@ -63,6 +63,20 @@ No final face-budget gate is required; `max_faces` is a decimation target. See t
 - Assess per-part preservation **after** repair, not only at the split. There is no second floor check after the part tool, so a part reduced to a remnant is merged back regardless of size; but another face-count rule is not the answer, since a valid repaired part can legitimately have under 100 faces.
 - Decide when seam recovery and `open_loops_are_printable` are safe.
 - Replace remaining absolute geometry tolerances where scale tests require it.
+
+## Configuration
+
+- **Move the value-parameters that tune enabled steps into `pipeconfig` too.** Owner decision, 2026-09-21: only the binary `ENABLE_*` step switches were extracted into `pipeconfig` this task ([modules.md](modules.md)); the numeric parameters that tune what an enabled step does were explicitly left where they are, to be moved later. Inventory of what is not yet moved, i.e. constants set in code rather than supplied by a script argument:
+  - `meshfix.CLEAN_MAX_ITERS = 10`, `meshfix.CLEAN_INNER_LOOPS = 3` — `clean()`'s iteration/inner-loop counts.
+  - `meshfix.repair()`'s inline `fill_small_boundaries(0, True)` arguments — not even named constants yet.
+  - `repairer.py`'s inline `threshold=0.1` for `meshing_merge_close_vertices` in `clean_filters()`, duplicated in the unused-by-`repair()` `CLEAN_FILTERS` tuple.
+  - `repairer.LOST_VERTEX_TOLERANCE = 1e-4`.
+  - `splitter.MIN_SHELL_FACES = 100` — partially exposed already as `repairer.repair()`'s `min_shell_faces` default parameter.
+  - `welder.MAX_ROUNDS = 10`, `welder.MAX_CHAIN = 12`.
+  - `processor.MIN_VOLUME_KEPT = 0.90` — the volume-loss guard threshold.
+  - `blender.convert`/`blender.repair`'s `timeout: float = 600` defaults (one policy, repeated three places including `repairer.blender_part`) and `blender.is_available()`'s inline `timeout=30`.
+
+  Excluded as out of scope: file-format constants that are not tuning knobs (`mesh_io.BYTES_PER_TRIANGLE`, `HEADER_BYTES`, PLY magic bytes, etc.) and `blender.py`'s script-path constants — none of these are experiment parameters, they are format/plumbing facts.
 
 ## Runner and concurrency
 

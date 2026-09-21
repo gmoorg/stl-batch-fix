@@ -286,6 +286,62 @@ three are inverted where they were patched. The sequence is one measured
 experiment on one mesh, refuted by the only test that has been reliable all
 day, which is the owner opening the file.
 
+### `fix_connectivity` + fill, then step 15 on its output — also refuted
+
+Tested 2026-09-21, the "both, in order" row [open issues](open-issues.md) left
+blank: run `libs/meshfix.repair()` — `fill_small_boundaries(0, True)` then
+`clean(10, 3)`, the pipeline's actual step 15, not a bare `clean()` call — on
+the `FIXCONN_FILL` output above, rather than on the raw source.
+
+| sequence | faces | open | nm | winding seams | self-int (`justproper`) | volume |
+|---|---:|---:|---:|---:|---:|---:|
+| source | 315,482 | 0 | 0 | 922 (129 loops) | 11,365 | 100.00% |
+| `fix_connectivity()` + fill | 320,152 | 0 | 0 | 0 | 15,153 | 99.81% |
+| **+ step 15 (fill + `clean(10,3)`)** | 279,202 | 0 | 0 | 0 | **0** | 97.49% |
+
+Every counter this project has clears: watertight, no non-manifold edges, no
+winding seams, and `select_intersecting_triangles(justproper=True)` — the same
+measure that found 11,365 self-intersections on the source — finds **zero**.
+Output: `/mnt/sda2/STL/_validate/base_FIXCONN_FILL_CLEAN.stl`.
+
+**The owner inspected it. `clean()` deleted original faces — geometry present
+in the source `base.stl`, not just the patch geometry `fix_connectivity` +
+fill added.** Confirmed by the owner: the missing material is original
+geometry, the same failure mode `clean()` has on the raw source, not a defect
+confined to the newly-added patches. The hypothesis this experiment was built
+to test — that `clean()` would delete only the inverted patches surgically,
+because the winding is already consistent by the time it runs, rather than
+cascading into the wholesale loss it causes on the raw source — is refuted.
+`clean()`'s self-intersection removal cascades through retriangulation
+regardless of what feeds it; it is not selective between patch and original
+geometry. Every counter measured this as the cleanest result in this entire
+document, and it deleted real geometry anyway.
+
+This is the strongest instance yet of the measurement gap this document keeps
+finding: not just topology (`open=0, nm=0`) or volume (`hands_2`'s 100.00%)
+but every counter available, including self-intersection, calling a broken
+mesh clean.
+
+A same-direction winding-incidence check was attempted here, in the same
+spirit as the 762-flipped-pairs finding on `FIXCONN_FILL` alone (above): for
+each face present in an output but absent from the source, whether it shares
+a directed edge with an old face walked the *same* way (the defect signature,
+since correctly-oriented adjacent faces walk a shared edge in opposite
+directions). **This did not reproduce a comparable count and should not be
+read as corroborating or contradicting the 762 figure.** The script that
+produced 762 is not available to this session; a new implementation was
+written for this experiment, matching vertices across PyMeshFix's
+independently-renumbered output arrays by nearest-neighbour position
+(tolerance `1e-4`, one-to-one within each mesh — PyMeshFix does not preserve
+vertex indices or exact coordinates even for geometry it leaves alone,
+confirmed by hashing `FIXCONN_FILL` regenerated from source: byte-identical
+to the original, `sha256:73da68...724e`). Under one-to-one matching it found
+0 same-direction incidences on `FIXCONN_FILL` alone — where the owner's own
+inspection and the 762 count both say the defect is present — so this
+particular check is not sensitive enough to trust, on either output. Treat
+"0 incidences detected" here as a statement about this ad hoc method's
+detection floor, not about the mesh.
+
 ### A gap in the scanner, independent of any of this
 
 `scanner.winding_seams` misses winding inconsistency on edges shared by more
@@ -298,10 +354,14 @@ self-intersecting faces where PyMeshFix counts 11,365 at `justproper=True`.
 Different algorithms, same order of magnitude — the defect is real and not an
 artifact of one library.
 
-## The arguments we never use
+## The arguments we could try instead
 
-`libs/meshfix.py` calls `clean()` bare, taking the library's aggressive default.
-The parameters change the outcome substantially:
+`libs/meshfix.py` calls `clean(CLEAN_MAX_ITERS, CLEAN_INNER_LOOPS)` =
+`clean(10, 3)` explicitly (`libs/meshfix.py:116-117,148`) — not bare, and this
+matches the library default by stating it, not by omitting it. An earlier
+version of this section said the call was bare; that was wrong. The
+parameters change the outcome substantially, and none of the alternatives
+below are what the pipeline supplies:
 
 | variant | faces | volume | self-intersections left |
 |---|---:|---:|---:|
@@ -317,9 +377,9 @@ faces and is faster, but leaves 6,187 self-intersections in the output — wheth
 that is better is a question for a slicer, not a face count.
 `base_GENTLE.stl` and `base_CURRENT_pmf.stl` are written for that comparison.
 
-Full signatures, none of which the pipeline supplies:
+Full signatures:
 
-- `clean(max_iters=10, inner_loops=3)` — called bare.
+- `clean(max_iters=10, inner_loops=3)` — called explicitly with these values.
 - `fill_small_boundaries(nbe=0, refine=True)` — we pass `(0, True)`. `nbe=0`
   means fill **all** boundaries regardless of size, and `refine=True` produced
   `WARNING- Fill holes: Refinement stage failed to converge. Breaking.` on a
@@ -361,10 +421,10 @@ the union? If such cases exist, the rule is about the *kind* of
 self-intersection rather than the count, and no measurement here distinguishes
 kinds.
 
-**How common is harmless self-intersection beyond Amidara?** Eleven of twelve
-parts here carry it and ten printed. If that holds across
-`/mnt/sda2/STL/{Done,Fixing}`, `clean()` has been damaging the corpus broadly
-and nobody has looked. A sample of 20–30 unrelated models with
+**How common is harmless self-intersection beyond the Amidara family?** Eleven
+of twelve parts here — all from one model — carry it and ten printed. If that
+holds across `/mnt/sda2/STL/{Done,Fixing}`, `clean()` has been damaging the
+corpus broadly and nobody has looked. A sample of 20–30 unrelated models with
 `justproper=True` would settle the scale.
 
 ### Answered: the deletion cascades, and there is no surgical alternative

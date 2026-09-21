@@ -13,10 +13,11 @@ disjoint tetrahedra are eight faces that must still be eight afterwards.
 import io
 import os
 import unittest
+from unittest import mock
 
 import numpy as np
 
-from libs import meshfix, scanner
+from libs import meshfix, pipeconfig, scanner
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.meshfix import Result, is_available, repair
 
@@ -227,6 +228,40 @@ class TestResult(unittest.TestCase):
             self.assertTrue(hasattr(result, 'ok'))
             # The verdict belongs to scanner, not to this flag.
             self.assertIsNotNone(scanner.scan(result.mesh))
+
+
+class TestStep(unittest.TestCase):
+    """`step(mesh) -> (ok, mesh, detail)`, the pipeline's uniform entry
+    point for this module."""
+
+    @unittest.skipUnless(is_available(), "pymeshfix is needed")
+    def test_enabled_repairs_and_reports_ok(self):
+        ok, result, detail = meshfix.step_meshfix_repair(mesh(TETRA_VERTS, TETRA_FACES))
+        self.assertTrue(ok, detail)
+        self.assertIn('pymeshfix', detail)
+
+    def test_disabled_skips_and_leaves_the_mesh_unchanged(self):
+        m = mesh(TETRA_VERTS, TETRA_FACES)
+        with mock.patch.object(pipeconfig, 'ENABLE_PART_TOOL', False):
+            ok, result, detail = meshfix.step_meshfix_repair(m)
+        self.assertTrue(ok)
+        self.assertIs(result, m)
+        self.assertIn('ENABLE_PART_TOOL=False', detail)
+
+    def test_a_returned_failure_is_reported_not_raised(self):
+        m = mesh(TETRA_VERTS, TETRA_FACES)
+        with mock.patch.object(meshfix, '_AVAILABLE', False):
+            ok, result, detail = meshfix.step_meshfix_repair(m)
+        self.assertFalse(ok)
+        self.assertIs(result, m)
+        self.assertIn('pymeshfix failed', detail)
+
+    def test_a_raised_exception_is_reported_not_propagated(self):
+        unloaded = Mesh('/a.stl', '/b.stl', Kind.BINARY_STL, 4, True)
+        ok, result, detail = meshfix.step_meshfix_repair(unloaded)
+        self.assertFalse(ok)
+        self.assertIs(result, unloaded)
+        self.assertIn('pymeshfix failed', detail)
 
 
 if __name__ == '__main__':

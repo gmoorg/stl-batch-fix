@@ -16,10 +16,25 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
+import numpy as np
+
+from libs import blender, pipeconfig
 from libs.blender import (
     CONVERT_SCRIPT, Result, Runner, convert, is_available,
 )
+from libs.mesh_io import Geometry, Kind, Mesh
+
+TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
+TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
+
+
+def tetra():
+    geometry = Geometry(np.array(TETRA_VERTS, dtype=np.float32),
+                        np.array(TETRA_FACES, dtype=np.int64))
+    return Mesh('/in/body.stl', '/out/body.stl', Kind.BINARY_STL,
+               len(geometry.faces), True, None, geometry)
 
 
 def _stand_in(body: str) -> str:
@@ -406,6 +421,66 @@ class TestRealBlender(unittest.TestCase):
         worker.join(timeout=30)
         self.assertTrue(killed, "kill_current() could not reach Blender")
         self.assertTrue(children, "Blender was not a direct child")
+
+
+class TestStep(unittest.TestCase):
+    """`step(mesh) -> (ok, mesh, detail)`, the pipeline's uniform entry
+    point for this module. `repair()` itself is mocked — real Blender
+    process handling is `TestNormalRun`/`TestTimeout`'s job; this is about
+    `step`'s own contract: flag check, PLY round trip, failure conversion.
+    """
+
+    def test_disabled_skips_and_leaves_the_mesh_unchanged(self):
+        m = tetra()
+        with mock.patch.object(pipeconfig, 'ENABLE_BLENDER_PART', False):
+            ok, result, detail = blender.step_blender_repair(m)
+        self.assertTrue(ok)
+        self.assertIs(result, m)
+        self.assertIn('ENABLE_BLENDER_PART=False', detail)
+
+    def test_a_returned_failure_is_reported_not_raised(self):
+        m = tetra()
+        fake_result = Result(exit_code=1, stdout_capture='', stderr_capture='',
+                             is_timed_out=False, second_elapsed=0.1)
+        with mock.patch.object(blender, 'repair',
+                               lambda *a, **k: (False, fake_result)):
+            ok, result, detail = blender.step_blender_repair(m)
+        self.assertFalse(ok)
+        self.assertIs(result, m)
+        self.assertIn('blender failed', detail)
+
+    def test_a_raised_exception_is_reported_not_propagated(self):
+        """Matches how a missing executable surfaces: `Runner.run` can raise
+        `OSError` before ever returning a `Result` — see `TestNormalRun`'s
+        own coverage of that path at the `Runner` level."""
+        m = tetra()
+        def explode(*a, **k):
+            raise OSError("executable not found")
+        with mock.patch.object(blender, 'repair', explode):
+            ok, result, detail = blender.step_blender_repair(m)
+        self.assertFalse(ok)
+        self.assertIs(result, m)
+        self.assertIn('blender failed', detail)
+
+    def test_success_preserves_mesh_identity_and_reports_the_marker(self):
+        m = tetra()
+        fake_result = Result(exit_code=0,
+                             stdout_capture='BLENDER_OK\n',
+                             stderr_capture='', is_timed_out=False,
+                             second_elapsed=0.1)
+
+        def fake_repair(source, destination, timeout=None):
+            # Write a minimal valid PLY so read_ply has something to load.
+            from libs import mesh_io
+            mesh_io.write_ply(m, destination)
+            return True, fake_result
+
+        with mock.patch.object(blender, 'repair', fake_repair):
+            ok, result, detail = blender.step_blender_repair(m)
+        self.assertTrue(ok, detail)
+        self.assertEqual(result.destination, m.destination)
+        self.assertEqual(result.path, m.path)
+        self.assertIn('BLENDER_OK', detail)
 
 
 if __name__ == '__main__':

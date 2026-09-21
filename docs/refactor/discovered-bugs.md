@@ -73,6 +73,7 @@ watertight mesh.
 | Mandy | `open=0, nm=0`, all components | hair deleted |
 | `hands_2` | 100.00% volume, `open=0` | geometry invented |
 | `FIXCONN_FILL` | `seam=0` | 762 flipped face pairs |
+| `FIXCONN_FILL` + step 15 | `open=0, nm=0, seam=0`, self-int=0 — every automated acceptance check passes; 97.49% volume clears the pipeline's `MIN_VOLUME_KEPT = 0.90` guard with room to spare (as does the current pipeline's own 97.26%), so nothing flagged it either | deleted original source geometry, by owner inspection |
 
 The two scanner defects behind this are work items in
 [open issues](open-issues.md#prevent-false-success-and-model-loss).
@@ -85,26 +86,38 @@ could not help; that the legacy PyMeshFix call differed from ours; that a
 boolean union was a repair function; that `fix_connectivity` + fill repaired
 `base`; and that the boolean's acceptance verified it.
 
-## Next experiment the owner wants run
+## Tested and refuted: `fix_connectivity` + fill, then step 15
 
-**`fix_connectivity` + fill, then the current step 15 on its output.** The two
-may be complementary: the first adds geometry and leaves inverted patches, and
-`clean()` removes bad faces while keeping good ones — so running it second
-might delete those patches without the wholesale loss it causes on the raw
-source, where it arrives with inconsistent winding.
+**Tested 2026-09-21.** The hypothesis was that the two steps are
+complementary: `fix_connectivity` + fill adds geometry and leaves inverted
+patches, and `clean()` removes bad faces while keeping good ones — so running
+`clean()` second might delete those patches without the wholesale loss it
+causes on the raw source, where it arrives with inconsistent winding.
 
 | sequence on `base` | faces | volume |
 |---|---:|---:|
 | step 15 `clean()` alone | 279,140 (−36,342) | 97.26% |
-| `fix_connectivity()` + `fill_small_boundaries(0, True)` | 320,152 (+4,670) | **99.81%** |
-| **both, in order** | untested | |
+| `fix_connectivity()` + `fill_small_boundaries(0, True)` | 320,152 (+4,670) | 99.81% |
+| **both, in order (`libs/meshfix.repair()` on the intermediate)** | 279,202 | 97.49% |
 
-`fix_connectivity()` has never been called by this project. It is the only
-operation found that moves in the same direction as the online repair tool
-(which fixed 1,506 inverted normals by adding 25,478 triangles), and it is
-**not a repair on its own**: 762 of its 4,592 new faces are wound backwards
-while `winding_seams` reports 0. Judge the combination by inspection, not by
-the counters. Detail in [open issues](open-issues.md).
+`open=0, nm=0`, `winding_seams=0`, and self-intersections
+(`justproper=True`) went 11,365 → 0 — every counter available, cleaner than
+any other sequence measured in this investigation. **The owner inspected the
+output and confirmed `clean()` deleted original source geometry**, not just
+the patch geometry `fix_connectivity` + fill had added — the same failure
+mode `clean()` has on the raw source, not a defect confined to
+`FIXCONN_FILL`'s inverted-patch artifact. The hypothesis is refuted. Detail,
+including why an ad hoc winding-incidence check built for this test should
+not be read as corroborating or contradicting the earlier 762-flipped-pairs
+count, in
+[Amidara](amidara-clean-destroys.md#fix_connectivity--fill-then-step-15-on-its-output--also-refuted).
+
+`fix_connectivity()` has never otherwise been called by this project. It is
+the only operation found that moves in the same direction as the online
+repair tool (which fixed 1,506 inverted normals by adding 25,478 triangles),
+and it is **not a repair on its own**: the earlier, separately-measured count
+found new/old edges it produced wound the same way (the same-winding defect)
+while `winding_seams` reports 0. No working repair for `base` has been found.
 
 ## Blocked
 
@@ -112,5 +125,6 @@ the counters. Detail in [open issues](open-issues.md).
   in [open issues](open-issues.md)). Blocked twice: gating on today's behaviour
   would skip repair for models that need it, and `is_clean` would wrongly pass
   `base`, whose inverted normals it cannot see.
-- **Codex review of both investigations.** Requested; rate-limited at the time
-  of writing.
+- **Codex review of the Mandy investigation.** Requested; the Amidara
+  investigation was independently reviewed by Codex this session (see
+  [COLLABORATION.md](../../COLLABORATION.md)) — Mandy's is still pending.

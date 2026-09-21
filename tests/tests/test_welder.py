@@ -14,10 +14,11 @@ vertices respectively.
 import os
 import sys
 import unittest
+from unittest import mock
 
 import numpy as np
 
-from libs import mesh_io, scanner, welder
+from libs import mesh_io, pipeconfig, scanner, welder
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.welder import Result, TJunction, find, repair
 
@@ -508,6 +509,34 @@ class TestResult(unittest.TestCase):
         junction = TJunction(1, (2, 3), 4, 0.5, 0.0)
         with self.assertRaises(Exception):
             junction.vertex = 9
+
+
+class TestStep(unittest.TestCase):
+    """`step(mesh) -> (ok, mesh, detail)`, the pipeline's uniform entry
+    point for this module."""
+
+    def test_enabled_welds_and_reports_ok(self):
+        m, _ = with_tjunction()
+        ok, result, detail = welder.step_weld_close_tjunctions(m)
+        self.assertTrue(ok)
+        self.assertEqual(len(result.geometry.faces),
+                         len(m.geometry.faces) + 1)
+        self.assertIn('junction(s)', detail)
+
+    def test_disabled_skips_and_leaves_the_mesh_unchanged(self):
+        m, _ = with_tjunction()
+        with mock.patch.object(pipeconfig, 'ENABLE_WELD', False):
+            ok, result, detail = welder.step_weld_close_tjunctions(m)
+        self.assertTrue(ok)
+        self.assertIs(result, m)
+        self.assertIn('ENABLE_WELD=False', detail)
+
+    def test_a_raised_exception_is_reported_not_propagated(self):
+        unloaded = Mesh('/a.stl', '/b.stl', Kind.BINARY_STL, 4, True)
+        ok, result, detail = welder.step_weld_close_tjunctions(unloaded)
+        self.assertFalse(ok)
+        self.assertIs(result, unloaded)
+        self.assertIn('weld failed', detail)
 
 
 if __name__ == '__main__':
