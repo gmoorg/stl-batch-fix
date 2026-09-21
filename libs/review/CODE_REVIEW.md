@@ -105,6 +105,8 @@ The CLEAN-before-split order was rechecked. Keep it: vertex merging exposes coin
 
 A run on `decimation_lost_appendage.stl` with `max_faces=20` decimated 28→20 faces and returned `PROCESS` with `volume_kept=100.00%`, and volume against the true source was `100.14%`. So this fixture does not show the loss as a volume change at all — which strengthens the finding: the appendage is thin, and a volume comparison alone would not have caught it either. Any fix needs a measure sensitive to thin-feature removal, not just a second volume ratio.
 
+**Related, 2026-09-21:** the volume guard's own accuracy was investigated separately after the owner questioned whether it rejects clean models. It does — three of sixteen probes — but not Mandy, whose loss is real and visually confirmed. Measurements and ruled-out mechanisms are in [`docs/refactor/mandy-volume-loss.md`](../../docs/refactor/mandy-volume-loss.md).
+
 **Owner decision 2026-09-21: accepted, will not fix.** Damage caused by decimation is an accepted cost of meeting the slicer's face budget. Decimation is not optional — an undecimated file gets reduced by the printer instead, reintroducing the defects this tool removes — so the choice is which reduction to accept, not whether to reduce. `source` stays an unused parameter of `_decide` until something else needs it.
 
 **Your comment:** _Add your note here._

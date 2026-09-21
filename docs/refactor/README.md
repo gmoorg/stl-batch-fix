@@ -14,5 +14,6 @@ Produce an STL that preserves the intended model and is actually usable for FDM 
 | Change geometry order | [One-file pipeline](pipeline.md), then [tests](tests.md) |
 | Build the runner | [Final orchestration](orchestration.md) and [interfaces](interfaces.md) |
 | Diagnose remaining work | [Open issues](open-issues.md), then detailed [`CODE_REVIEW.md`](../../libs/review/CODE_REVIEW.md) |
+| Judge a volume-loss verdict | [Mandy volume loss](mandy-volume-loss.md) — what the guard catches, and what it wrongly rejects |
 
 The compact files are the current design record. Historical D1–D27 notes remain under `archive/docs-before-compact-2026-09-19/refactor/` only when exact measurements or chronology are needed.

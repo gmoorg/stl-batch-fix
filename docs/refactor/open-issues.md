@@ -11,6 +11,8 @@ No final face-budget gate is required; `max_faces` is a decimation target. See t
 - Reject zero-face, non-finite, zero-area, or invalid geometry.
 - Compare decimation with the original; current destruction checks begin too late.
 - Preserve meaningful components. The `<100 faces` rule can still approve missing parts; signed-volume cancellation no longer can (A02, `scanner.component_volume`), but the component is still dropped — only the false success was fixed.
+- Repair Mandy's hair rather than only detecting its loss. It is non-orientable and attached to the body at 277 shared vertices of 85,617; PyMeshFix cuts it and every topological check calls the result clean. Branching to Blender instead of PyMeshFix is ruled out by the owner, so a fix must work within the existing steps. Measurements in [Mandy volume loss](mandy-volume-loss.md).
+- Stop rejecting correctly repaired duplicates. Three of sixteen probes are watertight results the volume guard marks DESTROYED; they lose volume at CLEAN, while real destruction happens inside the part tool. Same file.
 - Distinguish a cavity from a second solid. `component_volume` discards the sign per component, so a repair that flips an inner shell outward scores 100%. Containment-aware volume would answer it.
 - Propagate PyMeshFix failure; it can currently become `repairer.ok=True`.
 - Commit output and markers atomically.
