@@ -4,8 +4,11 @@ Fixtures are index arrays built by hand, as in test_scanner: a tetrahedron is
 four faces and six edges, two disjoint tetrahedra are two components, and every
 expected number here is derivable on paper.
 
-The seam fixture is synthetic and deliberately so. **No mesh in the collection
-exercises `by_seams`'s cutting path** — Mandy's head turned out to be its own
+The seam fixture is synthetic because a collection mesh is a poor unit fixture,
+not because none cuts: Mandy part 0 does, into 562,246 + 1 + 1 + 1 faces, but
+only since the face floor was removed from `by_seams` — the floor used to
+discard that cut, which is why this file once recorded that nothing in the
+collection exercised the cutting path. Mandy's head turned out to be its own
 shell, and Amidara's 129 closed loops are 3-to-6 vertex rings that enclose
 nothing and disconnect nothing. So the cut is tested against a tube with one
 half's winding reversed: because the surface wraps, the boundary between the
@@ -194,40 +197,108 @@ class TestBySeams(unittest.TestCase):
 
     def test_a_mesh_with_no_seam_comes_back_unchanged(self):
         m = mesh(*_tube())
-        parts = by_seams(m, min_faces=0)
+        parts = by_seams(m)
         self.assertEqual(len(parts), 1)
         self.assertIs(parts[0], m)
 
     def test_a_seamed_mesh_is_cut_in_two(self):
-        parts = by_seams(self.seamed(), min_faces=0)
+        parts = by_seams(self.seamed())
         self.assertEqual(len(parts), 2)
         self.assertEqual([p.triangles for p in parts], [96, 96])
 
     def test_each_region_is_internally_consistent(self):
         """The property the split exists to produce: PyMeshFix preserves a
         region only when its winding does not contradict itself."""
-        for region in by_seams(self.seamed(), min_faces=0):
+        for region in by_seams(self.seamed()):
             self.assertEqual(scanner.winding_seams(region)[1], 0,
                              'a region still contains a closed seam loop')
 
     def test_no_faces_are_lost(self):
         m = self.seamed()
-        parts = by_seams(m, min_faces=0)
+        parts = by_seams(m)
         self.assertEqual(sum(p.triangles for p in parts), m.triangles)
 
     def test_regions_get_their_own_destinations(self):
-        parts = by_seams(self.seamed(), min_faces=0)
+        parts = by_seams(self.seamed())
         self.assertEqual(len({p.destination for p in parts}), len(parts))
 
-    def test_a_seam_that_separates_nothing_leaves_the_mesh_alone(self):
-        """Amidara: 129 closed loops of 3-6 vertices each, encircling nothing.
-        Removing those edges disconnects no region worth keeping, so the
-        honest answer is to return the mesh."""
+    def test_one_flipped_triangle_makes_no_closed_loop(self):
+        """Modelled on Amidara, whose 129 tiny loops encircle nothing.
+
+        This fixture stops at the `loops == 0` guard: one flipped triangle
+        gives seam edges but no *closed* loop, so no cut is attempted.  Named
+        for what it exercises — it was previously described as a seam that
+        separates nothing, which is a different case.  Seam edges without a
+        closed loop is not the same as no seam at all, so both assertions
+        matter and this is not a duplicate of the no-seam test above.
+        """
         verts, faces = _tube()
         faces = [list(f) for f in faces]
         faces[10] = [faces[10][0], faces[10][2], faces[10][1]]   # one triangle
         m = mesh(verts, faces)
-        self.assertEqual(len(by_seams(m, min_faces=MIN_SHELL_FACES)), 1)
+        edges, loops = scanner.winding_seams(m)
+        self.assertGreater(edges, 0, 'fixture was supposed to have seam edges')
+        self.assertEqual(loops, 0, 'fixture was supposed to have no closed loop')
+        self.assertIs(by_seams(m)[0], m)
+
+    # Not covered: a *closed* seam loop that separates nothing, which is what
+    # the `len(regions) <= 1` guard exists for.  On this tube any closed loop
+    # separates by construction — it wraps the surface — and the flipped-
+    # triangle fixture above produces seam edges without a closed loop.  The
+    # `len(regions) <= 1` guard is reasoned, not measured; a fixture is wanted.
+
+    def test_every_region_comes_back(self):
+        """The contract: cut the seam, return every region.
+
+        Deciding a region is too small to save is the caller's judgement, and
+        it needs the regions in order to make it.
+        """
+        parts = by_seams(self.seamed())
+        self.assertGreater(len(parts), 1)
+        self.assertEqual(sum(p.triangles for p in parts),
+                         self.seamed().triangles)
+
+    def test_a_small_region_no_longer_takes_the_large_one_with_it(self):
+        """The Mandy part 0 shape, in miniature.
+
+        There the seam cut into 562,246 + 1 + 1 + 1 faces and `by_seams`
+        returned the mesh uncut, because the three single triangles were below
+        the floor and the floor decided whether to split at all.  Here the seam
+        yields 24 + 168, and both come back.
+        """
+        m = mesh(*_tube(n_ring=12, n_len=8, flip_from=7))
+        self.assertEqual(sorted(p.triangles for p in by_seams(m)), [24, 168])
+
+    def test_there_is_no_face_floor_to_pass(self):
+        """`min_faces` is gone, and an old positional floor fails loudly.
+
+        `name` is keyword-only for this: `by_seams(m, 100)` would otherwise
+        bind 100 to `name` and only fail later, or silently succeed on a mesh
+        that returns early.
+
+        The no-seam mesh is the one that proves it.  On a seamed mesh a bound
+        `100` raises anyway when extraction calls it, so that case alone would
+        pass even without the keyword-only marker.
+        """
+        for m in (mesh(*_tube()), self.seamed()):
+            with self.assertRaises(TypeError):
+                by_seams(m, MIN_SHELL_FACES)
+            with self.assertRaises(TypeError):
+                by_seams(m, min_faces=MIN_SHELL_FACES)
+
+    def test_the_naming_callback_gets_index_and_total(self):
+        seen = []
+
+        def record(parent, index, total):
+            seen.append((parent, index, total))
+            return f'/parts/{index}.stl'
+
+        m = self.seamed()
+        parts = by_seams(m, name=record)
+        self.assertEqual([(p, i, t) for p, i, t in seen],
+                         [(m, i, len(parts)) for i in range(len(parts))])
+        self.assertEqual([p.destination for p in parts],
+                         [f'/parts/{i}.stl' for i in range(len(parts))])
 
 
 class TestMerge(unittest.TestCase):
@@ -285,7 +356,7 @@ class TestThePipelineShape(unittest.TestCase):
             with self.subTest(faces=m.triangles):
                 parts = by_shells(m, min_faces=0)
                 parts = [p for part in parts
-                         for p in by_seams(part, min_faces=0)]
+                         for p in by_seams(part)]
                 out = merge(parts, destination=m.destination)
                 self.assertEqual(out.triangles, m.triangles)
                 self.assertEqual(out.destination, m.destination)

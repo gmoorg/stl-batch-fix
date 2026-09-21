@@ -2,8 +2,10 @@
 
 `by_shells` uses edge connectivity and drops components below `min_faces` when
 larger parts exist. `by_seams` is available but the current repair sequence
-does not call it. Both return a one-item tuple when nothing splits. Parts get
-their own destinations; neither function writes files.
+does not call it, and it has no such floor: it returns every region the seam
+produced and leaves worth-saving judgements to its caller. Both return a
+one-item tuple when nothing splits. Parts get their own destinations; neither
+function writes files.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from . import scanner
 from .mesh_io import Geometry, Mesh
 
 #: Fixed debris floor; scaling it with the largest shell discarded real small
-#: parts. Corpus measurements are in docs/refactor/implementation-evidence.md.
+#: parts. Corpus measurements are in archive/docs-before-compact-2026-09-19/refactor/implementation-evidence.md.
 MIN_SHELL_FACES = 100
 
 
@@ -118,7 +120,7 @@ def by_shells(mesh: Mesh,
 
 
 def by_seams(mesh: Mesh,
-             min_faces: int = MIN_SHELL_FACES,
+             *,
              name: Callable[[Mesh, int, int], str] = _default_name,
              ) -> tuple[Mesh, ...]:
     """Split on closed winding-seam loops when explicitly called.
@@ -126,6 +128,18 @@ def by_seams(mesh: Mesh,
     Open seam fragments do not justify a cut. A closed loop is only a candidate:
     it does not predict whether PyMeshFix will damage the mesh, so the current
     repair sequence does not invoke this function automatically.
+
+    **Every region is returned, including single triangles.**  There is no
+    `min_faces` here, unlike `by_shells`: separating contradictory winding and
+    judging whether a region is worth saving are different questions, and the
+    caller needs the regions in order to answer the second one.  A floor here
+    used to decide whether the cut happened at all — on Mandy part 0 it
+    discarded a 562,246-face region because the rest of the cut was three single
+    triangles.  `name` is keyword-only so an old positional floor fails loudly.
+
+    A returned region is a valid split, not a repairable solid: a one-face
+    region has three open edges, and `merge` does not weld cut boundaries back
+    together.  A caller that repairs these must judge the results itself.
     """
     edges, loops = scanner.winding_seams(mesh)
     if loops == 0:
@@ -134,14 +148,14 @@ def by_seams(mesh: Mesh,
     seam = scanner.seam_edges(mesh)
     blocked = {(int(a), int(b)) for a, b in seam}
     regions = _face_regions_after_cut(mesh.geometry.faces, blocked)
-
-    kept = [r for r in regions if len(r) >= min_faces]
-    if len(kept) <= 1:
-        # The seam did not actually separate anything — it may not reach a
-        # boundary, or the far side may be debris.  Nothing to gain by cutting.
+    if len(regions) <= 1:
+        # The cut separated nothing: the loop may not reach a boundary.  The
+        # mesh itself comes back, rather than an extracted copy of the whole
+        # thing minus its unreferenced vertices.
         return (mesh,)
-    return tuple(_extract(mesh, r, name(mesh, i, len(kept)))
-                 for i, r in enumerate(kept))
+
+    return tuple(_extract(mesh, r, name(mesh, i, len(regions)))
+                 for i, r in enumerate(regions))
 
 
 def merge(parts: tuple[Mesh, ...] | list[Mesh],
