@@ -28,6 +28,7 @@ class Summary:
 
     scanned: int = 0
     copied: int = 0
+    copy_failed: int = 0
     already_copied: int = 0
     skipped: int = 0          # already fixed, or a marker said do not retry
     emitted: int = 0          # handed to the consumer, valid or not
@@ -108,11 +109,18 @@ def prepare(source_root: str,
             continue
 
         if found.indicator is Indicator.COPY_AS_IS:
-            # Staged: `check` reads this same path back as ALREADY_COPIED, so
-            # a copy interrupted partway would retire the companion for good.
-            with mesh_io.staged_write(destination) as staged:
-                shutil.copy2(source, staged)
-            summary.copied += 1
+            try:
+                # Staged: `check` reads this same path back as ALREADY_COPIED,
+                # so a copy interrupted partway would retire it for good.
+                with mesh_io.staged_write(destination) as staged:
+                    shutil.copy2(source, staged)
+            except OSError:
+                # One unreadable companion costs one companion.  Raising here
+                # cost every file after it too: the walk is a single pass, so
+                # sources it had not reached yet were never even scanned.
+                summary.copy_failed += 1
+            else:
+                summary.copied += 1
             continue
 
         if found.indicator is Indicator.EXPORT_READY:

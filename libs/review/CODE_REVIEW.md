@@ -13,20 +13,20 @@ Re-verified 2026-09-20 against the working tree by Claude (reproduction scripts)
 | R01 | **fixed** 2026-09-20 | 3 | Was `scanned=1, emitted=0, conversion_failed=0` on a raising converter |
 | R02 | **fixed** 2026-09-20 | 2 | Was `ok=True, problem=None` while the step log records the failure |
 | R03 | **fixed** 2026-09-20 | 1 | Was `IndexError` at `mesh_io.py:299` on an 84-byte file |
-| R04 | open question | — | Unresolved geometry judgment; no defect demonstrated |
+| R04 | **accepted** 2026-09-21 | — | Owner: a broken model is better visibly damaged than oddly wound; no distance bound |
 | R05 | confirmed (inspection) | with A02 | Drop policy at `splitter.py:106–115`; A02 is its demonstrated harm |
-| R06 | confirmed (inspection) | later | `_decide` never uses `source`; volume alone misses thin features |
+| R06 | **accepted** 2026-09-21 | — | Owner: decimation damage is the accepted cost of the face budget |
 | R07 | **misdescribed** | later | Race is real; stated fd mechanism is wrong (each capture owns its dups) |
 | R08 | confirmed (inspection) | later | Single `_current` slot; not reproduced under concurrency |
 | R09 | **fixed** 2026-09-20 | 3 | Was: selector exception kills workers; `start()` returns normally |
 | R10 | confirmed (Codex) | later | Result fields describe a different mesh than the one carried |
-| A01 | confirmed | later | 1 hit, 762→764 faces, 4 open edges remain; caught downstream as OPEN_EDGES |
+| A01 | **fixed** 2026-09-21 | — | A non-monotone chain is refused, not sorted; geometry untouched (762→762) and PyMeshFix closes the holes properly |
 | A02 | **cancellation fixed** 2026-09-21 | 6 | Was PROCESS at 7,049,393,791%, now DESTROYED at 50.00%. The component is **still dropped** — only the false success is fixed. Preservation is R05, still open |
 | A03 | **fixed** 2026-09-21 | 5 | Four routes, not one: STL load, PLY read, the decision gate, and the unreported `cKDTree` crash outside `repair`'s try/except |
 | A04 | **fixed** 2026-09-20 | 4 | Was: 7-byte file classified `ALREADY_FIXED`; no writer was atomic. The fix also covered a writer this finding missed — the companion copy in `converter.py` |
-| A05 | confirmed | later | Both sources map to `/in/stl-exported/model.stl` |
-| A06 | confirmed (inspection) | later | Copy failure escapes `prepare`, against the orchestration contract |
-| A07 | confirmed (Codex) | later | Claude's fixture gave `nm=1` and was rejected; Codex's collinear case gave `nm=0` → PROCESS |
+| A05 | **accepted** 2026-09-21 | — | Owner: personal tool, never keeps both; last conversion wins |
+| A06 | **fixed** 2026-09-21 | — | One bad companion costs one companion; `Summary.copy_failed` counts it |
+| A07 | **fixed** 2026-09-21 | — | `_decide` measures the approved mesh: enclosing no volume is BROKEN, not PROCESS |
 | A08 | **withdrawn** | — | Contradicts the owner's T16 decision; see A08 |
 | T01–T15 | confirmed | with each fix | Coverage gaps, not additional runtime defects |
 
@@ -87,6 +87,8 @@ The CLEAN-before-split order was rechecked. Keep it: vertex merging exposes coin
 
 `libs/welder.py`:L172–231: 🟡 unresolved boundary: the deliberate path-and-strip rule accepts any perpendicular distance from the spanning edge. Moving the midpoint in `test_welder.with_tjunction()` 10 units off a roughly 1.4-unit edge still gives one edge-connected shell, one hit, and a topologically clean result after repair. This proves the detector has no distance bound, but does not by itself prove the split is wrong: the [module reference](../../docs/refactor/modules.md#welder) records that real junctions can bend off the line. Determine what additional geometry, if any, distinguishes an intended bent edge from a hole before changing the rule.
 
+**Owner decision 2026-09-21: no distance bound will be added.** The detector fires on a _closed loop of open edges_ in a model that should have none, so the mesh is already broken by the time distance would matter. Given a badly broken model, the owner prefers visible damage over silently strange winding: damage is inspectable, and no model in the library is under an obligation to print. R04 is closed as an accepted behaviour, not an open question.
+
 **Your comment:** _Add your note here._
 
 ### R05 — Small shells can be discarded
@@ -102,6 +104,8 @@ The CLEAN-before-split order was rechecked. Keep it: vertex merging exposes coin
 **Status 2026-09-20: confirmed (inspection plus a partial run).** `processor.process` passes the original `mesh` to `_decide` as `source`, but `_decide` judges destruction only from `repaired.volume_kept`, which is measured from the post-decimation `volume_in`; `source` is never read for loss. Current lines: `processor.py:123–134`, `repairer.py:227–228`.
 
 A run on `decimation_lost_appendage.stl` with `max_faces=20` decimated 28→20 faces and returned `PROCESS` with `volume_kept=100.00%`, and volume against the true source was `100.14%`. So this fixture does not show the loss as a volume change at all — which strengthens the finding: the appendage is thin, and a volume comparison alone would not have caught it either. Any fix needs a measure sensitive to thin-feature removal, not just a second volume ratio.
+
+**Owner decision 2026-09-21: accepted, will not fix.** Damage caused by decimation is an accepted cost of meeting the slicer's face budget. Decimation is not optional — an undecimated file gets reduced by the printer instead, reintroducing the defects this tool removes — so the choice is which reduction to accept, not whether to reduce. `source` stays an unused parameter of `_decide` until something else needs it.
 
 **Your comment:** _Add your note here._
 
@@ -183,6 +187,8 @@ Two manifestations, one cause. Rejecting non-finite input at load prevents both;
 `libs/converter.py`:L50–56 and `libs/indicators.py`:L76–86: 🟡 identity collision: `model.obj` and `model.stl` in the same source directory map to the same output and export paths. Both equalities were reproduced. If both sources are admitted, one result can overwrite or be mistaken for the other. Detect collisions before emission or define an unambiguous naming policy.
 
 **Status 2026-09-20: confirmed.** `indicators.export_path` maps both `/in/model.obj` and `/in/model.stl` to `/in/stl-exported/model.stl`. Codex confirmed both equalities independently. Collision rejection is explicitly required by `docs/refactor/orchestration.md:27`, so this is a contract violation, not only a risk.
+
+**Owner decision 2026-09-21: accepted, will not fix.** This is a personal tool for repairing the owner's own print library, not a product. The owner does not keep `model.obj` and `model.stl` in one directory; if it ever happens, taking the last conversion result is the accepted outcome. `docs/refactor/orchestration.md:27` should be read as describing a runner requirement that this deployment waives, not as a promise the code breaks.
 
 **Your comment:** _Add your note here._
 

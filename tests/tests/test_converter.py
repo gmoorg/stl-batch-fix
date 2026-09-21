@@ -237,6 +237,53 @@ class TestConversion(ConverterCase):
         self.assertFalse(self.seen[0].is_valid)
         self.assertEqual(summary.conversion_failed, 1)
 
+    def test_a_failed_companion_copy_does_not_abort_the_walk(self):
+        """A06: one unreadable companion must not cost every later file.
+
+        `shutil.copy2` was called inline, so a permission error or a vanished
+        file raised straight out of `prepare` — and the walk is a single pass,
+        so every source after it was never even scanned.  The orchestration
+        contract asks for one result per source; aborting gives none for most
+        of them.
+        """
+        os.makedirs(self.s('Leia'), exist_ok=True)
+        with open(self.s('Leia', 'notes.txt'), 'w') as f:
+            f.write('companion')
+        _binary_stl(self.s('Leia', 'head.stl'))
+
+        def die(src, dst, *args, **kwargs):
+            raise PermissionError("cannot read the companion")
+
+        # The walk order decides what this proves.  `os.walk` makes no promise
+        # about it, so left to chance the mesh could be visited first and the
+        # test would pass against an implementation that still aborts.  Pinned:
+        # the failing companion comes first, and the mesh after it.
+        ordered = [self.s('Leia', 'notes.txt'), self.s('Leia', 'head.stl')]
+        with mock.patch.object(converter, '_walk', lambda root: iter(ordered)), \
+                mock.patch.object(converter.shutil, 'copy2', die):
+            summary = self.run_prepare()
+
+        self.assertEqual(summary.copy_failed, 1)
+        self.assertEqual(summary.copied, 0)
+        # The mesh after it was still found: the walk continued.
+        self.assertEqual(len(self.seen), 1)
+        self.assertTrue(self.seen[0].path.endswith('head.stl'))
+
+    def test_a_failed_companion_copy_is_counted_once_per_source(self):
+        """Two bad companions are two failures, not one abort."""
+        os.makedirs(self.s('Leia'), exist_ok=True)
+        for name in ('one.txt', 'two.txt'):
+            with open(self.s('Leia', name), 'w') as f:
+                f.write('companion')
+
+        def die(src, dst, *args, **kwargs):
+            raise OSError("no")
+
+        with mock.patch.object(converter.shutil, 'copy2', die):
+            summary = self.run_prepare()
+
+        self.assertEqual(summary.copy_failed, 2)
+
     def test_an_interrupted_companion_copy_leaves_nothing_behind(self):
         """A04, for the companion copy: `check` reads this path back too.
 

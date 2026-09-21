@@ -17,9 +17,12 @@ import unittest
 
 import numpy as np
 
-from libs import scanner, welder
+from libs import mesh_io, scanner, welder
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.welder import Result, TJunction, find, repair
+
+PROBES = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), 'probes')
 
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
 TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
@@ -448,6 +451,35 @@ class TestSeveralJunctionsOnOneFace(unittest.TestCase):
         positions = [float((verts[v] - verts[low]) @ along / (along @ along))
                      for v in chain]
         self.assertEqual(positions, sorted(positions))
+
+    def test_a_backward_chain_is_rejected_rather_than_reordered(self):
+        """A01: sorting the chain discards the evidence that it was wrong.
+
+        The walk admits any interior vertex, so a path can run
+        `a → M1(t=2/3) → M2(t=1/3) → c` — backward along the edge it claims to
+        follow.  Sorting by position then produced a chain whose edges are not
+        the path's edges, and `_split` fanned faces that close nothing: on the
+        committed probe, `repair` added two faces and left all four open edges
+        exactly as it found them.
+
+        Refusing the junction leaves the mesh alone and its open edges intact,
+        so `processor` reports OPEN_EDGES on geometry nobody has stirred —
+        which is the honest outcome, not a repair that only looks like one.
+        """
+        path = os.path.join(PROBES, 'reversed_tjunction_chain.stl')
+        if not os.path.exists(path):                   # pragma: no cover
+            self.skipTest('probe fixture not generated')
+        m = mesh_io.load(mesh_io.probe(path, '/tmp/out.stl'))
+        before = scanner.scan(m)
+
+        result = repair(m)
+
+        self.assertEqual(result.splits, 0, "a backward chain was split anyway")
+        self.assertEqual(result.mesh.triangles, m.triangles,
+                         "geometry changed for a junction that was refused")
+        after = scanner.scan(result.mesh)
+        self.assertEqual(after.open_edges, before.open_edges)
+        self.assertEqual(after.non_manifold, before.non_manifold)
 
     def test_one_split_makes_three_faces(self):
         """n interior vertices cost n+1 faces, not 2 — and it is one split,

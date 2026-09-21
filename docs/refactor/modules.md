@@ -58,8 +58,8 @@ reference material until the refactor is complete.
 
 - **For:** repair a T-junction by splitting the face whose edge skips vertices on a neighboring open-edge path.
 - **Interface:** `find(mesh)`, `repair(mesh) -> Result`.
-- **Implementation:** follows a topological boundary path and adjacent face strip; adds faces without moving/deleting vertices.
-- **Tried/rejected:** fixed and relative distance tests missed real bent junctions or failed with scale. PyMeshLab `remove_t_vertices` destroyed a measured mesh; PyMeshFix and Blender dented the fixture. Reversed path chains remain unresolved.
+- **Implementation:** follows a topological boundary path and adjacent face strip; adds faces without moving/deleting vertices. A chain whose vertices do not progress along the spanning edge is refused, because `_split` fans faces in chain order and a reordered chain builds edges the path does not have (A01).
+- **Tried/rejected:** fixed and relative distance tests missed real bent junctions or failed with scale; no distance bound is applied, and the owner accepts that (R04). PyMeshLab `remove_t_vertices` destroyed a measured mesh; PyMeshFix and Blender dented the fixture. Sorting a backward chain into order produced two new faces and left all four open edges — the junction is refused instead, and PyMeshFix closes those holes properly.
 
 ### `splitter`
 
@@ -79,8 +79,8 @@ reference material until the refactor is complete.
 
 - **For:** process, judge, and write one mesh outcome.
 - **Interface:** `process(mesh, max_faces, tool) -> Outcome`, `write(outcome, source_path, output_file)`.
-- **Implementation:** decimates, repairs, scans, then chooses an `Indicator`; loss must be checked before topology because a partial model can be closed.
-- **Tried/rejected:** judging only post-decimation input misses decimation loss. Signed volume can cancel between opposite shells. Finite geometry and component retention are still open acceptance concerns. The decimation target is applied before repair; blind re-decimation afterward can recreate repaired defects.
+- **Implementation:** decimates, repairs, scans, then chooses an `Indicator`; loss must be checked before topology because a partial model can be closed. After topology passes, the approved mesh is measured: enclosing no volume is `BROKEN`, since closed edges do not make a solid (A07).
+- **Tried/rejected:** judging only post-decimation input misses decimation loss (R06, accepted by the owner). Signed volume cancelled between opposite shells; `scanner.component_volume` replaced it (A02). Trusting `volume_out` instead of measuring the mesh let a collinear sheet pass as printable. Component retention is still an open acceptance concern (R05). The decimation target is applied before repair; blind re-decimation afterward can recreate repaired defects.
 
 ## Files and execution
 
@@ -95,8 +95,8 @@ reference material until the refactor is complete.
 
 - **For:** walk sources, copy companions, convert OBJ/ASCII STL, and emit probed binary-STL jobs.
 - **Interface:** `prepare(source_root, output_root, emit, ...) -> Summary`.
-- **Implementation:** preserves relative paths and caches conversions under `stl-exported/`. A converter that raises is emitted and counted exactly like one returning `False`, caught beside the call rather than through the pool's `error` argument, which reaches only the selector (R01).
-- **Tried/rejected:** inline copy errors can abort the walk (A06), and same-stem OBJ/STL inputs collide (A05). Relying on the pool's `error` argument to notice a failed conversion did not work: the selector is told that an item finished, not which result it produced.
+- **Implementation:** preserves relative paths and caches conversions under `stl-exported/`. A converter that raises is emitted and counted exactly like one returning `False`, caught beside the call rather than through the pool's `error` argument, which reaches only the selector (R01). A companion copy that fails counts one `copy_failed` and the walk continues (A06).
+- **Tried/rejected:** relying on the pool's `error` argument to notice a failed conversion did not work: the selector is told that an item finished, not which result it produced. Letting a copy error propagate cost every source after it, because the walk is a single pass. Same-stem OBJ/STL inputs still collide (A05), accepted by the owner for this deployment.
 
 ### `pool`
 

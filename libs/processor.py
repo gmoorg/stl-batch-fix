@@ -109,6 +109,20 @@ def _decide(source: Mesh,
             f"{scan.open_edges} open edge(s) remain",
             scan=scan, decimation=decimated, repair=repaired)
 
+    # Topology is satisfied; ask geometry whether there is a model here.  Every
+    # check above reads indices or reported numbers, and neither establishes a
+    # solid: four faces whose vertices lie on one line own every edge twice and
+    # enclose nothing, scoring nm=0, open=0, is_clean=True (A07).  Measured from
+    # `repaired.mesh` itself rather than trusting `volume_out`, because this is
+    # the last point at which the thing being approved can still be inspected.
+    enclosed = scanner.component_volume(repaired.mesh)
+    if not (math.isfinite(enclosed) and enclosed > 0.0):
+        return Outcome(
+            Indicator.BROKEN, None, 'source',
+            f"encloses no volume: {repaired.faces_out} faces measuring "
+            f"{enclosed}, which is a surface rather than a solid",
+            scan=scan, decimation=decimated, repair=repaired)
+
     return Outcome(Indicator.PROCESS, repaired.mesh, None,
                    f"clean: {repaired.faces_out} faces, "
                    f"{repaired.volume_kept * 100:.2f}% of volume",

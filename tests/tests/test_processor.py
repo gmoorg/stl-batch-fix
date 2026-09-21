@@ -301,6 +301,36 @@ class TestWriting(unittest.TestCase):
         self.assertEqual(outcome.marker, 'source')
         self.assertAlmostEqual(outcome.repair.volume_kept, 0.5, places=2)
 
+    def test_zero_area_geometry_is_not_a_printable_solid(self):
+        """A07: closed edges do not make a solid.
+
+        Four faces whose vertices all lie on one line have every edge owned
+        twice, so `Scan.is_clean` is True, `nm=0` and `open=0` — and the thing
+        encloses nothing.  `is_clean` answers a question about indices; whether
+        there is a model here is a question about geometry, and something has
+        to ask it before the result is called printable.
+        """
+        collinear = mesh([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]])
+        scan = scanner.scan(collinear)
+        self.assertTrue(scan.is_clean, "fixture no longer reproduces A07")
+        self.assertEqual(scanner.volume(collinear), 0.0)
+
+        # Measurements that would otherwise pass every gate.
+        outcome = processor._decide(
+            collinear, decimation(),
+            repair_result(result_mesh=collinear,
+                          volume_in=100.0, volume_out=100.0))
+
+        self.assertFalse(outcome.is_clean,
+                         "a mesh enclosing no volume was called printable")
+        # Which rejection matters: BROKEN is never retried, because running the
+        # same repair again will not make a flat mesh into a solid, and the
+        # source is what belongs in the marker since the repaired result is not
+        # a model at all.
+        self.assertIs(outcome.indicator, Indicator.BROKEN)
+        self.assertEqual(outcome.marker, 'source')
+        self.assertIsNone(outcome.mesh)
+
     def test_a_zero_scale_mesh_is_not_a_clean_verdict(self):
         """A02: both volumes are finite, and the ratio between them is not.
 

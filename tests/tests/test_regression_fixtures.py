@@ -56,7 +56,12 @@ class TestModelLossFixtures(unittest.TestCase):
 
         mesh = load('reversed_tjunction_chain')
         self.assertEqual(scanner.scan(mesh).open_edges, 4)
-        self.assertEqual(len(welder.find(mesh)), 1)
+
+        # `find` reported this as one junction until A01 was fixed, and `repair`
+        # then added two faces while leaving all four open edges — a chain that
+        # runs backward cannot be fanned into closing faces. It is refused now,
+        # so the four open edges survive for the final scan to report.
+        self.assertEqual(len(welder.find(mesh)), 0)
 
 
 if __name__ == '__main__':

@@ -224,7 +224,17 @@ def _find_in(verts: np.ndarray,
         # by adjacent junctions and are deliberately exempt.
         if any(len(open_at[vertex]) != 2 for vertex in chain):
             continue
-        chain = tuple(sorted(chain, key=position))
+        # The walk admits any interior vertex, so the path it found may run
+        # backward along the edge it claims to follow.  Sorting was silently
+        # discarding that: `_split` fans faces along the *chain's* order, so a
+        # reordered chain builds edges the path does not have, and the measured
+        # result was two new faces with all four open edges still open —
+        # geometry stirred for nothing.  A path that does not progress is not
+        # a T-junction this can repair, so it is refused and left intact for
+        # the final scan to report honestly (A01).
+        positions = [position(vertex) for vertex in chain]
+        if positions != sorted(positions):
+            continue
         first = chain[0]
         where = position(first)
         distance = float(np.linalg.norm(

@@ -27,7 +27,7 @@ class Indicator(Enum):
     ALREADY_COPIED = 'already_copied'  # not a mesh, and the copy is there
     EXPORT_READY = 'export_ready'    # a converted binary exists; use that path
     ALREADY_FIXED = 'already_fixed'  # the repaired output is present
-    BROKEN = 'broken'                # unreadable mesh; never retried
+    BROKEN = 'broken'                # unusable mesh; never retried
     FAILED = 'failed'                # transient failure; delete to retry
     UNREPAIRED = 'unrepaired'        # non-manifold edges remained
     OPEN_EDGES = 'open_edges'        # nm clean, open edges remained
