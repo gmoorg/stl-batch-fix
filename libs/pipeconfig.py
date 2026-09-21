@@ -22,15 +22,17 @@ omits a stage.
 
 Every operation the repair sequence can run — `welder.step_weld_close_tjunctions`,
 `blender.step_blender_repair`, `meshfix.step_meshfix_repair`, and
-`repairer`'s own `step_clean_null_faces`/`step_clean_merge_close`/
+`meshlab`'s own `step_clean_null_faces`/`step_clean_merge_close`/
 `step_clean_duplicate_faces`/`step_clean_unreferenced`/`step_orient` —
 shares one signature: `(mesh: Mesh) -> tuple[bool, Mesh, str]`. A function
 defined in another module names that module in its own name
-(`step_<module>_<action>`); one defined in `repairer.py` does not repeat
-"repairer" since the module qualifier already says that (`step_<action>`).
-`repairer` composes all of them without a step-specific case because of
-this shared shape. Each function's own docstring covers only what is
-specific to it; the shared parts are here, once:
+(`step_<module>_<action>`); one defined in `meshlab.py` does not repeat
+"meshlab" since the module qualifier already says that (`step_<action>`).
+`repairer` composes all of them, in the order `WHOLE_MESH_STEPS` and
+`_repair_part` list, without a step-specific case because of this shared
+shape — naming a specific tool's filters or parameters is that tool's own
+module's job, not `repairer`'s. Each function's own docstring covers only
+what is specific to it; the shared parts are here, once:
 
 - `ok=True` means the step *ran* (or was intentionally skipped), never that
   the resulting mesh is printable — a tool can succeed and still hand back
@@ -79,11 +81,12 @@ ENABLE_SPLIT_SEAMS = False
 ENABLE_ORIENT = True
 
 #: 3b/14a. Repair each part in Blender before PyMeshFix runs on it. Owner
-#: decision, 2026-09-21: `blender_part`/`blender.step_blender_repair`
-#: existed only as an explicit wholesale replacement for PyMeshFix
-#: (`repair(tool=blender_part)`)
-#: and was never reachable in the default sequence — this switch puts it
-#: there, before PyMeshFix, so it stops being unused. This fulfils the
+#: decision, 2026-09-21: `blender.step_blender_repair` (then still wrapped
+#: as `repairer.blender_part`, since removed as redundant) existed only as
+#: an explicit wholesale replacement for PyMeshFix
+#: (`repair(tool=blender.step_blender_repair)`) and was never reachable in
+#: the default sequence — this switch puts it there, before PyMeshFix, so
+#: it stops being unused. This fulfils the
 #: *order* half of the open target in libs/review/CODE_REVIEW.md ("Blender
 #: must appear in the final per-part route"); the defect-based selector half
 #: — routing a part to one tool, the other, or both based on what it

@@ -1,12 +1,17 @@
 """Apply the current mesh repair sequence without writing a file.
 
 `repair` welds T-junctions, runs duplicate cleanup before splitting, splits
-edge-connected shells, orients each part, repairs each with PyMeshFix by
-default, then merges and reports measurements. `splitter.by_seams` is not in
-the default sequence — see `pipeconfig.ENABLE_SPLIT_SEAMS`. `processor`
-judges the result; `repairer.ok` only means the sequence completed.
-`blender_part` provides the PLY-based Blender operation, but defect-based
-routing between it and PyMeshFix is not implemented yet.
+edge-connected shells, orients each part, repairs each with Blender then
+PyMeshFix by default, then merges and reports measurements.
+`splitter.by_seams` is not in the default sequence — see
+`pipeconfig.ENABLE_SPLIT_SEAMS`. `processor` judges the result;
+`repairer.ok` only means the sequence completed. Pass
+`tool=blender.step_blender_repair` to `repair()` for Blender-only repair —
+it already has the uniform signature `tool=` requires, no wrapper needed.
+This module owns operation order, `Step` classification, measurement
+recording, and split/merge orchestration; naming a specific tool's filters
+or parameters belongs to that tool's own module (`meshlab`, `welder`,
+`blender`, `meshfix`) — see each uniform `step_*` function there.
 """
 
 from __future__ import annotations
@@ -42,92 +47,28 @@ class Step(Enum):
     MERGE = 'merge'                             # 3c. back into one mesh
 
 
-def _meshlab_step(mesh: Mesh, enabled: bool, flag_name: str,
-                  filter_name: str, params: dict) -> tuple[bool, Mesh, str]:
-    """Shared body for the five steps built from a single PyMeshLab filter
-    (the four CLEAN filters and orient): check its flag, run its filter,
-    catch what `meshlab.apply_filters` raises — `apply_filters` raises
-    rather than returning a failure, so it is this function's job to
-    convert that into `pipeconfig`'s uniform step contract.
-    """
-    if not enabled:
-        return True, mesh, f'skipped ({flag_name}=False)'
-    try:
-        result = meshlab.apply_filters(mesh, ((filter_name, params),))
-    except Exception as exc:
-        return False, mesh, f"{filter_name} failed: {exc}"
-    return True, result, filter_name.replace('meshing_', '')
-
-
-def step_clean_null_faces(mesh: Mesh) -> tuple[bool, Mesh, str]:
-    """Drop zero-area faces. Uniform step: see `_meshlab_step`."""
-    return _meshlab_step(mesh, pipeconfig.ENABLE_CLEAN_NULL_FACES,
-                         'ENABLE_CLEAN_NULL_FACES',
-                         'meshing_remove_null_faces', {})
-
-
-def step_clean_merge_close(mesh: Mesh) -> tuple[bool, Mesh, str]:
-    """Weld vertices within 0.1% of the bbox diagonal. Uniform step: see
-    `_meshlab_step`. **Measured harmful** on Amidara base — see
-    `pipeconfig.ENABLE_CLEAN_MERGE_CLOSE`."""
-    return _meshlab_step(mesh, pipeconfig.ENABLE_CLEAN_MERGE_CLOSE,
-                         'ENABLE_CLEAN_MERGE_CLOSE',
-                         'meshing_merge_close_vertices', {'threshold': 0.1})
-
-
-def step_clean_duplicate_faces(mesh: Mesh) -> tuple[bool, Mesh, str]:
-    """Remove faces duplicated after the merge. Uniform step: see
-    `_meshlab_step`."""
-    return _meshlab_step(mesh, pipeconfig.ENABLE_CLEAN_DUPLICATE_FACES,
-                         'ENABLE_CLEAN_DUPLICATE_FACES',
-                         'meshing_remove_duplicate_faces', {})
-
-
-def step_clean_unreferenced(mesh: Mesh) -> tuple[bool, Mesh, str]:
-    """Drop vertices no face references. Uniform step: see
-    `_meshlab_step`."""
-    return _meshlab_step(mesh, pipeconfig.ENABLE_CLEAN_UNREFERENCED,
-                         'ENABLE_CLEAN_UNREFERENCED',
-                         'meshing_remove_unreferenced_vertices', {})
-
-
-def step_orient(mesh: Mesh) -> tuple[bool, Mesh, str]:
-    """Orient one part outward, by geometry. Uniform step: see
-    `_meshlab_step`. Runs unconditionally after splitting, without a
-    signed-volume guard — a signed-volume guard misses local inversions.
-    **Measured harmful** on Amidara base — see `pipeconfig.ENABLE_ORIENT`.
-    """
-    if not pipeconfig.ENABLE_ORIENT:
-        return True, mesh, 'orient skipped (ENABLE_ORIENT=False)'
-    ok, result, detail = _meshlab_step(
-        mesh, True, 'ENABLE_ORIENT',
-        'meshing_re_orient_faces_by_geometry', {})
-    return ok, result, ('oriented' if ok else detail)
-
-
-#: The four CLEAN steps, in order. `repair`'s CLEAN phase runs them in this
-#: sequence, stopping at the first failure like the per-part sequence does.
-CLEAN_STEPS: tuple[Callable[[Mesh], tuple[bool, Mesh, str]], ...] = (
-    step_clean_null_faces, step_clean_merge_close,
-    step_clean_duplicate_faces, step_clean_unreferenced,
+#: The whole-mesh steps `repair` runs, in order, before the split — this
+#: tuple, read top to bottom, IS the order of operation. Each function is a
+#: uniform `(mesh) -> (ok, mesh, detail)` step owned by the module that
+#: knows its mechanics; `repairer` only sequences them.
+WHOLE_MESH_STEPS: tuple[tuple[Step, Callable[[Mesh], tuple[bool, Mesh, str]]], ...] = (
+    (Step.WELD, welder.step_weld_close_tjunctions),
+    (Step.CLEAN_NULL_FACES, meshlab.step_clean_null_faces),
+    (Step.CLEAN_MERGE_CLOSE, meshlab.step_clean_merge_close),
+    (Step.CLEAN_DUPLICATE_FACES, meshlab.step_clean_duplicate_faces),
+    (Step.CLEAN_UNREFERENCED, meshlab.step_clean_unreferenced),
 )
 
-#: The `Step` each entry in `CLEAN_STEPS` records under, same order.
-CLEAN_STEP_ENUMS: tuple[Step, ...] = (
-    Step.CLEAN_NULL_FACES, Step.CLEAN_MERGE_CLOSE,
-    Step.CLEAN_DUPLICATE_FACES, Step.CLEAN_UNREFERENCED,
-)
-
-
-#: Run the whole cleanup sequence before splitting: merging alone can leave
-#: duplicate faces and apparent non-manifold edges. The threshold is relative
-#: to the bounding-box diagonal. See archive/docs-before-compact-2026-09-19/refactor/implementation-evidence.md.
-#: Kept as the full default order; `clean_filters()` is what `repair` runs.
-CLEAN_FILTERS: tuple[tuple[str, dict], ...] = (
-    ('meshing_remove_null_faces', {}),
-    ('meshing_merge_close_vertices', {'threshold': 0.1}),
-    ('meshing_remove_duplicate_faces', {}),
-    ('meshing_remove_unreferenced_vertices', {}),
+#: The per-part steps `_repair_part` runs, in order — visible the same way
+#: `WHOLE_MESH_STEPS` is, rather than an anonymous tuple inline in the
+#: function body. Tests that need to substitute one of these must patch
+#: `repairer.PART_MESH_STEPS` itself (e.g. with `mock.patch.object`), not
+#: the origin module's attribute: this tuple captures the function objects
+#: once, at import time, so patching `blender.step_blender_repair` after
+#: import does not change what an already-built tuple holds.
+PART_MESH_STEPS: tuple[Callable[[Mesh], tuple[bool, Mesh, str]], ...] = (
+    meshlab.step_orient, blender.step_blender_repair,
+    meshfix.step_meshfix_repair,
 )
 
 #: Allow float re-rounding when counting retained vertices. This absolute
@@ -243,37 +184,89 @@ def _count_lost(before: np.ndarray, after: np.ndarray,
     return int((distance > tolerance).sum())
 
 
+def _record_step(steps_list: list[StepResult], step: Step, was: int,
+                 now: int, detail: str, since: float,
+                 result: Mesh | None = None) -> None:
+    """Record one step, scanning `result` when there is a mesh to scan.
+
+    The one place a `StepResult` is built — `_run_step`, SPLIT, and MERGE
+    all call this, so there is exactly one implementation of "scan the
+    result and append a `StepResult`", not one per call site. `result` is
+    `None` for the split, which produces several meshes rather than one —
+    each part is then scanned by its own `Step.PART` entry.
+    """
+    scan = volume = None
+    orphans = 0
+    if result is not None and result.geometry is not None:
+        scan = scanner.scan(result)
+        volume = scanner.volume(result)
+        orphans = (len(result.geometry.verts)
+                   - len(np.unique(result.geometry.faces)))
+    steps_list.append(StepResult(step, was, now, detail,
+                                 time.monotonic() - since,
+                                 scan, volume, int(orphans)))
+
+
+@dataclass(frozen=True)
+class _StepOutcome:
+    """What one uniform step call plus its recording produced.
+
+    `mesh` is always the step's own result, regardless of whether recording
+    it afterward succeeded — matching what `repair` did before this was
+    extracted: the mesh was reassigned on the line that called the step,
+    before anything that could raise while describing the result. If
+    recording raises, `record_error` carries it and the caller re-raises it
+    itself, after first assigning `mesh = outcome.mesh` — so a scan failure
+    still reaches the outer exception handler with the advanced mesh, not
+    the one from before this step ran.
+    """
+
+    ok: bool
+    mesh: Mesh
+    detail: str
+    record_error: Exception | None = None
+
+
+def _run_step(step: Step, step_fn: Callable[[Mesh], tuple[bool, Mesh, str]],
+             mesh: Mesh, steps_list: list[StepResult],
+             detail_prefix: str = '') -> _StepOutcome:
+    """Call one uniform step and record it. See `_StepOutcome` for why a
+    failure while recording does not lose the step's own result.
+    """
+    mark = time.monotonic()
+    was = len(mesh.geometry.faces)
+    ok, mesh, detail = step_fn(mesh)
+    full_detail = detail_prefix + detail
+    try:
+        _record_step(steps_list, step, was, len(mesh.geometry.faces),
+                     full_detail, mark, mesh)
+    except Exception as exc:
+        return _StepOutcome(ok, mesh, full_detail, record_error=exc)
+    return _StepOutcome(ok, mesh, full_detail)
+
+
 def _repair_part(part: Mesh) -> tuple[bool, Mesh, str]:
     """Orient one split part, repair it in Blender, then repair it with
-    PyMeshFix — the default per-part sequence, composed from three uniform
-    `step(mesh) -> (ok, mesh, detail)` calls.
+    PyMeshFix — the default per-part sequence, composed from the uniform
+    `(mesh) -> (ok, mesh, detail)` calls in `PART_MESH_STEPS`.
 
     Stops at the first `ok=False`: a part that could not be repaired is
     still defective geometry, and continuing to the next stage or merging it
     back in would produce a mesh that measures plausibly and is not a
     repair. Each stage's own flag (`pipeconfig.ENABLE_ORIENT`,
     `ENABLE_BLENDER_PART`, `ENABLE_PART_TOOL`) is checked inside that
-    stage's own step function, not here — this is composition only.
+    stage's own step function, not here — this is composition only. The
+    caller (`repair`'s per-part loop) records the whole part as ONE
+    `Step.PART` entry, not one per sub-step here — `_repair_part` only
+    accumulates detail text, it does not call `_record_step` itself.
     """
     notes = []
-    for step_fn in (step_orient, blender.step_blender_repair,
-                   meshfix.step_meshfix_repair):
+    for step_fn in PART_MESH_STEPS:
         ok, part, detail = step_fn(part)
         notes.append(detail)
         if not ok:
             return False, part, ', '.join(notes)
     return True, part, ', '.join(notes)
-
-
-def blender_part(part: Mesh) -> tuple[bool, Mesh, str]:
-    """Repair a split part in Blender alone.
-
-    Pass this as `repair(tool=...)` to replace the default per-part sequence
-    with Blender-only repair. Thin: the PLY round trip and identity
-    preservation live in `blender.step_blender_repair`, which this just
-    calls.
-    """
-    return blender.step_blender_repair(part)
 
 
 def repair(mesh: Mesh,
@@ -284,8 +277,10 @@ def repair(mesh: Mesh,
 
     No file is written and `ok` is not a clean-mesh verdict. The default
     per-part sequence is orient, then Blender, then PyMeshFix; `tool` can
-    replace the whole per-part sequence, including with `blender_part` for
-    Blender alone. This injection point bypasses the built-in sequence
+    replace the whole per-part sequence, including with
+    `blender.step_blender_repair` directly for Blender alone — it already
+    has the signature this parameter requires. This injection point
+    bypasses the built-in sequence
     entirely — a custom `tool` does not get orientation, Blender, or
     PyMeshFix unless it calls them itself. Defect-based routing between
     Blender and PyMeshFix within the default sequence is not implemented; the
@@ -317,50 +312,21 @@ def repair(mesh: Mesh,
     steps: list[StepResult] = []
     destination = mesh.destination
 
-    def record(step: Step, was: int, now: int, detail: str, since: float,
-               result: Mesh | None = None) -> None:
-        """Record one step, scanning `result` when there is a mesh to scan.
-
-        `result` is None for the split, which produces several meshes rather
-        than one — each part is then scanned by its own `Step.PART` entry.
-        """
-        scan = volume = None
-        orphans = 0
-        if result is not None and result.geometry is not None:
-            scan = scanner.scan(result)
-            volume = scanner.volume(result)
-            orphans = (len(result.geometry.verts)
-                       - len(np.unique(result.geometry.faces)))
-        steps.append(StepResult(step, was, now, detail,
-                                time.monotonic() - since,
-                                scan, volume, int(orphans)))
-
     try:
-        # 1. T-junctions.  Ours, because no other tool does this without
-        #    denting the surface.  Adds faces, moves nothing.
-        mark = time.monotonic()
-        was = len(mesh.geometry.faces)
-        weld_ok, mesh, detail = welder.step_weld_close_tjunctions(mesh)
-        record(Step.WELD, was, len(mesh.geometry.faces), detail, mark, mesh)
-        if not weld_ok:
-            return _failed(mesh, f"weld: {detail}", tuple(steps),
-                           faces_in, volume_in, time.monotonic() - started)
-
-        # 2. Duplicates, before the split so deduplication sees both copies.
-        #    Each filter is its own step: its own flag, its own log entry,
-        #    its own failure — not one aggregate CLEAN entry, so a filter's
-        #    contribution can be attributed rather than inferred from a
-        #    joined string.
-        for clean_step_enum, clean_step in zip(CLEAN_STEP_ENUMS, CLEAN_STEPS):
-            mark = time.monotonic()
-            was = len(mesh.geometry.faces)
-            clean_ok, mesh, clean_detail = clean_step(mesh)
-            record(clean_step_enum, was, len(mesh.geometry.faces),
-                   clean_detail, mark, mesh)
-            if not clean_ok:
-                return _failed(mesh, f"{clean_step_enum.value}: "
-                               f"{clean_detail}", tuple(steps),
-                               faces_in, volume_in,
+        # 1-2. Whole-mesh steps, in the order WHOLE_MESH_STEPS lists them:
+        #    weld T-junctions, then the four CLEAN filters (duplicates
+        #    before the split, so deduplication sees both copies). Each is
+        #    its own step: its own flag, its own log entry, its own failure
+        #    — not one aggregate CLEAN entry, so a filter's contribution can
+        #    be attributed rather than inferred from a joined string.
+        for step_enum, step_fn in WHOLE_MESH_STEPS:
+            outcome = _run_step(step_enum, step_fn, mesh, steps)
+            mesh = outcome.mesh
+            if outcome.record_error is not None:
+                raise outcome.record_error
+            if not outcome.ok:
+                return _failed(mesh, f"{step_enum.value}: {outcome.detail}",
+                               tuple(steps), faces_in, volume_in,
                                time.monotonic() - started)
 
         # 3. Split, repair each part, merge.  PyMeshFix rebuilds one manifold
@@ -380,32 +346,33 @@ def repair(mesh: Mesh,
             parts = tuple(r for part in parts for r in splitter.by_seams(part))
             how += f" -> {len(parts)} region(s) after seams"
         kept = sum(len(p.geometry.faces) for p in parts)
-        record(Step.SPLIT, was, kept,
-               f"{how}, {kept} of {was} faces kept", mark)
+        _record_step(steps, Step.SPLIT, was, kept,
+                     f"{how}, {kept} of {was} faces kept", mark)
 
         repaired = []
         for index, part in enumerate(parts):
-            mark = time.monotonic()
-            part_was = len(part.geometry.faces)
-            part_ok, fixed, detail = tool(part)
-            repaired.append(fixed)
-            record(Step.PART, part_was, len(fixed.geometry.faces),
-                   f"part {index}: {detail}", mark, fixed)
-            if not part_ok:
-                # Stop at the first failed part rather than merging it back in.
-                # A part that could not be repaired is still defective geometry,
-                # and merging it would produce a mesh that measures plausibly
-                # and is not a repair.  The steps already record which part and
-                # why, so the reason travels with the failed result.
-                return _failed(mesh, f"part {index}: {detail}", tuple(steps),
+            outcome = _run_step(Step.PART, tool, part, steps,
+                                detail_prefix=f"part {index}: ")
+            repaired.append(outcome.mesh)
+            if outcome.record_error is not None:
+                raise outcome.record_error
+            if not outcome.ok:
+                # Stop at the first failed part rather than merging it back
+                # in. A part that could not be repaired is still defective
+                # geometry, and merging it would produce a mesh that
+                # measures plausibly and is not a repair. `mesh` here is
+                # still the pre-split whole mesh — the steps already record
+                # which part and why, so the reason travels with the failed
+                # result without needing the failed part itself.
+                return _failed(mesh, outcome.detail, tuple(steps),
                                faces_in, volume_in,
                                time.monotonic() - started)
 
         mark = time.monotonic()
         was = sum(len(p.geometry.faces) for p in repaired)
         mesh = splitter.merge(repaired, destination=destination)
-        record(Step.MERGE, was, len(mesh.geometry.faces),
-               f"{len(repaired)} part(s) merged", mark, mesh)
+        _record_step(steps, Step.MERGE, was, len(mesh.geometry.faces),
+                     f"{len(repaired)} part(s) merged", mark, mesh)
 
         # A tool can hand back geometry that is not measurable — PyMeshFix,
         # PyMeshLab and Blender all return arrays this module did not build.

@@ -74,7 +74,7 @@ No final face-budget gate is required; `max_faces` is a decimation target. See t
   - `splitter.MIN_SHELL_FACES = 100` — partially exposed already as `repairer.repair()`'s `min_shell_faces` default parameter.
   - `welder.MAX_ROUNDS = 10`, `welder.MAX_CHAIN = 12`.
   - `processor.MIN_VOLUME_KEPT = 0.90` — the volume-loss guard threshold.
-  - `blender.convert`/`blender.repair`'s `timeout: float = 600` defaults (one policy, repeated three places including `repairer.blender_part`) and `blender.is_available()`'s inline `timeout=30`.
+  - `blender.convert`/`blender.repair`'s `timeout: float = 600` parameter defaults, plus `blender.STEP_TIMEOUT = 600` (the same value, no longer a parameter — `step_blender_repair` bakes it in so its signature matches every other uniform step) — one policy, three places — and `blender.is_available()`'s inline `timeout=30`.
 
   Excluded as out of scope: file-format constants that are not tuning knobs (`mesh_io.BYTES_PER_TRIANGLE`, `HEADER_BYTES`, PLY magic bytes, etc.) and `blender.py`'s script-path constants — none of these are experiment parameters, they are format/plumbing facts.
 
