@@ -24,4 +24,7 @@ $REQUEST
 EOF
 )
 
-exec "$CODEX_EXEC" exec --cd "$PROJECT_DIR" --sandbox workspace-write --approve-for-me --ephemeral --color never "$PROMPT"
+# `--approve-for-me` already selects the workspace-write sandbox, and the CLI
+# rejects the pair outright — passing both made every run fail before it
+# started, with no work done and no output but the usage message.
+exec "$CODEX_EXEC" exec --cd "$PROJECT_DIR" --approve-for-me --ephemeral --color never "$PROMPT"
