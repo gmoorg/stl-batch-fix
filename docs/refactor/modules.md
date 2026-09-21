@@ -13,8 +13,8 @@ reference material until the refactor is complete.
 ### `mesh_io`
 
 - **For:** classify, probe, load, and write meshes; preserve source/destination identity.
-- **Interface:** `kind`, `triangle_count`, `probe`, `load`, `write`, bounds helpers; `Mesh`, `Geometry`; `write_ply`/`read_ply` for Blender.
-- **Implementation:** a `Mesh` holds metadata and optional welded array geometry. Operations return new values. Deliverables are binary STL; Blender exchange is binary PLY.
+- **Interface:** `kind`, `triangle_count`, `probe`, `load`, `write`, `staged_write`, bounds helpers; `Mesh`, `Geometry`; `write_ply`/`read_ply` for Blender.
+- **Implementation:** a `Mesh` holds metadata and optional welded array geometry. Operations return new values. Deliverables are binary STL; Blender exchange is binary PLY. `triangle_count` rejects a zero-triangle header, so an 84-byte file is invalid at `probe` rather than an `IndexError` inside `load` (R03). `staged_write` is the one place a file gets published: it stages a short-named `.part` sibling, restores the umask mode `mkstemp` would otherwise narrow to 0600, and `os.replace`s it into position, so a name a rerun trusts appears only once its bytes are complete (A04). Every writer whose output `indicators.check` reads back goes through it — the STL, the markers, and the companion copy.
 - **Tried/rejected:** path-only values caused repeated reads. STL exchange destroyed the vertex table and re-welded by an absolute distance, measurably deleting small detail; PLY avoids that reconstruction.
 
 ### `scanner`
@@ -71,9 +71,9 @@ reference material until the refactor is complete.
 ### `repairer`
 
 - **For:** own the ordered repair sequence and measurements without writing.
-- **Interface:** `repair(mesh, min_shell_faces, tool) -> Result`, `blender_part`, `is_available`.
-- **Implementation:** weld → CLEAN → split; each retained part is oriented and currently sent to PyMeshFix; parts merge afterward. CLEAN's filter policy lives here, while PyMeshLab execution belongs to `meshlab`. Blender through PLY exists, but defect routing is unfinished. `Result.ok` means the sequence ran, not that it is acceptable.
-- **Tried/rejected:** CLEAN after split cannot see coincident copies. Whole-mesh or guarded orientation missed local inversions and erased seam evidence; unconditional per-part orientation worked. Blender cannot be a wholesale replacement for PyMeshFix because they repair different defects.
+- **Interface:** `repair(mesh, min_shell_faces, tool) -> Result`, `blender_part`, `PartFailed`, `is_available`.
+- **Implementation:** weld → CLEAN → split; each retained part is oriented and currently sent to PyMeshFix; parts merge afterward. CLEAN's filter policy lives here, while PyMeshLab execution belongs to `meshlab`. Blender through PLY exists, but defect routing is unfinished. `Result.ok` means the sequence ran, not that it is acceptable. A part tool reports an unrepairable part by returning `PartFailed` as its detail; `repair` stops there and returns `ok=False` rather than merging defective geometry back in.
+- **Tried/rejected:** CLEAN after split cannot see coincident copies. Whole-mesh or guarded orientation missed local inversions and erased seam evidence; unconditional per-part orientation worked. Blender cannot be a wholesale replacement for PyMeshFix because they repair different defects. A failure reason as a plain detail string was indistinguishable from a success note, which is how a failed PyMeshFix call reached `ok=True` (R02); the type carries what the string could not.
 
 ### `processor`
 
@@ -95,12 +95,12 @@ reference material until the refactor is complete.
 
 - **For:** walk sources, copy companions, convert OBJ/ASCII STL, and emit probed binary-STL jobs.
 - **Interface:** `prepare(source_root, output_root, emit, ...) -> Summary`.
-- **Implementation:** preserves relative paths and caches conversions under `stl-exported/`.
-- **Tried/rejected:** inline copy errors can abort the walk, worker conversion exceptions can disappear, and same-stem OBJ/STL inputs collide.
+- **Implementation:** preserves relative paths and caches conversions under `stl-exported/`. A converter that raises is emitted and counted exactly like one returning `False`, caught beside the call rather than through the pool's `error` argument, which reaches only the selector (R01).
+- **Tried/rejected:** inline copy errors can abort the walk (A06), and same-stem OBJ/STL inputs collide (A05). Relying on the pool's `error` argument to notice a failed conversion did not work: the selector is told that an item finished, not which result it produced.
 
 ### `pool`
 
 - **For:** reusable thread workers that pull caller-selected work.
 - **Interface:** `Pool(...).start()`; see code for callbacks.
-- **Implementation:** selection is serialized under a lock; handlers run concurrently and report completion.
-- **Tried/rejected:** parent-push/process-pool scheduling made resource admission harder. Python watchdogs cannot safely interrupt native PyMeshFix; final execution needs disposable per-file children. Selector exceptions currently disappear.
+- **Implementation:** selection is serialized under a lock; handlers run concurrently and report completion. A handler exception is reported to the selector through `error`; a *selector* exception stops the pool and is re-raised from `start()` after the join, because the selector is itself the channel a handler failure would be reported through (R09).
+- **Tried/rejected:** parent-push/process-pool scheduling made resource admission harder. Python watchdogs cannot safely interrupt native PyMeshFix; final execution needs disposable per-file children. Letting a selector exception kill its worker silently made an empty run indistinguishable from a complete one.

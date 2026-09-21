@@ -18,10 +18,12 @@ import shutil
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
-from libs import decimator, indicators, processor, repairer, scanner
+from libs import decimator, indicators, mesh_io as mesh_io_module
+from libs import processor, repairer, scanner
 from libs.indicators import Indicator
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.processor import MIN_VOLUME_KEPT, Outcome, process, write
@@ -232,6 +234,90 @@ class TestWriting(unittest.TestCase):
             repair_result(volume_in=100.0, volume_out=46.0))
         write(outcome, self.source, self.output)
         self.assertFalse(os.path.exists(self.output))
+
+    def test_an_interrupted_write_leaves_no_output_to_mistake_for_work(self):
+        """A04: a half-written file at the final path is worse than none.
+
+        The next run asks `indicators.check` what is already done, and that
+        question is answered by the path existing.  A write that died partway
+        through used to leave a file there, so the run that would have redone
+        it skipped it instead and the truncated STL became the deliverable.
+        """
+        outcome = processor._decide(mesh(), decimation(), repair_result())
+
+        def die_before_committing(src, dst, *args, **kwargs):
+            # The bytes are written and about to be published under the final
+            # name.  Dying here is the interruption that matters: everything
+            # before it is staged work, and nothing after it can be partial.
+            raise RuntimeError("interrupted mid-write")
+
+        with mock.patch.object(mesh_io_module.os, 'replace',
+                               die_before_committing):
+            with self.assertRaises(RuntimeError):
+                write(outcome, self.source, self.output)
+
+        self.assertFalse(
+            os.path.exists(self.output),
+            "a partial write left a file the next run will call ALREADY_FIXED")
+        self.assertEqual(
+            [n for n in os.listdir(os.path.dirname(self.output))
+             if n.endswith('.part')], [],
+            "the staged file was left behind to accumulate")
+
+    def test_an_interrupt_mid_write_leaves_the_previous_result_intact(self):
+        """The stronger property: a rerun that dies cannot damage what exists.
+
+        Interrupting *during* the writing, with the signal that actually
+        arrives in practice, rather than at the publication step.  The old
+        implementation wrote straight to the destination, so this would have
+        truncated a good file from a previous run.
+        """
+        outcome = processor._decide(mesh(), decimation(), repair_result())
+        write(outcome, self.source, self.output)
+        with open(self.output, 'rb') as f:
+            previous = f.read()
+        self.assertGreater(len(previous), 84)
+
+        real_open = open
+
+        def die_while_writing(path, *args, **kwargs):
+            if str(path).endswith('.part'):
+                raise KeyboardInterrupt("Ctrl+C mid-write")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch('builtins.open', die_while_writing):
+            with self.assertRaises(KeyboardInterrupt):
+                write(outcome, self.source, self.output)
+
+        with open(self.output, 'rb') as f:
+            self.assertEqual(f.read(), previous,
+                             "an interrupted rerun damaged the previous result")
+        self.assertEqual(
+            [n for n in os.listdir(os.path.dirname(self.output))
+             if n.endswith('.part')], [])
+
+    def test_an_interrupted_marker_copy_leaves_no_marker(self):
+        """The same rule for the copied source marker, which `check` also reads."""
+        outcome = processor._decide(
+            mesh(), decimation(),
+            repair_result(volume_in=100.0, volume_out=46.0))
+
+        def die(src, dst, *args, **kwargs):
+            with open(dst, 'wb') as f:      # a partial copy reaches the path
+                f.write(b'half')
+            raise RuntimeError("interrupted mid-copy")
+
+        with mock.patch.object(processor.shutil, 'copy2', die):
+            with self.assertRaises(RuntimeError):
+                write(outcome, self.source, self.output)
+
+        base, _ = os.path.splitext(self.output)
+        self.assertFalse(os.path.exists(f"{base}.destroyed.stl"),
+                         "a partial copy left a marker the next run trusts")
+        self.assertEqual(
+            [n for n in os.listdir(os.path.dirname(self.output))
+             if n.endswith('.part')], [],
+            "the staged copy was left behind")
 
     def test_every_marker_indicator_has_a_suffix(self):
         """A missing entry would silently write nothing."""

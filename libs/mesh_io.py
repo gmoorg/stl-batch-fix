@@ -8,9 +8,11 @@ Loading is explicit because it materially changes memory use.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import struct
+import tempfile
 from dataclasses import dataclass
 from enum import Enum
 
@@ -189,6 +191,13 @@ def triangle_count(path: str) -> tuple[int, str | None]:
     if size < needed:
         return -1, (f"header claims {count:,} triangles ({needed:,} bytes) "
                     f"but the file is {size:,} bytes")
+    if count == 0:
+        # An 84-byte file is structurally valid and holds no model.  Rejected
+        # here rather than in `load` because this is the one place both `probe`
+        # and `load` derive the count, so one check covers the cheap metadata
+        # path and the loading path alike — and a caller that trusted `probe`
+        # can no longer hand `load` an empty array to index.
+        return -1, "no triangles: the file declares an empty mesh"
     return count, None
 
 
@@ -308,6 +317,46 @@ def load(mesh: Mesh) -> Mesh:
     return mesh.with_geometry(Geometry(verts, inv.reshape(count, 3)))
 
 
+@contextlib.contextmanager
+def staged_write(path: str):
+    """Yield a temporary sibling path that becomes `path` only on success.
+
+    Every file this project publishes under a name a rerun trusts goes through
+    here.  `indicators.check` answers "was this already done?" by asking
+    whether the path exists, so a write interrupted partway used to leave a
+    truncated file that the next run skipped as finished work.
+
+    The staging file is a sibling so the rename stays within one filesystem,
+    where `os.replace` is atomic.  Cleanup catches `BaseException` because
+    `KeyboardInterrupt` is precisely the interruption this guards against.
+
+    The staging name is short and fixed rather than derived from the
+    destination: a model's own name can sit near the filesystem's 255-byte
+    limit, and prefixing it would fail with `ENAMETOOLONG` on a path that
+    writes fine today.  Nothing reads these names, so they carry no meaning.
+    """
+    ensure_parent_dir(path)
+    directory = os.path.dirname(path) or '.'
+    fd, staged = tempfile.mkstemp(dir=directory, prefix='.stlfix-',
+                                  suffix='.part')
+    try:
+        os.close(fd)
+        # `mkstemp` makes the file 0600, and `os.replace` carries that onto the
+        # destination — so staging would quietly make every output private
+        # where it used to follow the umask.  Deliverables are meant to be
+        # readable by whoever collects them, so restore the mode the ordinary
+        # `open` would have produced.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(staged, 0o666 & ~umask)
+        yield staged
+        os.replace(staged, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(staged)
+        raise
+
+
 def write(mesh: Mesh) -> None:
     """Write loaded geometry as binary STL to `mesh.destination`.
 
@@ -333,11 +382,13 @@ def write(mesh: Mesh) -> None:
     buf[:, 0:12] = nrm.astype(np.float32).view(np.uint8)
     buf[:, 12:48] = tv.reshape(n, 9).view(np.uint8)
 
-    ensure_parent_dir(path)
-    with open(path, 'wb') as f:
-        f.write(b'\0' * 80)
-        f.write(struct.pack('<I', n))
-        f.write(buf.tobytes())
+    with staged_write(path) as staged:
+        with open(staged, 'wb') as f:
+            f.write(b'\0' * 80)
+            f.write(struct.pack('<I', n))
+            f.write(buf.tobytes())
+            f.flush()
+            os.fsync(f.fileno())
 
 
 #: The PLY header this module writes, and the only dialect `read_ply` accepts.

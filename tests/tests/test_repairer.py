@@ -25,12 +25,15 @@ file runs on a machine that cannot repair.
 """
 
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
 from libs import meshlab, repairer, scanner
 from libs.mesh_io import Geometry, Kind, Mesh
-from libs.repairer import CLEAN_FILTERS, Result, Step, StepResult, repair
+from libs.repairer import (CLEAN_FILTERS, PartFailed, Result, Step,
+                           StepResult, repair)
 
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
 TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
@@ -293,6 +296,48 @@ class TestFailure(unittest.TestCase):
             raise RuntimeError("boom")
         result = repair(tetra(), min_shell_faces=0, tool=explode)
         self.assertIn(Step.WELD, [s.step for s in result.steps])
+
+    def test_a_tool_that_returns_a_failure_is_not_reported_as_success(self):
+        """R02: the tool did not raise — it came back and said it failed.
+
+        PyMeshFix reports a failed repair by returning an unsuccessful result,
+        not by raising, so only catching exceptions let the pipeline call a
+        failed repair `ok=True`.  The reason has to survive to the caller: a
+        marker gets written instead of a broken model being shipped.
+        """
+        def fails(part):
+            return part, PartFailed("pymeshfix failed: it gave up")
+
+        result = repair(tetra(), min_shell_faces=0, tool=fails)
+        self.assertFalse(result.ok)
+        self.assertIn("it gave up", result.problem)
+
+    def test_a_failed_part_still_reports_where_it_got_to(self):
+        """A failure is only actionable with the steps that preceded it."""
+        def fails(part):
+            return part, PartFailed("pymeshfix failed: it gave up")
+
+        result = repair(tetra(), min_shell_faces=0, tool=fails)
+        self.assertIn(Step.WELD, [s.step for s in result.steps])
+        self.assertIsNotNone(result.mesh.geometry)
+
+    def test_the_default_tool_propagates_an_unsuccessful_pymeshfix(self):
+        """R02, through the real default tool rather than an injected one.
+
+        The tests above hand `repair` a `PartFailed` and prove it acts on one.
+        This one proves `_repair_part` still *produces* one: PyMeshFix reports
+        failure by returning `ok=False`, and if that were ever spelled as a
+        plain detail string again the defect would be back while those tests
+        stayed green.
+        """
+        failed = SimpleNamespace(ok=False, problem="pymeshfix gave up",
+                                 mesh=None, stderr_capture='')
+        with mock.patch.object(repairer.meshfix, 'repair', return_value=failed):
+            result = repair(tetra(), min_shell_faces=0)
+
+        self.assertFalse(result.ok)
+        self.assertIn("pymeshfix gave up", result.problem)
+        self.assertNotIn(Step.MERGE, [s.step for s in result.steps])
 
 
 @needs_tools

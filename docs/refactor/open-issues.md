@@ -1,6 +1,10 @@
 # Open issues
 
-This is the compact work list. Detailed reproductions and owner comment slots remain in [`CODE_REVIEW.md`](../../libs/review/CODE_REVIEW.md).
+This is the compact work list. Detailed reproductions and owner comment slots remain in [`CODE_REVIEW.md`](../../libs/review/CODE_REVIEW.md), whose audit-status table records which findings are confirmed against the current tree and which were withdrawn or misdescribed.
+
+Fix order agreed 2026-09-20, cheapest and most certain first: R03 zero-face input, R02 PyMeshFix failure propagation, R01/R09 error propagation, A04 atomic commit, A03 non-finite rejection, A02 component preservation. Each step adds its missing regression before the fix.
+
+No final face-budget gate is required; `max_faces` is a decimation target. See the T16 owner decision.
 
 ## Prevent false success and model loss
 

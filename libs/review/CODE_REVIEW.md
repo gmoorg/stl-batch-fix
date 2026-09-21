@@ -2,6 +2,36 @@
 
 Reviewed 2026-09-18. Scope: `libs/` only. Paths and line numbers refer to the reviewed working tree and can drift. Findings are open for discussion; add a note under **Your comment** for any ID. Severity reflects the evidence stated, not an agreed fix.
 
+## Audit status
+
+Re-verified 2026-09-20 against the working tree by Claude (reproduction scripts) and Codex (independent source inspection and its own in-memory checks). Line numbers below are from that audit; the 2026-09-18 numbers in each finding have drifted by roughly 10–20 lines and are left as written.
+
+`confirmed` means reproduced by running code. `confirmed (inspection)` means the mechanism was established from source but not executed. `inconclusive` means a reproduction was attempted and did not reproduce — which is **not** evidence the finding is fixed.
+
+| ID | Status | Fix order | Note |
+|---|---|---|---|
+| R01 | **fixed** 2026-09-20 | 3 | Was `scanned=1, emitted=0, conversion_failed=0` on a raising converter |
+| R02 | **fixed** 2026-09-20 | 2 | Was `ok=True, problem=None` while the step log records the failure |
+| R03 | **fixed** 2026-09-20 | 1 | Was `IndexError` at `mesh_io.py:299` on an 84-byte file |
+| R04 | open question | — | Unresolved geometry judgment; no defect demonstrated |
+| R05 | confirmed (inspection) | with A02 | Drop policy at `splitter.py:106–115`; A02 is its demonstrated harm |
+| R06 | confirmed (inspection) | later | `_decide` never uses `source`; volume alone misses thin features |
+| R07 | **misdescribed** | later | Race is real; stated fd mechanism is wrong (each capture owns its dups) |
+| R08 | confirmed (inspection) | later | Single `_current` slot; not reproduced under concurrency |
+| R09 | **fixed** 2026-09-20 | 3 | Was: selector exception kills workers; `start()` returns normally |
+| R10 | confirmed (Codex) | later | Result fields describe a different mesh than the one carried |
+| A01 | confirmed | later | 1 hit, 762→764 faces, 4 open edges remain; caught downstream as OPEN_EDGES |
+| A02 | confirmed | 6 | Component deleted, returns PROCESS, reports 7,049,393,791% volume kept |
+| A03 | confirmed (gate scope) | 5 | Plus an **unreported** `cKDTree` crash at `repairer.py:147`, outside the try/except |
+| A04 | **fixed** 2026-09-20 | 4 | Was: 7-byte file classified `ALREADY_FIXED`; no writer was atomic. The fix also covered a writer this finding missed — the companion copy in `converter.py` |
+| A05 | confirmed | later | Both sources map to `/in/stl-exported/model.stl` |
+| A06 | confirmed (inspection) | later | Copy failure escapes `prepare`, against the orchestration contract |
+| A07 | confirmed (Codex) | later | Claude's fixture gave `nm=1` and was rejected; Codex's collinear case gave `nm=0` → PROCESS |
+| A08 | **withdrawn** | — | Contradicts the owner's T16 decision; see A08 |
+| T01–T15 | confirmed | with each fix | Coverage gaps, not additional runtime defects |
+
+No finding was found to be already fixed. T16 remains withdrawn by owner decision.
+
 ## FDM acceptance goal
 
 The deliverable is an STL that a slicer can use to print the **intended model**. Edge counts, signed volume, and triangle count are evidence toward that goal, not definitions of it. A closed mesh missing a part can still be a failed print; a small separate shell may be a required feature. The [pipeline reference](../../docs/refactor/pipeline.md) records component preservation and the final face count as acceptance concerns. The user rescales models after repair, so a fixed authoring-unit threshold cannot establish final printable feature size. Where intent, placement, or print orientation is unknown, surface the uncertainty rather than silently deleting geometry.
@@ -33,17 +63,23 @@ The CLEAN-before-split order was rechecked. Keep it: vertex merging exposes coin
 
 `libs/converter.py`:L141–165: 🔴 bug: `convert_one` exceptions are swallowed by `Pool` because `next_item` ignores `error`; `prepare` returns with no emitted mesh and no failure count. Convert exceptions into invalid `Mesh` results, or handle `error` in the selector and emit the failed source. Reproduced with a converter that raises: one scanned, zero emitted, zero failed.
 
+**Status 2026-09-20: confirmed.** Now `converter.py:146–151`; the exception precedes counting and emission at `162–167`, and `pool.py:87–93` catches and forwards it to the ignored `error`. A raising converter gave `Summary(scanned=1, copied=0, already_copied=0, skipped=0, emitted=0, converted=0, conversion_failed=0)` — the file disappears with no error and no count.
+
 **Your comment:** _Add your note here._
 
 ### R02 — Failed PyMeshFix call is reported as success
 
 `libs/repairer.py`:L199–201,L315–330: 🔴 bug: `_repair_part` turns a failed PyMeshFix call into `(part, "pymeshfix failed")`, but `repair` treats every returned tuple as success and sets `Result.ok=True`. Carry an explicit success flag from the part tool and return a failed result or try the intended fallback. Reproduced by forcing `meshfix.repair` to fail on a clean tetrahedron: `Result.ok=True` and `problem=None`.
 
+**Status 2026-09-20: confirmed.** Now `repairer.py:165–167` (returns the tuple) and `298–301` (hardcodes `True`). On `sphere_allbad.stl` with a stubbed failing `meshfix.repair`, the result was `ok=True, problem=None` while `Step.PART` recorded `part 0: pymeshfix failed: simulated pymeshfix failure` — the evidence is captured and then discarded. Only exceptions are caught, at `294–296`.
+
 **Your comment:** _Add your note here._
 
 ### R03 — Zero-triangle STL crashes load
 
 `libs/mesh_io.py`:L283–285: 🔴 bug: a valid binary STL header with zero triangles reaches `new[0]` on an empty array and raises `IndexError`; `probe` had marked it valid. Reject zero face input at probe/load or return an explicit invalid `Mesh`. Reproduced with an 84-byte STL.
+
+**Status 2026-09-20: confirmed.** Now `mesh_io.py:299`. An 84-byte file gives `probe -> is_valid=True, triangles=0, problem=None`, then `load` raises `IndexError: index 0 is out of bounds for axis 0 with size 0`.
 
 **Your comment:** _Add your note here._
 
@@ -63,11 +99,17 @@ The CLEAN-before-split order was rechecked. Keep it: vertex merging exposes coin
 
 `libs/processor.py`:L56–80,L116–129: 🟡 risk: the destruction check uses `repairer.Result.volume_in`, which is measured **after** decimation; the original `source` argument is unused, so decimation loss is never judged. Compare the original and decimated mesh before repair, with a separate outcome for destructive decimation.
 
+**Status 2026-09-20: confirmed (inspection plus a partial run).** `processor.process` passes the original `mesh` to `_decide` as `source`, but `_decide` judges destruction only from `repaired.volume_kept`, which is measured from the post-decimation `volume_in`; `source` is never read for loss. Current lines: `processor.py:123–134`, `repairer.py:227–228`.
+
+A run on `decimation_lost_appendage.stl` with `max_faces=20` decimated 28→20 faces and returned `PROCESS` with `volume_kept=100.00%`, and volume against the true source was `100.14%`. So this fixture does not show the loss as a volume change at all — which strengthens the finding: the appendage is thin, and a volume comparison alone would not have caught it either. Any fix needs a measure sensitive to thin-feature removal, not just a second volume ratio.
+
 **Your comment:** _Add your note here._
 
 ### R07 — PyMeshFix output capture can race
 
 `libs/meshfix.py`:L65–78: 🟡 risk: `_Capture` replaces process-wide stdout/stderr file descriptors without a cross-thread lock; overlapping repairs can nest redirections and restore a descriptor another thread has already closed. Serialize the whole capture window or capture inside an isolated process.
+
+**Status 2026-09-20: misdescribed; the race is real.** Now `meshfix.py:69–87`. The stated mechanism is wrong: each `_Capture` dups its own descriptors, so it cannot restore one another thread has closed. The actual hazard is that overlapping, out-of-order exits restore another capture's temporary stream, leaving stdout/stderr misdirected for the rest of the process. Not reproduced under concurrency. The fix is unchanged: serialize the capture window or isolate it.
 
 **Your comment:** _Add your note here._
 
@@ -80,6 +122,8 @@ The CLEAN-before-split order was rechecked. Keep it: vertex merging exposes coin
 ### R09 — Selector errors can disappear
 
 `libs/pool.py`:L79–83: 🟡 risk: an exception from `item_selector` kills a worker thread, while `start()` joins and returns without raising it to the caller. Capture selector exceptions and surface them after join, or define an explicit failure callback.
+
+**Status 2026-09-20: confirmed.** Now `pool.py:60–65,79–89`. A raising selector killed every worker and `start()` returned normally with zero items handled and nothing raised. The tracebacks still reach `threading.excepthook`, so "disappear" means absent from caller-level results, not invisible on the console.
 
 **Your comment:** _Add your note here._
 
@@ -98,11 +142,15 @@ This pass traced the current decisions through `mesh_io → decimator → welder
 
 `libs/welder.py`:L202–232,L236–258: 🟡 repair limit: the open-edge walk does not require path vertices to progress along the spanning edge, but then sorts the chain by projected position before splitting. If the path runs `a → M1(t=2/3) → M2(t=1/3) → c`, the new face edges no longer match the path. Reproduced on the two-vertex sphere fixture with the inserted vertex positions exchanged: `find` reports one hit, `repair` adds two faces, and all four open edges remain. Reject or explicitly handle a non-monotone path; do not silently reorder it. The final `processor` scan should reject this as `OPEN_EDGES`; no false clean output was demonstrated. This is separate from the deliberate choice to permit a bent path off the edge line.
 
+**Status 2026-09-20: confirmed.** On the committed `reversed_tjunction_chain.stl`: `welder.find` reports 1 hit, `welder.repair` adds two faces (762→764, `splits=1, rounds=2`), and the scan still reports `open=4, nm=0` — unchanged from the input. The repair accomplishes nothing on a reversed path. Since `open=4` survives, the final scan does catch it as `OPEN_EDGES`, so this remains a repair limitation rather than a false-success bug. Current lines: `welder.py:227` (sorts away path order), `255–258` (builds mismatching edges).
+
 **Your comment:** _Add your note here._
 
 ### A02 — Signed-volume cancellation hides model loss
 
 `libs/repairer.py`:L117–127, `libs/splitter.py`:L78–88, and `libs/processor.py`:L71–96: 🔴 demonstrated model loss: total **signed** input volume can nearly cancel across oppositely wound shells, while the splitter drops a small-face-count but large-volume shell; `volume_kept` then becomes huge and passes the `< 0.90` loss check. In a full `processor.process` run, a 760-face control sphere plus a four-face tetrahedron with equal opposite volume became the sphere alone (764 → 760 faces, two → one shell), yet returned `PROCESS` and reported 687,736,341% volume kept. A two-tetrahedron decision-only case with exactly zero input volume also returned `PROCESS` after one shell was removed because `volume_kept` returns 1.0 for a zero denominator. Compare component retention and use a volume measure that cannot cancel; treat zero or near-zero signed totals as indeterminate.
+
+**Status 2026-09-20: confirmed end-to-end.** `processor.process(opposite_volume_shells.stl, max_faces=900000)`: input 764 faces, signed volume `-0.00005809`; components are 760f at `+4094.863122` and 4f at `-4094.863180`; the default `min_faces=100` keeps one. Outcome `PROCESS`, `repair ok=True`, 764→760 faces, **`volume_kept = 7,049,393,791%`**. A component is deleted and the run reports success. The percentage differs from the 2026-09-18 figure because the ratio is dominated by a near-zero denominator; the defect is identical. Current lines: `splitter.py:106–115`, `repairer.py:120–122`, `processor.py:74`.
 
 **Your comment:** _Add your note here._
 
@@ -110,17 +158,27 @@ This pass traced the current decisions through `mesh_io → decimator → welder
 
 `libs/mesh_io.py`:L274–294, `libs/scanner.py`:L106–122,L309–320, and `libs/processor.py`:L71–96: 🔴 validation gap: a binary STL with the same NaN coordinate at every use of one vertex loads as valid, scans as `open=0, nm=0`, and has NaN volume. A `repairer.Result` with NaN `volume_out` then bypasses the `< 0.90` check and `_decide` returns `PROCESS`. Reject non-finite coordinates and measurements before any success decision. The complete default repair path on that file was not exercised.
 
+**Status 2026-09-20: confirmed at decision-gate scope, plus an unreported second failure.** `NaN < MIN_VOLUME_KEPT` is False, so a `Result` with `volume_out=NaN` gives `volume_kept=nan` and `processor._decide` returns `PROCESS` with `is_clean=True`. Independently reproduced by Codex.
+
+The complete path was exercised this time and does **not** reach that gate: on a NaN-vertex STL, `repairer.repair` raises `ValueError: data must be finite` from scipy `cKDTree` via `_count_lost` at `repairer.py:147`. That call sits **after** the `try/except` at `294–296`, so it escapes instead of producing a failed `Result`. Load reported `is_valid=True` and the scan reported `open=0, nm=0, degenerate=0, is_clean=True, volume=nan`.
+
+Two manifestations, one cause. Rejecting non-finite input at load prevents both; fixing only the gate leaves the crash.
+
 **Your comment:** _Add your note here._
 
 ### A04 — Interrupted writes can look complete
 
 `libs/mesh_io.py`:L322–328, `libs/processor.py`:L145–166, and `libs/indicators.py`:L104–111: 🔴 retry bug: deliverable STLs and markers are written directly at their final names; an interruption after creation leaves a partial file that the next run treats as `ALREADY_FIXED` or a completed marker. A seven-byte fake output was classified `ALREADY_FIXED`. Write to a sibling temporary file, verify/flush it, then replace the final path; apply the same rule to copied markers.
 
+**Status 2026-09-20: confirmed.** A 7-byte file at the output path made `indicators.check` return `ALREADY_FIXED`, so the next run skips it and the corrupt file stays as the deliverable. Neither `mesh_io.write` nor `processor.write` contains `os.replace`, `os.rename`, or a temp-file step. Current lines: `mesh_io.py:336–340`, `processor.py:164–169`, `indicators.py:114–120`. The 7-byte file demonstrates false completion detection; it is not itself an interrupted-write experiment.
+
 **Your comment:** _Add your note here._
 
 ### A05 — OBJ and STL source identities collide
 
 `libs/converter.py`:L50–56 and `libs/indicators.py`:L76–86: 🟡 identity collision: `model.obj` and `model.stl` in the same source directory map to the same output and export paths. Both equalities were reproduced. If both sources are admitted, one result can overwrite or be mistaken for the other. Detect collisions before emission or define an unambiguous naming policy.
+
+**Status 2026-09-20: confirmed.** `indicators.export_path` maps both `/in/model.obj` and `/in/model.stl` to `/in/stl-exported/model.stl`. Codex confirmed both equalities independently. Collision rejection is explicitly required by `docs/refactor/orchestration.md:27`, so this is a contract violation, not only a risk.
 
 **Your comment:** _Add your note here._
 
@@ -134,9 +192,14 @@ This pass traced the current decisions through `mesh_io → decimator → welder
 
 `libs/scanner.py`:L99–122 and `libs/processor.py`:L82–96: 🟡 acceptance limit: `Scan.is_clean` means only that indexed edges have two owners; it does not establish a geometric solid. Four faces with distinct indices but all vertices on one line give `open=0, nm=0, degenerate=0, volume=0`, and a synthetic repaired result is approved by `_decide`. Check zero-area geometry and a meaningful finite volume before using “clean” as a shipping verdict. Default tool behavior on this fixture was not tested.
 
+**Status 2026-09-20: confirmed by Codex; Claude's reproduction failed.** Codex independently reproduced the collinear case: zero volume, zero reported defects, `_decide` returns `PROCESS`. Claude's attempted fixture wound four faces so that one edge had three owners, giving `nm=1` and a correct `UNREPAIRED` rejection — a wrong fixture, not a refuted finding. The distinction matters: a failed reproduction is not evidence a defect is absent. Current lines: `scanner.py:95–118`, `processor.py:74–96`. Default repair behavior on such input remains untested.
+
 **Your comment:** _Add your note here._
 
-### A08 — Final face budget is unchecked
+### A08 — Final face budget is unchecked — WITHDRAWN
+
+**Status 2026-09-20: withdrawn.** This finding contradicts the owner's T16 decision below, which states that `max_faces` is a decimation target and no post-repair ceiling is required. Codex confirms T16 is authoritative. The mechanics still reproduce — `process(max_faces=761)` on `sphere_tjunction.stl` returns `PROCESS` with 762 faces — but that is intended behavior, not a defect. Retained as an acknowledged risk only: if later repairs add enough faces to cross the practical slicer limit, revisit it with measurements near that limit.
+
 
 `libs/processor.py`:L116–129,L82–96: 🟡 final slicer-budget gap: decimation runs before repair, and the success decision never checks the **final** face count against `max_faces`. On the committed `sphere_tjunction.stl` probe, `process(max_faces=761)` accepted a 762-face result as `PROCESS`: welder repaired the junction and added one face after decimation was skipped. The documented Bambu limit is approximate, so one face over is not evidence of an unprintable model; the missing check matters if later repairs add enough faces to cross the practical limit. Measure final counts near that limit and reserve headroom or report an over-budget result; blindly decimating a repaired mesh again can recreate defects.
 

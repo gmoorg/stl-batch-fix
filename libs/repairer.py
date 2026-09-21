@@ -66,6 +66,25 @@ DO_NOT_RETRY = {
 
 
 @dataclass(frozen=True)
+class PartFailed:
+    """A part tool's way of saying "I could not repair this".
+
+    A tool returns `(Mesh, str)` on success and `(Mesh, PartFailed)` on
+    failure.  A distinct type rather than a reason string or a bare `None`,
+    because the detail is recorded in the step log either way: a failure
+    spelled as text reads exactly like a successful note, and that is precisely
+    how a failed PyMeshFix call came to be reported as `ok=True` while the log
+    said `pymeshfix failed`.  A tool that raises is still handled as before;
+    this is for the tool that returns normally and reports bad news.
+    """
+
+    reason: str
+
+    def __str__(self) -> str:
+        return self.reason
+
+
+@dataclass(frozen=True)
 class StepResult:
     """Measurements recorded after one repair step.
 
@@ -149,11 +168,13 @@ def _count_lost(before: np.ndarray, after: np.ndarray,
     return int((distance > tolerance).sum())
 
 
-def _repair_part(part: Mesh) -> tuple[Mesh, str]:
+def _repair_part(part: Mesh) -> tuple[Mesh, str | PartFailed]:
     """Orient one split part, then repair it with PyMeshFix.
 
     Orientation runs unconditionally after splitting, without a signed-volume
-    guard. A PyMeshFix failure returns the oriented part with a reason.
+    guard. A PyMeshFix failure returns the oriented part with a `PartFailed`,
+    which stops the repair — PyMeshFix reports failure by returning, not by
+    raising, so a plain reason string would be indistinguishable from a note.
     """
     notes = []
 
@@ -164,7 +185,7 @@ def _repair_part(part: Mesh) -> tuple[Mesh, str]:
 
     result = meshfix.repair(part)
     if not result.ok:
-        return part, f"pymeshfix failed: {result.problem}"
+        return part, PartFailed(f"pymeshfix failed: {result.problem}")
     notes.append(
         f"pymeshfix {len(part.geometry.faces)}f -> {result.mesh.triangles}f")
     note = ', '.join(notes)
@@ -175,7 +196,7 @@ def _repair_part(part: Mesh) -> tuple[Mesh, str]:
     return result.mesh, note
 
 
-def blender_part(part: Mesh, timeout: float = 600) -> tuple[Mesh, str]:
+def blender_part(part: Mesh, timeout: float = 600) -> tuple[Mesh, str | PartFailed]:
     """Repair a split part in Blender using a PLY round trip.
 
     Pass this as `repair(tool=...)` to replace the default PyMeshFix part tool.
@@ -190,7 +211,7 @@ def blender_part(part: Mesh, timeout: float = 600) -> tuple[Mesh, str]:
         if not ok:
             why = ('timed out' if result.is_timed_out
                    else f"exit {result.exit_code}")
-            return part, f"blender failed: {why}"
+            return part, PartFailed(f"blender failed: {why}")
         # `read_ply` rather than `load`: the vertex table survived the round
         # trip, so there is nothing to weld — which is the whole reason this
         # boundary is PLY.  It also carries `part`'s identity across, so the
@@ -207,7 +228,7 @@ def blender_part(part: Mesh, timeout: float = 600) -> tuple[Mesh, str]:
 
 def repair(mesh: Mesh,
            min_shell_faces: int = splitter.MIN_SHELL_FACES,
-           tool: Callable[[Mesh], tuple[Mesh, str]] = _repair_part,
+           tool: Callable[[Mesh], tuple[Mesh, str | PartFailed]] = _repair_part,
            ) -> Result:
     """Run weld, clean, split, per-part repair, and merge on a loaded mesh.
 
@@ -216,6 +237,10 @@ def repair(mesh: Mesh,
     `blender_part`. This injection point is not the planned defect-based tool
     routing. A failure returns `ok=False` with the mesh reached at failure,
     which may be an intermediate after earlier steps.
+
+    A tool reports a part it could not repair by returning `PartFailed` as its
+    detail; that stops the run and yields `ok=False`. Raising works too and is
+    reported the same way. Both matter because the real tools do both.
     """
     if mesh.geometry is None:
         raise ValueError(
@@ -284,6 +309,15 @@ def repair(mesh: Mesh,
             repaired.append(fixed)
             record(Step.PART, part_was, len(fixed.geometry.faces),
                    f"part {index}: {detail}", mark, fixed)
+            if isinstance(detail, PartFailed):
+                # Stop at the first failed part rather than merging it back in.
+                # A part that could not be repaired is still defective geometry,
+                # and merging it would produce a mesh that measures plausibly
+                # and is not a repair.  The steps already record which part and
+                # why, so the reason travels with the failed result.
+                return _failed(mesh, f"part {index}: {detail}", tuple(steps),
+                               faces_in, volume_in,
+                               time.monotonic() - started)
 
         mark = time.monotonic()
         was = sum(len(p.geometry.faces) for p in repaired)

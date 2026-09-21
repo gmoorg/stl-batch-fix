@@ -12,7 +12,9 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
+from libs import converter
 from libs.converter import Summary, prepare
 from libs.indicators import EXPORT_DIRNAME, export_path
 from libs.mesh_io import Kind
@@ -233,6 +235,50 @@ class TestConversion(ConverterCase):
         summary = self.run_prepare(convert=self._fake_convert(succeed=False))
         self.assertEqual(len(self.seen), 1)
         self.assertFalse(self.seen[0].is_valid)
+        self.assertEqual(summary.conversion_failed, 1)
+
+    def test_an_interrupted_companion_copy_leaves_nothing_behind(self):
+        """A04, for the companion copy: `check` reads this path back too.
+
+        A half-copied companion at its destination is reported as
+        ALREADY_COPIED on the next run, so the partial file becomes permanent.
+        The same staging rule as the STL writers applies.
+        """
+        companion = self.s('Leia', 'notes.txt')
+        os.makedirs(os.path.dirname(companion), exist_ok=True)
+        with open(companion, 'w') as f:
+            f.write('companion payload')
+
+        def die(src, dst, *args, **kwargs):
+            with open(dst, 'wb') as f:
+                f.write(b'half')
+            raise RuntimeError("interrupted mid-copy")
+
+        with mock.patch.object(converter.shutil, 'copy2', die):
+            with self.assertRaises(RuntimeError):
+                self.run_prepare()
+
+        copied = self.o('Leia', 'notes.txt')
+        self.assertFalse(os.path.exists(copied),
+                         "a partial companion copy will be called ALREADY_COPIED")
+
+    def test_a_raising_conversion_is_emitted_not_dropped(self):
+        """R01/T04: returning False was handled; raising was not.
+
+        A converter that throws is the same event as one that returns False —
+        the file was not converted — but the exception reached the pool, which
+        reports it through `error`, and `next_item` ignored that argument.  The
+        file then left no trace at all: not emitted, not counted, not failed.
+        """
+        _ascii_stl(self.s('Leia', 'head.stl'))
+
+        def explode(source, export):
+            raise RuntimeError("converter fell over")
+
+        summary = self.run_prepare(convert=explode)
+        self.assertEqual(len(self.seen), 1)
+        self.assertFalse(self.seen[0].is_valid)
+        self.assertIn("converter fell over", self.seen[0].problem)
         self.assertEqual(summary.conversion_failed, 1)
 
     def test_without_a_converter_the_file_is_emitted_invalid(self):

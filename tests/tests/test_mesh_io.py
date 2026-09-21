@@ -307,6 +307,27 @@ class TestLoad(MeshIOCase):
         self.assertIsNone(result.geometry)
         self.assertIsNotNone(result.problem)
 
+    def test_a_zero_triangle_file_is_invalid_not_a_crash(self):
+        """R03: an 84-byte STL is well-formed but holds no model.
+
+        `probe` used to call it valid, and `load` then indexed an empty array.
+        A file with nothing in it is bad data, so it is a result, not a raise —
+        and it must be caught at `probe`, before a worker commits to loading it.
+        """
+        path = _binary_stl(self.path('empty.stl'), triangles=[])
+        self.assertEqual(os.path.getsize(path), 84)
+
+        probed = probe(path, self.path('out.stl'))
+        self.assertFalse(probed.is_valid)
+        self.assertIsNotNone(probed.problem)
+
+        # Even asked directly, with the header's own count, load must not crash.
+        result = load(Mesh(path, self.path('out.stl'), Kind.BINARY_STL,
+                           0, True))
+        self.assertFalse(result.is_valid)
+        self.assertIsNone(result.geometry)
+        self.assertIsNotNone(result.problem)
+
     def test_loading_a_non_binary_mesh_raises(self):
         """Asking is a programming error — it should have been converted."""
         ascii_mesh = probe(_ascii_stl(self.path('a.stl')), self.path('out.stl'))

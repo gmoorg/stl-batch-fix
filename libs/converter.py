@@ -108,8 +108,10 @@ def prepare(source_root: str,
             continue
 
         if found.indicator is Indicator.COPY_AS_IS:
-            os.makedirs(os.path.dirname(destination), exist_ok=True)
-            shutil.copy2(source, destination)
+            # Staged: `check` reads this same path back as ALREADY_COPIED, so
+            # a copy interrupted partway would retire the companion for good.
+            with mesh_io.staged_write(destination) as staged:
+                shutil.copy2(source, staged)
             summary.copied += 1
             continue
 
@@ -148,9 +150,21 @@ def prepare(source_root: str,
 
     def convert_one(item):
         source, export, destination = item
-        ok, path = convert(source, export)
+        try:
+            ok, path = convert(source, export)
+        except Exception as exc:          # noqa: BLE001 — emitted, not raised
+            # A converter that throws and one that returns False report the
+            # same event: this file was not converted.  Handled here rather
+            # than through the pool's `error` argument, because the pool hands
+            # that to the *selector*, which knows only that an item finished —
+            # not which result it should have produced.  Catching it beside the
+            # call keeps the failure attached to its own source.
+            ok, path = False, export
+            reason = f"conversion raised {type(exc).__name__}: {exc}"
+        else:
+            reason = "conversion failed"
         result = (mesh_io.probe(path, destination) if ok else
-              _conversion_failure(source, destination, "conversion failed"))
+              _conversion_failure(source, destination, reason))
         # Everything shared goes through emit_one's lock, including these
         # counters.  Two cleverer arrangements were tried first and both were
         # wrong: counting inside the pool's selector looks free, since the pool

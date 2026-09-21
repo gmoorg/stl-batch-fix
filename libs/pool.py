@@ -4,6 +4,11 @@
 `handle(item)` runs outside it. A selector returns None to retire that worker.
 Each completed item, including a failed one, is reported exactly once at its
 next selection. The caller owns queue order, admission, and error policy.
+
+A handler exception is delivered to `select` as `error`. A `select` exception
+is different in kind — it breaks the very channel failures are reported on —
+so it stops the pool and is re-raised from `start()` once the workers have
+joined.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ class Pool[T]:
         self._handle = item_handler
         self._lock = threading.Lock()
         self._stopped = False
+        self._selector_error: BaseException | None = None
 
     def stop(self) -> None:
         """Tell every worker to shut down before it takes another item.
@@ -63,6 +69,13 @@ class Pool[T]:
             t.start()
         for t in threads:
             t.join()
+        if self._selector_error is not None:
+            # A handler failure is reported *through* the selector, which is
+            # why `_run` swallows it.  A failure *of* the selector has no such
+            # channel: the workers are gone and nothing was processed, so
+            # returning normally would present an empty run as a complete one.
+            # Raised after the join so every worker has already stopped.
+            raise self._selector_error
 
     # -- the worker loop, one per thread --------------------------------------
 
@@ -80,7 +93,16 @@ class Pool[T]:
             with self._lock:
                 if self._stopped:
                     return
-                item = self._select(done, error)
+                try:
+                    item = self._select(done, error)
+                except Exception as exc:      # noqa: BLE001 — re-raised in start
+                    # Keep the first one: later workers calling the same broken
+                    # selector would only overwrite it with the same fault, and
+                    # the first is the one with the untouched state behind it.
+                    if self._selector_error is None:
+                        self._selector_error = exc
+                    self._stopped = True      # already holding the lock
+                    return
             if item is None:
                 return
             error = None

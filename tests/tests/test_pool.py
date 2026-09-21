@@ -269,6 +269,63 @@ class TestFailureHandling(unittest.TestCase):
         # Must not raise out of start(), even with no selector interest in it.
         Pool(2, _fifo_over(["a", "b"]), handle).start()
 
+    def test_a_failing_selector_reaches_the_caller(self):
+        """R09: a handler error has somewhere to go; a selector error does not.
+
+        A handler failure is reported *through* the selector, which is why it
+        is swallowed.  When the selector itself raises there is no such
+        channel: every worker dies, `start()` joins them and returns, and a
+        batch run that processed nothing looks exactly like one with nothing
+        to do.  That has to be loud.
+        """
+        def bad_selector(done, error):
+            raise RuntimeError("selector exploded")
+
+        handled = []
+        with self.assertRaises(RuntimeError) as caught:
+            Pool(2, bad_selector, handled.append).start()
+
+        self.assertIn("selector exploded", str(caught.exception))
+        self.assertEqual(handled, [])
+
+    def test_one_selector_failure_is_raised_once(self):
+        """Several workers hit the same broken selector; the caller sees one."""
+        def bad_selector(done, error):
+            raise RuntimeError("selector exploded")
+
+        with self.assertRaises(RuntimeError):
+            Pool(4, bad_selector, lambda item: None).start()
+
+    def test_work_in_flight_finishes_before_the_failure_is_raised(self):
+        """The raise waits for the join, so a live handler is not abandoned.
+
+        `start()` re-raises only after joining, which matters because a handler
+        holding a temp file or a Blender child must reach its own cleanup.
+        """
+        handed_out = []
+        running = threading.Event()
+        finished = []
+
+        def selector(done, error):
+            # Decided under the pool's lock, so "exactly one" is not a race:
+            # the second worker cannot also see an empty list.
+            if not handed_out:
+                handed_out.append("the one item")
+                return "the one item"
+            running.wait(timeout=5)       # fail only while the handler is live
+            raise RuntimeError("selector exploded")
+
+        def handle(item):
+            running.set()
+            time.sleep(0.05)              # still running when the selector dies
+            finished.append(item)
+
+        with self.assertRaises(RuntimeError):
+            Pool(2, selector, handle).start()
+
+        self.assertEqual(finished, ["the one item"],
+                         "the raise abandoned a handler that was still running")
+
 
 class TestPolicyControl(unittest.TestCase):
 

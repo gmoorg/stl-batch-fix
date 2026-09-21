@@ -166,6 +166,11 @@ def write(outcome: Outcome, source_path: str, output_file: str) -> str | None:
     else:
         # The source, byte for byte.  Copied rather than re-written so a file
         # this pipeline could not parse still reaches the user unchanged.
-        shutil.copy2(source_path, marker)
+        #
+        # Staged for the same reason `mesh_io.write` is: a marker is what tells
+        # the next run this file was already dealt with, so a half-copied one
+        # would retire the work while leaving a truncated fallback print.
+        with mesh_io.staged_write(marker) as staged:
+            shutil.copy2(source_path, staged)
     return marker
 
