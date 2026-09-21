@@ -39,9 +39,80 @@ class Step(Enum):
     MERGE = 'merge'                  # 3c. back into one mesh
 
 
+# --------------------------------------------------------------------------
+# Step switches.  Every step of the sequence can be turned off here to measure
+# what it contributes, which is the only way to tell a step that repairs from
+# one that damages: several of these are *recorded as harmful* on real models
+# (docs/refactor/discovered-bugs.md) and the argument was settled by running
+# the pipeline without them.
+#
+# All default True, so the shipping behaviour is exactly what it was.  A
+# disabled step still appears in `Result.steps`, with `detail` saying it was
+# skipped, so a log never silently omits a stage.
+#
+# These are module-level rather than parameters because they describe an
+# experiment on the whole run, not a property of one mesh.  Set them before
+# calling `repair`; do not toggle them per part.
+# --------------------------------------------------------------------------
+
+#: 7. Split faces at T-junctions.  Adds faces, moves and deletes nothing.
+ENABLE_WELD = True
+
+#: 8. Drop zero-area faces.
+ENABLE_CLEAN_NULL_FACES = True
+
+#: 9. Weld vertices within 0.1% of the bbox diagonal.  **Measured harmful**:
+#: on Amidara base it merges one vertex and creates two non-manifold edges in
+#: a mesh that had none, and removing it changes the final result by nothing.
+ENABLE_CLEAN_MERGE_CLOSE = True
+
+#: 10. Remove faces duplicated after the merge.
+ENABLE_CLEAN_DUPLICATE_FACES = True
+
+#: 11. Drop vertices no face references.
+ENABLE_CLEAN_UNREFERENCED = True
+
+#: 12. Separate edge-connected components so PyMeshFix cannot discard all but
+#: the largest.  Disabling this sends a multi-shell mesh in whole.
+ENABLE_SPLIT_SHELLS = True
+
+#: 13. Separate regions whose winding contradicts itself.  Off because
+#: `repairer` has never called `by_seams`; enabling it is an experiment, and
+#: repairing the resulting open regions independently is measured as
+#: destructive on real models.
+ENABLE_SPLIT_SEAMS = False
+
+#: 14. Orient each part outward.  **Measured harmful**: takes Amidara base from
+#: 922 winding-seam edges to 7,659.
+ENABLE_ORIENT = True
+
+#: 15. Run the part repair tool (PyMeshFix by default).  Disabling this passes
+#: every part through untouched, which is the control for measuring what the
+#: tool costs.
+ENABLE_PART_TOOL = True
+
+
+def clean_filters() -> tuple[tuple[str, dict], ...]:
+    """The CLEAN filters the switches above leave enabled, in order.
+
+    Built per call rather than at import so a switch can be flipped between
+    runs in one session, which is the whole point of having them.
+    """
+    chosen = (
+        (ENABLE_CLEAN_NULL_FACES, ('meshing_remove_null_faces', {})),
+        (ENABLE_CLEAN_MERGE_CLOSE,
+         ('meshing_merge_close_vertices', {'threshold': 0.1})),
+        (ENABLE_CLEAN_DUPLICATE_FACES, ('meshing_remove_duplicate_faces', {})),
+        (ENABLE_CLEAN_UNREFERENCED,
+         ('meshing_remove_unreferenced_vertices', {})),
+    )
+    return tuple(spec for enabled, spec in chosen if enabled)
+
+
 #: Run the whole cleanup sequence before splitting: merging alone can leave
 #: duplicate faces and apparent non-manifold edges. The threshold is relative
 #: to the bounding-box diagonal. See archive/docs-before-compact-2026-09-19/refactor/implementation-evidence.md.
+#: Kept as the full default order; `clean_filters()` is what `repair` runs.
 CLEAN_FILTERS: tuple[tuple[str, dict], ...] = (
     ('meshing_remove_null_faces', {}),
     ('meshing_merge_close_vertices', {'threshold': 0.1}),
@@ -187,9 +258,15 @@ def _repair_part(part: Mesh) -> tuple[Mesh, str | PartFailed]:
     notes = []
 
     # A signed-volume guard misses local inversions; orient each split part.
-    part = meshlab.apply_filters(
-        part, (('meshing_re_orient_faces_by_geometry', {}),))
-    notes.append('oriented')
+    if ENABLE_ORIENT:
+        part = meshlab.apply_filters(
+            part, (('meshing_re_orient_faces_by_geometry', {}),))
+        notes.append('oriented')
+    else:
+        notes.append('orient skipped')
+
+    if not ENABLE_PART_TOOL:
+        return part, ', '.join(notes + ['part tool skipped'])
 
     result = meshfix.repair(part)
     if not result.ok:
@@ -291,28 +368,45 @@ def repair(mesh: Mesh,
         #    denting the surface.  Adds faces, moves nothing.
         mark = time.monotonic()
         was = len(mesh.geometry.faces)
-        welded = welder.repair(mesh)
-        mesh = welded.mesh
-        record(Step.WELD, was, len(mesh.geometry.faces),
-               f"{welded.splits} junction(s) in {welded.rounds} round(s)",
-               mark, mesh)
+        if ENABLE_WELD:
+            welded = welder.repair(mesh)
+            mesh = welded.mesh
+            detail = (f"{welded.splits} junction(s) in "
+                      f"{welded.rounds} round(s)")
+        else:
+            detail = 'skipped (ENABLE_WELD=False)'
+        record(Step.WELD, was, len(mesh.geometry.faces), detail, mark, mesh)
 
         # 2. Duplicates, before the split so deduplication sees both copies.
         mark = time.monotonic()
         was = len(mesh.geometry.faces)
-        mesh = meshlab.apply_filters(mesh, CLEAN_FILTERS)
+        filters = clean_filters()
+        if filters:
+            mesh = meshlab.apply_filters(mesh, filters)
+        names = ', '.join(name.replace('meshing_', '') for name, _ in filters)
         record(Step.CLEAN, was, len(mesh.geometry.faces),
-               f"{len(CLEAN_FILTERS)} filters", mark, mesh)
+               f"{len(filters)} of {len(CLEAN_FILTERS)} filters"
+               f"{': ' + names if filters else ' (all skipped)'}", mark, mesh)
 
         # 3. Split, repair each part, merge.  PyMeshFix rebuilds one manifold
         #    surface and discards the rest, so a multi-shell mesh reaching it
         #    whole comes back as its largest shell alone.
         mark = time.monotonic()
         was = len(mesh.geometry.faces)
-        parts = splitter.by_shells(mesh, min_faces=min_shell_faces)
+        if ENABLE_SPLIT_SHELLS:
+            parts = splitter.by_shells(mesh, min_faces=min_shell_faces)
+            how = f"{len(parts)} shell part(s)"
+        else:
+            parts = (mesh,)
+            how = 'shell split skipped (ENABLE_SPLIT_SHELLS=False)'
+        if ENABLE_SPLIT_SEAMS:
+            # Every region, including debris: `by_seams` does not filter, and
+            # judging a region is the caller's job.
+            parts = tuple(r for part in parts for r in splitter.by_seams(part))
+            how += f" -> {len(parts)} region(s) after seams"
         kept = sum(len(p.geometry.faces) for p in parts)
         record(Step.SPLIT, was, kept,
-               f"{len(parts)} part(s), {kept} of {was} faces kept", mark)
+               f"{how}, {kept} of {was} faces kept", mark)
 
         repaired = []
         for index, part in enumerate(parts):

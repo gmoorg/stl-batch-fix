@@ -98,12 +98,35 @@ def is_available() -> bool:
     return _AVAILABLE
 
 
+#: Step 15a. Close boundary loops before cleaning.  `nbe=0` means *every*
+#: boundary regardless of size, and `refine=True` is what emits "Refinement
+#: stage failed to converge" on meshes that had no boundaries to begin with.
+ENABLE_FILL_BOUNDARIES = True
+
+#: Step 15b. `clean()` — remove self-intersecting and degenerate geometry.
+#: **This is the destructive call**: it deletes 36,342 faces from a watertight
+#: Amidara base, 99.6% of that loss being self-intersection removal cascading
+#: through retriangulation. See docs/refactor/amidara-clean-destroys.md.
+ENABLE_CLEAN = True
+
+#: Arguments to `clean()`.  The library default is (10, 3) and we passed
+#: nothing, taking it.  `(1, 1)` keeps 13,300 more faces on Amidara base at
+#: 99.73% volume but leaves 6,187 self-intersections; everything from
+#: inner_loops=3 up converges on the same result.
+CLEAN_MAX_ITERS = 10
+CLEAN_INNER_LOOPS = 3
+
+
 def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
     """Run PyMeshFix on a loaded mesh and return its arrays and output.
 
     `fill_holes=True` fills small boundaries before `clean`; False runs `clean`
     alone. The current repair sequence uses the default. Failure returns the
     input mesh with `ok=False`; successful execution still needs a topology scan.
+
+    The module switches above disable either call independently, so what each
+    one costs can be measured rather than argued about. With both off this
+    loads and returns the arrays unchanged, which is the control.
     """
     if mesh.geometry is None:
         raise ValueError(
@@ -119,9 +142,10 @@ def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
             tin.load_array(
                 np.ascontiguousarray(mesh.geometry.verts, dtype=np.float64),
                 np.ascontiguousarray(mesh.geometry.faces, dtype=np.int32))
-            if fill_holes:
+            if fill_holes and ENABLE_FILL_BOUNDARIES:
                 tin.fill_small_boundaries(0, True)
-            tin.clean()
+            if ENABLE_CLEAN:
+                tin.clean(CLEAN_MAX_ITERS, CLEAN_INNER_LOOPS)
             verts, faces = tin.return_arrays()
     except Exception as exc:
         return Result(mesh, False, f"{type(exc).__name__}: {exc}",
