@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_DIR=$(cd -- "$SCRIPT_DIR/.." && pwd)
-CODEX_EXEC=$("$SCRIPT_DIR/find_codex.sh")
 PYTHON_BIN=$(cd -- "$PROJECT_DIR/.." && pwd)/.venv/bin/python
 
 if [[ ! -x $PYTHON_BIN ]]; then
@@ -27,4 +26,4 @@ EOF
 # `--approve-for-me` already selects the workspace-write sandbox, and the CLI
 # rejects the pair outright — passing both made every run fail before it
 # started, with no work done and no output but the usage message.
-exec "$CODEX_EXEC" exec --cd "$PROJECT_DIR" --approve-for-me --ephemeral --color never "$PROMPT"
+exec "$SCRIPT_DIR/project_python.sh" "$SCRIPT_DIR/codex_session.py" implementation <<< "$PROMPT"

@@ -47,7 +47,7 @@ Agreement does not override an approval required by the execution environment. R
 
 ## Codex calls
 
-Claude uses `tools/ask_codex.sh` for read-only validation and review. Start each request with one phase label:
+Claude uses `tools/ask_codex.sh` for read-only validation and review. The first line must be exactly one phase label (later quoted phase labels do not affect routing):
 
 ```text
 PHASE: INTERPRETATION
@@ -79,3 +79,50 @@ Inspect the working-tree diff.
 ```
 
 If Codex is the implementer, Claude invokes `tools/run_codex.sh` once the plan is agreed, then performs the review itself. Claude prevents endless discussion and finishes with the implementation summary, checks, peer-review result, and unresolved risks.
+
+## Session continuity
+
+There is one active collaboration task per checkout. Run `tools/reset_codex.sh`
+before beginning a new task, including the first task after adopting this workflow.
+Do not reset between phases or while addressing review findings.
+
+- `INTERPRETATION` and `PLAN` share a persistent planning session. Follow-up calls
+  resume its exact ID, so previous decisions and objections remain available.
+- The first `REVIEW` starts a separate session with fresh conversation context.
+  Supply the original prompt, agreed interpretation and plan, changed files, and
+  checks because the reviewer does not inherit planning history. Further `REVIEW`
+  calls resume that reviewer to check fixes; tell it what changed since last time.
+- `tools/run_codex.sh` uses a separate persistent implementation session. Include
+  the agreed plan in its first request. Claude independently reviews its changes;
+  Codex must not review its own implementation through the review wrapper.
+
+The launcher stores explicit IDs in the ignored `.codex-collaboration/` directory
+and resumes them with `codex exec resume`. It never selects `--last`. Planning and
+review stay read-only; implementation retains automatic approval review. Calls
+are serialized by a checkout lock; a concurrent call or reset fails with an
+actionable message. Wait for the active call to finish before retrying.
+
+Agent responses remain plain text on stdout; session notices and errors go to
+stderr. A failed call returns a nonzero status and retains any captured session
+ID for a deliberate retry. Do not interpret partial output as approval. An invalid
+or unavailable saved session must be investigated or explicitly reset, never
+silently replaced. Sessions are now persisted by Codex; clearing pointers does
+not delete their saved transcripts. Continuity reduces repeated setup but long
+histories still consume context.
+
+## Starting both AIs clean
+
+1. If continuing unfinished work, save a short handoff in the repository with the
+   original task, accepted decisions, changed files, checks, and next steps.
+2. After active calls finish, run `tools/reset_codex.sh` from the repository root
+   (or invoke it by absolute path from elsewhere). This clears all three Codex
+   session pointers without changing project files or deleting past transcripts.
+3. Run `/clear` in the interactive Claude Code session. The reset script cannot
+   clear Claude's conversation. If also using a separate Codex app chat, start a
+   new task/chat there; the CLI sessions do not share that conversation.
+4. Ask Claude to read `CLAUDE.md`, `COLLABORATION.md`, and the handoff if present.
+   Its next Codex call starts fresh and must include the task context.
+
+Clearing Claude alone does not clear the saved Codex session pointers. Repository
+instructions, files, and any separately configured agent memory remain available
+after a conversation reset.

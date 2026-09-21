@@ -12,6 +12,12 @@ For every non-trivial task, Claude Code leads the [Claude–Codex workflow](COLL
 
 The [docs index](docs/README.md) routes other questions. Detailed historical notes are archived outside `docs/`. The legacy [design](STL_BATCH_FIX_DESIGN.md) is retained for later and is outside the refactor reading path.
 
+Collaboration keeps one Codex session for interpretation/planning and a separate
+review session that resumes for fixes. Start a new task with
+`tools/reset_codex.sh`. To start both AIs clean, save any needed handoff, run that
+reset after active calls finish, then run `/clear` in Claude Code. See the
+[session and reset instructions](COLLABORATION.md#starting-both-ais-clean).
+
 ## Current refactor in one pass
 
 `converter.prepare` classifies and converts inputs; `pool.Pool` provides a worker primitive, but the batch walk is unfinished. For one mesh, `processor.process` decimates, then `repairer.repair` welds T-junctions, cleans geometry, and splits edge-connected shells. It processes every retained part separately: orient the part, select PyMeshFix and/or Blender repair from its measured defects, verify the result, then merge all accepted parts. The Blender repair and safe PLY boundary exist, but the current default still calls only PyMeshFix because defect-based routing is unfinished. `processor` checks the merged result for volume loss and topology before `processor.write` emits an STL or failure marker. Each stage has a limited purpose; preserve their order unless evidence supports a change.

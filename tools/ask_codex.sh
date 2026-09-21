@@ -2,8 +2,6 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_DIR=$(cd -- "$SCRIPT_DIR/.." && pwd)
-CODEX_EXEC=$("$SCRIPT_DIR/find_codex.sh")
 
 if (($#)); then
     REQUEST=$*
@@ -11,10 +9,11 @@ else
     REQUEST=$(cat)
 fi
 
-case "$REQUEST" in
-    *"PHASE: INTERPRETATION"*|*"PHASE: PLAN"*|*"PHASE: REVIEW"*) ;;
+case "${REQUEST%%$'\n'*}" in
+    "PHASE: INTERPRETATION"|"PHASE: PLAN") ROLE=planning ;;
+    "PHASE: REVIEW") ROLE=review ;;
     *)
-        echo "ask_codex.sh: request must include PHASE: INTERPRETATION, PLAN, or REVIEW" >&2
+        echo "ask_codex.sh: first line must be PHASE: INTERPRETATION, PHASE: PLAN, or PHASE: REVIEW" >&2
         exit 2
         ;;
 esac
@@ -32,4 +31,4 @@ $REQUEST
 EOF
 )
 
-exec "$CODEX_EXEC" exec --cd "$PROJECT_DIR" --sandbox read-only --ephemeral --color never "$PROMPT"
+exec "$SCRIPT_DIR/project_python.sh" "$SCRIPT_DIR/codex_session.py" "$ROLE" <<< "$PROMPT"
