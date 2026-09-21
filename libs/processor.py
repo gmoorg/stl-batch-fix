@@ -8,6 +8,7 @@ failed work, and the repaired mesh when geometry survives but defects remain.
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -67,6 +68,19 @@ def _decide(source: Mesh,
         return Outcome(Indicator.FAILED, None, 'source',
                        f"repair failed: {repaired.problem}",
                        decimation=decimated, repair=repaired)
+
+    # An unmeasurable volume is not a passing measurement.  Every guard below
+    # is a `<` comparison, and those are all False against NaN, so a NaN would
+    # be waved through by each test in turn and arrive at PROCESS.  Stated as
+    # its own check rather than folded into the next one, because "we could not
+    # measure this" and "this lost too much" are different answers.
+    if not (math.isfinite(repaired.volume_in)
+            and math.isfinite(repaired.volume_out)):
+        return Outcome(
+            Indicator.FAILED, None, 'source',
+            f"volume could not be measured: in={repaired.volume_in}, "
+            f"out={repaired.volume_out}",
+            decimation=decimated, repair=repaired)
 
     # Destruction first.  A half-model scores nm=0 and open=0 — it is a valid
     # closed surface, just not the one that went in — so asking "is it clean"

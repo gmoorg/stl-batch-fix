@@ -235,6 +235,55 @@ class TestWriting(unittest.TestCase):
         write(outcome, self.source, self.output)
         self.assertFalse(os.path.exists(self.output))
 
+    def test_an_unmeasurable_volume_is_never_a_clean_verdict(self):
+        """A03, at the gate: `NaN < MIN_VOLUME_KEPT` is False, so the
+        destruction check waves NaN through and every later test agrees.
+
+        Non-finite geometry is refused at load, so a file cannot arrive here
+        any more.  This guards the other direction: a repair step that returns
+        unmeasurable geometry must not be reported as a clean model.
+        """
+        for bad in (float('nan'), float('inf'), float('-inf')):
+            with self.subTest(volume_out=bad):
+                outcome = processor._decide(
+                    mesh(), decimation(),
+                    repair_result(volume_in=100.0, volume_out=bad))
+                self.assertFalse(
+                    outcome.is_clean,
+                    f"volume_out={bad} was reported as a clean result")
+                # "not clean" is not enough: an unmeasurable result must be
+                # classified as a failure that falls back to the source, not
+                # as some other marker that ships repaired geometry.
+                self.assertIs(outcome.indicator, Indicator.FAILED)
+                self.assertEqual(outcome.marker, 'source')
+                self.assertIsNone(outcome.mesh)
+
+    def test_a_repair_returning_non_finite_geometry_is_a_failed_outcome(self):
+        """End to end: the crash must become a verdict, not an exception.
+
+        A tool that returns a NaN vertex used to escape `process` entirely,
+        through `_count_lost`, before any judgement was made.
+        """
+        def poison(part):
+            verts = part.geometry.verts.copy()
+            verts[0, 0] = float('nan')
+            return part.with_geometry(
+                Geometry(verts, part.geometry.faces)), 'poisoned'
+
+        outcome = processor.process(mesh(), max_faces=0, tool=poison)
+        self.assertIs(outcome.indicator, Indicator.FAILED)
+        self.assertEqual(outcome.marker, 'source')
+        self.assertFalse(outcome.is_clean)
+
+    def test_an_unmeasurable_input_volume_is_not_a_clean_verdict(self):
+        """The denominator has to be a number too."""
+        outcome = processor._decide(
+            mesh(), decimation(),
+            repair_result(volume_in=float('nan'), volume_out=100.0))
+        self.assertFalse(outcome.is_clean)
+        self.assertIs(outcome.indicator, Indicator.FAILED)
+        self.assertEqual(outcome.marker, 'source')
+
     def test_an_interrupted_write_leaves_no_output_to_mistake_for_work(self):
         """A04: a half-written file at the final path is worse than none.
 

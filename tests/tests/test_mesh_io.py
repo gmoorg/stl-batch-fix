@@ -328,6 +328,40 @@ class TestLoad(MeshIOCase):
         self.assertIsNone(result.geometry)
         self.assertIsNotNone(result.problem)
 
+    def test_a_nan_coordinate_is_invalid_not_a_clean_mesh(self):
+        """A03: NaN geometry measures as flawless and is not a model.
+
+        A NaN vertex loads, scans `open=0, nm=0`, and has NaN volume — and
+        `NaN < MIN_VOLUME_KEPT` is False, so every comparison that would have
+        caught it says "fine".  It cannot be judged downstream, so it is
+        refused here, where the coordinates first enter memory.
+        """
+        nan = float('nan')
+        poisoned = [[(nan, nan, nan), (1, 0, 0), (0, 1, 0)]]
+        path = _binary_stl(self.path('nan.stl'), triangles=poisoned)
+
+        result = load(probe(path, self.path('out.stl')))
+        self.assertFalse(result.is_valid)
+        self.assertIsNone(result.geometry)
+        self.assertIn('finite', result.problem)
+
+    def test_an_infinite_coordinate_is_invalid_too(self):
+        """Infinity breaks every same comparison NaN does."""
+        big = float('inf')
+        poisoned = [[(big, 0, 0), (1, 0, 0), (0, 1, 0)]]
+        path = _binary_stl(self.path('inf.stl'), triangles=poisoned)
+
+        result = load(probe(path, self.path('out.stl')))
+        self.assertFalse(result.is_valid)
+        self.assertIsNone(result.geometry)
+
+    def test_ordinary_coordinates_still_load(self):
+        """The guard must not reject the models this tool exists for."""
+        loaded = load(probe(_binary_stl(self.path('fine.stl')),
+                            self.path('out.stl')))
+        self.assertTrue(loaded.is_valid)
+        self.assertEqual(len(loaded.geometry.faces), 4)
+
     def test_loading_a_non_binary_mesh_raises(self):
         """Asking is a programming error — it should have been converted."""
         ascii_mesh = probe(_ascii_stl(self.path('a.stl')), self.path('out.stl'))
@@ -462,6 +496,29 @@ class TestPly(MeshIOCase):
                                        back.geometry.verts))
         self.assertTrue(np.array_equal(mesh.geometry.faces,
                                        back.geometry.faces))
+
+    def test_a_non_finite_vertex_is_refused(self):
+        """A03, at the other entrance: `load` is not the only way in.
+
+        Rejecting NaN at `load` covers files.  Geometry also arrives from
+        Blender through this boundary, and a NaN that gets in here reaches
+        `repairer._count_lost`, whose cKDTree raises from outside the repair
+        sequence's own error handling — the crash the review recorded.
+        """
+        mesh = self.loaded()
+        ply = self.path('poisoned.ply')
+        write_ply(mesh, ply)
+
+        with open(ply, 'rb') as f:
+            raw = bytearray(f.read())
+        start = raw.find(b'end_header\n') + len(b'end_header\n')
+        raw[start:start + 4] = np.float32(np.nan).tobytes()
+        with open(ply, 'wb') as f:
+            f.write(bytes(raw))
+
+        with self.assertRaises(ValueError) as caught:
+            read_ply(ply, mesh)
+        self.assertIn('finite', str(caught.exception))
 
     def test_no_vertex_is_duplicated(self):
         """The whole point. An STL of this mesh would carry 3 vertices per

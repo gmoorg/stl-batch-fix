@@ -321,6 +321,69 @@ class TestFailure(unittest.TestCase):
         self.assertIn(Step.WELD, [s.step for s in result.steps])
         self.assertIsNotNone(result.mesh.geometry)
 
+    def test_a_tool_returning_non_finite_geometry_fails_it_does_not_crash(self):
+        """The final measurements ran outside the guarded sequence.
+
+        `_count_lost` and the closing volume are taken after the try/except,
+        so a tool that hands back a NaN vertex escaped as a raw cKDTree
+        ValueError instead of a failed `Result` — past every judgement the
+        pipeline makes.  Guarding the file entrances does not cover this:
+        the geometry is produced mid-repair, not read.
+        """
+        def poison(part):
+            verts = part.geometry.verts.copy()
+            verts[0, 0] = float('nan')
+            return part.with_geometry(
+                Geometry(verts, part.geometry.faces)), 'poisoned'
+
+        result = repair(tetra(), min_shell_faces=0, tool=poison)
+        self.assertFalse(result.ok)
+
+        # Not merely "something raised": the reason has to name the defect.
+        # Moving the measurements inside the guard is enough to turn the crash
+        # into a failure, but the message would then be scipy's "data must be
+        # finite" — which does not say it was the repaired mesh, and would stop
+        # detecting anything at all if `_count_lost` ever changed measure.
+        self.assertIn('repaired mesh', result.problem)
+        self.assertIn('NaN or infinite', result.problem)
+
+    def test_a_failing_closing_measurement_is_a_result_not_an_exception(self):
+        """The structural half of the fix, on geometry that is perfectly finite.
+
+        The NaN tests above are satisfied by the explicit finiteness check, so
+        they pass even with the closing `Result` built outside the guard.  This
+        one pins the boundary itself: a measurement is something the caller
+        asked for, and its failure is a failed repair, not an exception raised
+        past every verdict the pipeline makes.
+        """
+        def explode(before, after, tolerance=None):
+            raise RuntimeError("measurement fell over")
+
+        with mock.patch.object(repairer, '_count_lost', explode):
+            result = repair(tetra(), min_shell_faces=0,
+                            tool=lambda part: (part, 'noop'))
+
+        self.assertFalse(result.ok)
+        self.assertIn("measurement fell over", result.problem)
+
+    def test_a_failing_closing_volume_is_a_result_not_an_exception(self):
+        """The same for the other closing measurement."""
+        real = repairer.scanner.volume
+        seen = []
+
+        def flaky(mesh):
+            seen.append(mesh)
+            if len(seen) > 1:            # the opening measurement still works
+                raise RuntimeError("volume fell over")
+            return real(mesh)
+
+        with mock.patch.object(repairer.scanner, 'volume', flaky):
+            result = repair(tetra(), min_shell_faces=0,
+                            tool=lambda part: (part, 'noop'))
+
+        self.assertFalse(result.ok)
+        self.assertIn("volume fell over", result.problem)
+
     def test_the_default_tool_propagates_an_unsuccessful_pymeshfix(self):
         """R02, through the real default tool rather than an injected one.
 

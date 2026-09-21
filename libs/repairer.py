@@ -325,14 +325,30 @@ def repair(mesh: Mesh,
         record(Step.MERGE, was, len(mesh.geometry.faces),
                f"{len(repaired)} part(s) merged", mark, mesh)
 
+        # A tool can hand back geometry that is not measurable — PyMeshFix,
+        # PyMeshLab and Blender all return arrays this module did not build.
+        # Checked before the closing measurements rather than after, because
+        # `_count_lost` feeds those arrays to cKDTree, which raises on
+        # non-finite input; that raise used to happen below this block and so
+        # escaped `repair` entirely, past every verdict the pipeline makes.
+        if not np.isfinite(mesh.geometry.verts).all():
+            raise ValueError(
+                "the repaired mesh has NaN or infinite coordinates")
+
+        # Inside the guard: these are measurements of tool output, and a
+        # measurement that fails is a failed repair, not an exception for the
+        # caller to discover.
+        result = Result(mesh, True, None, tuple(steps), faces_in,
+                        len(mesh.geometry.faces), volume_in,
+                        scanner.volume(mesh), len(parts),
+                        time.monotonic() - started,
+                        lost_vertices=_count_lost(before, mesh.geometry.verts))
+
     except Exception as exc:
         return _failed(mesh, f"{type(exc).__name__}: {exc}", tuple(steps),
                        faces_in, volume_in, time.monotonic() - started)
 
-    return Result(mesh, True, None, tuple(steps), faces_in,
-                  len(mesh.geometry.faces), volume_in, scanner.volume(mesh),
-                  len(parts), time.monotonic() - started,
-                  lost_vertices=_count_lost(before, mesh.geometry.verts))
+    return result
 
 
 def _failed(mesh: Mesh, problem: str, steps: tuple[StepResult, ...] = (),

@@ -297,6 +297,16 @@ def load(mesh: Mesh) -> Mesh:
     coords = raw[:, 12:48].copy().reshape(-1, 12)
     del raw
     fview = coords.view(np.float32).reshape(-1, 3)
+    # Refuse NaN and infinity here, where the coordinates first become numbers.
+    # Nothing downstream can catch them: a NaN mesh scans as open=0, nm=0 and
+    # produces a NaN volume, and every comparison that guards the pipeline is
+    # `<` — which is False against NaN, so each one reports that all is well.
+    # The same input also reaches `cKDTree`, which raises from outside the
+    # repair sequence's own error handling.  There is no repair for a vertex
+    # that is not a position, so this is input validation, not a judgement.
+    if not np.isfinite(fview).all():
+        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
+                    "not finite: the file contains NaN or infinite coordinates")
     # Fold -0.0 to 0.0 in place; adding 0.0 leaves every other value untouched.
     np.add(fview, np.float32(0.0), out=fview)
     del fview
@@ -498,6 +508,14 @@ def read_ply(path: str, mesh: Mesh) -> Mesh:
     width = len(vertex_properties)
     block = np.frombuffer(data, dtype='<f4', count=n_verts * width, offset=end)
     verts = np.ascontiguousarray(block.reshape(n_verts, width)[:, :3])
+    if not np.isfinite(verts).all():
+        # `load` guards the file entrance; this is the other one.  A NaN
+        # arriving from Blender reaches `repairer._count_lost`, whose cKDTree
+        # raises from outside the repair sequence's own error handling, so the
+        # failure escapes as a crash instead of a failed result.  Raising here
+        # matches this reader's contract: malformed input is a ValueError.
+        raise ValueError(
+            f"{path} contains NaN or infinite vertex coordinates")
 
     offset = end + n_verts * width * 4
     records = np.frombuffer(data, dtype=[('n', 'u1'), ('v', '<u4', 3)],

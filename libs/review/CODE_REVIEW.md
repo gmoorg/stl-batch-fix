@@ -22,7 +22,7 @@ Re-verified 2026-09-20 against the working tree by Claude (reproduction scripts)
 | R10 | confirmed (Codex) | later | Result fields describe a different mesh than the one carried |
 | A01 | confirmed | later | 1 hit, 762→764 faces, 4 open edges remain; caught downstream as OPEN_EDGES |
 | A02 | confirmed | 6 | Component deleted, returns PROCESS, reports 7,049,393,791% volume kept |
-| A03 | confirmed (gate scope) | 5 | Plus an **unreported** `cKDTree` crash at `repairer.py:147`, outside the try/except |
+| A03 | **fixed** 2026-09-21 | 5 | Four routes, not one: STL load, PLY read, the decision gate, and the unreported `cKDTree` crash outside `repair`'s try/except |
 | A04 | **fixed** 2026-09-20 | 4 | Was: 7-byte file classified `ALREADY_FIXED`; no writer was atomic. The fix also covered a writer this finding missed — the companion copy in `converter.py` |
 | A05 | confirmed | later | Both sources map to `/in/stl-exported/model.stl` |
 | A06 | confirmed (inspection) | later | Copy failure escapes `prepare`, against the orchestration contract |
@@ -130,6 +130,10 @@ A run on `decimation_lost_appendage.stl` with `max_faces=20` decimated 28→20 f
 ### R10 — Failed-result measurements can describe the wrong mesh
 
 `libs/repairer.py`:L326–343: 🟡 risk: after a later step fails, `_failed(mesh)` may carry modified intermediate geometry but reports `faces_out=faces_in` and `volume_out=volume_in`. Measure the carried mesh or return the original input so the result fields describe the same mesh.
+
+**Status 2026-09-21: still true, and the A03 fix widened it.** Moving the closing measurements inside `repair`'s guarded block means a failure in `scanner.volume` or `_count_lost` now also produces a `_failed` result — so one more path reports `volume_out = volume_in`, a number never measured. Verified: a closing `scanner.volume` that raises gives `volume_in = volume_out = 0.1667` with zero steps recorded.
+
+This was the right trade for A03 (a crash escaping every verdict is worse than an imprecise failure field) but it is not free, and fixing R10 should now cover the closing measurements too.
 
 **Your comment:** _Add your note here._
 
