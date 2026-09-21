@@ -41,7 +41,7 @@ class Step(Enum):
 
 #: Run the whole cleanup sequence before splitting: merging alone can leave
 #: duplicate faces and apparent non-manifold edges. The threshold is relative
-#: to the bounding-box diagonal. See docs/refactor/implementation-evidence.md.
+#: to the bounding-box diagonal. See archive/docs-before-compact-2026-09-19/refactor/implementation-evidence.md.
 CLEAN_FILTERS: tuple[tuple[str, dict], ...] = (
     ('meshing_remove_null_faces', {}),
     ('meshing_merge_close_vertices', {'threshold': 0.1}),

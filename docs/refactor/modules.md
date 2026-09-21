@@ -65,7 +65,7 @@ reference material until the refactor is complete.
 
 - **For:** create independent repair parts and concatenate accepted results.
 - **Interface:** `by_shells`, `by_seams`, `merge`.
-- **Implementation:** shell parts are edge-connected and get independent identities; merge concatenates arrays, not a boolean union. Seam splitting requires closed winding loops and an explicit call.
+- **Implementation:** shell parts are edge-connected and get independent identities; merge concatenates arrays, not a boolean union. Seam splitting requires closed winding loops and an explicit call. `by_seams` has **no face floor** — it returns every region it cuts, because separating contradictory winding and judging whether a region is worth saving are different questions. `by_shells` keeps its debris floor.
 - **Tried/rejected:** vertex-connected splitting joins solids touching at one point. Unsplit PyMeshFix loses shells. Seam count did not predict damage. The current `<100 faces` debris rule can delete meaningful parts.
 
 ### `repairer`

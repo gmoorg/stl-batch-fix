@@ -28,7 +28,7 @@ Current code runs the central path but always chooses PyMeshFix for a part. Blen
 
 - **Decimate before split:** `max_faces` is a file budget. Split-first can produce `parts × max_faces`. Compare with the original immediately because later repair cannot prove what decimation removed.
 - **Weld before hole repair:** welding preserves vertices and supplies missing face subdivision. General hole tools dented the fixture.
-- **CLEAN before split:** merging vertices exposes duplicate faces while coincident copies are visible. Split-first left `doubles` as two shells at about 200% volume.
+- **CLEAN before split:** merging vertices exposes duplicate faces while coincident copies are visible. Split-first left `doubles` as two shells at about 200% volume — but `doubles` is a **synthetic** fixture, and a real-model survey found no duplicate shell pairs. Neither order is supported by real-model evidence; see [Mandy volume loss](mandy-volume-loss.md#investigation-of-the-owners-note-2026-09-21).
 - **Split before PyMeshFix:** PyMeshFix can rebuild one surface and discard other disconnected shells.
 - **Orient after split:** a whole-mesh volume guard misses local inversions; whole-mesh orientation erased seam evidence. Unconditional per-part orientation fixed tested cases.
 - **Repair parts independently:** no repair call receives all shells. One bad part must prevent whole-file success.

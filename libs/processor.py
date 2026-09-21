@@ -19,7 +19,7 @@ from .mesh_io import Mesh
 
 #: Compare volume magnitudes: repairing an inverted mesh can flip its sign.
 #: 0.90 detects observed catastrophic loss; coincident duplicate shells can
-#: legitimately fall below it. See docs/refactor/implementation-evidence.md.
+#: legitimately fall below it. See archive/docs-before-compact-2026-09-19/refactor/implementation-evidence.md.
 MIN_VOLUME_KEPT = 0.90
 
 

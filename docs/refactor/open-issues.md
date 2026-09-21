@@ -22,8 +22,12 @@ No final face-budget gate is required; `max_faces` is a decimation target. See t
 
 - Handle reversed/non-monotone T-junction paths.
 - Distinguish a far bent junction from a hole; no defensible distance bound exists.
-- Test whether CLEAN joins intended nearby shells; if so, divide global and per-part filters.
+- CLEAN/SPLIT order: measured 2026-09-21, neither order is supported by real-model evidence. CLEAN-before-SPLIT is defended only by the synthetic `doubles` fixture, and SPLIT-first showed no benefit — identical results on Mandy, and the costume01 component it preserves is destroyed by PyMeshFix anyway. Note the same parameter means a 20x different distance per-part vs whole-mesh. [Mandy volume loss](mandy-volume-loss.md#investigation-of-the-owners-note-2026-09-21).
 - Replace face-count debris deletion with a preservation rule.
+- ~~`by_seams` uses `MIN_SHELL_FACES` as a split gate~~ **Fixed 2026-09-21.** `min_faces` is **removed** from `by_seams`: it returns every region the seam produces, and worth-saving judgements belong to the caller, which needs the regions to make them. A `len(regions) <= 1` guard returns the original object when the cut separates nothing. `name` is keyword-only so an old positional floor raises immediately. Mandy part 0 now returns 4 parts (562,246 + 1 + 1 + 1, all 562,249 faces preserved) and the large region has 0 closed seam loops. This does **not** fix Mandy's hair: the repair outcome is unchanged. Measurements in [Mandy volume loss](mandy-volume-loss.md#the-floor-is-deciding-whether-to-split-not-what-is-worth-saving).
+- A seam region is a valid split, not a repairable solid. A one-face region has three open edges, and `merge` does not weld cut boundaries. Seam routing, when built, must judge repaired regions rather than assume success.
+- No fixture covers a *closed* seam loop that separates nothing — the case `by_seams`' `len(regions) <= 1` guard exists for. On the tube fixture any closed loop separates by construction. The guard is reasoned, not measured.
+- Assess per-part preservation **after** repair, not only at the split. There is no second floor check after the part tool, so a part reduced to a remnant is merged back regardless of size; but another face-count rule is not the answer, since a valid repaired part can legitimately have under 100 faces.
 - Decide when seam recovery and `open_loops_are_printable` are safe.
 - Replace remaining absolute geometry tolerances where scale tests require it.
 

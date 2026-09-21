@@ -17,7 +17,7 @@ from .mesh_io import Geometry, Mesh
 
 #: Search open-edge paths instead of comparing coordinates to an absolute
 #: distance. A changed model scale must not change whether a junction exists.
-#: Measurements and rejected distance tests: docs/refactor/implementation-evidence.md.
+#: Measurements and rejected distance tests: archive/docs-before-compact-2026-09-19/refactor/implementation-evidence.md.
 
 #: Repeat after a split because the edge map changes; cap pathological cases.
 MAX_ROUNDS = 10
