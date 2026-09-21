@@ -1,11 +1,11 @@
 # Tests and fixtures
 
-Run project Python commands from the repository root with `../.venv/bin/python`.
+Run project Python commands through `tools/project_python.sh`; it selects the project environment and repository root regardless of the caller's current directory.
 
 ```bash
-../.venv/bin/python -m unittest discover -s tests/tests -t . -q -p 'test_*.py'
-../.venv/bin/python -m unittest tests.tests.test_welder
-../.venv/bin/python tests/tests/make_fixtures.py --check
+tools/project_python.sh -m unittest discover -s tests/tests -t . -q -p 'test_*.py'
+tools/project_python.sh -m unittest tests.tests.test_welder
+tools/project_python.sh tests/tests/make_fixtures.py --check
 ```
 
 ## Layout

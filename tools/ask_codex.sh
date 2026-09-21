@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_DIR=$(cd -- "$SCRIPT_DIR/.." && pwd)
+CODEX_EXEC=$("$SCRIPT_DIR/find_codex.sh")
 
 if (($#)); then
     REQUEST=$*
@@ -31,4 +32,4 @@ $REQUEST
 EOF
 )
 
-exec codex exec --cd "$PROJECT_DIR" --sandbox read-only --ephemeral --color never "$PROMPT"
+exec "$CODEX_EXEC" exec --cd "$PROJECT_DIR" --sandbox read-only --ephemeral --color never "$PROMPT"

@@ -31,7 +31,7 @@ Codex must not merely endorse Claude's framing. It should locate contrary reposi
 ## Phase 3: one implementer, one reviewer
 
 1. Claude assigns exactly one implementer. By default Claude implements and Codex reviews. Claude may assign Codex through `tools/run_codex.sh`; if so, Claude reviews and must not also edit the solution.
-2. The implementer completes the agreed plan and runs focused checks with `../.venv/bin/python`.
+2. The implementer completes the agreed plan and runs focused checks through `tools/project_python.sh`, which resolves the project environment independently of the caller's working directory.
 3. The reviewer receives the original prompt, agreed interpretation, agreed plan, changed files, and test results. The reviewer inspects the working-tree diff independently for correctness, completeness, regressions, security, edge cases, tests, and plan compliance.
 4. The reviewer returns `PASS` or concrete findings with file/line evidence. The implementer fixes valid findings; the reviewer checks behavior-changing fixes again.
 5. When both agents agree and relevant checks pass, Claude reports completion automatically.

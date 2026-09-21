@@ -20,18 +20,18 @@ The review records cases where that sequence can still lose geometry or misrepor
 
 ## Work and verification
 
-Run every Python test, fixture generator, or ad hoc script that imports this project with `../.venv/bin/python`, not the system interpreter. `run.sh` and `install.sh` select that environment automatically. From the repository root:
+Run every Python test, fixture generator, or ad hoc script that imports this project through `tools/project_python.sh`, which always selects `/mnt/sda2/python/.venv/bin/python` and changes to the repository root. `run.sh` and `install.sh` select that environment automatically.
 
 ```bash
 # Full suite
-../.venv/bin/python -m unittest discover -s tests/tests -t . -q -p 'test_*.py'
+tools/project_python.sh -m unittest discover -s tests/tests -t . -q -p 'test_*.py'
 
 # One test module
-../.venv/bin/python -m unittest tests.tests.test_welder
+tools/project_python.sh -m unittest tests.tests.test_welder
 
 # Fixture tools
-../.venv/bin/python tests/tests/make_fixtures.py --check
-../.venv/bin/python tools/make_probe_meshes.py tests/probes
+tools/project_python.sh tests/tests/make_fixtures.py --check
+tools/project_python.sh tools/make_probe_meshes.py tests/probes
 ```
 
 Test modules live under `tests/tests/`; legacy pipeline fixtures remain in `tests/fixtures/`, while refactor regression models live in `tests/probes/`. `tests/tests/make_fixtures.py` regenerates and validates both sets. Direct test files, including `tests/tests/test_pipeline.py`, also require the environment interpreter. That pipeline test exercises the **legacy** script and is not refactor coverage. When changing a refactor step, update its focused test and the relevant compact reference or [open issue](docs/refactor/open-issues.md). Keep code comments on local contracts and invariants; keep experiments and rationale in docs.
