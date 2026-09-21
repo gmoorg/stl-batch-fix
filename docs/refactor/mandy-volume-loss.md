@@ -7,6 +7,10 @@ Measured 2026-09-21 against the current tree, on
 This file records findings only. Nothing here has been implemented, and the
 pipeline's steps and their order are unchanged.
 
+> **Keep [discovered bugs](discovered-bugs.md) in step with this file.** It
+> carries the short status of this investigation and Amidara's, and is the page
+> to read — and to update — when either one moves.
+
 ## The verdict
 
 | run | volume kept | verdict |
@@ -324,6 +328,344 @@ of the earlier account or unmeasured questions, rather than new findings here.
 I want to be sure what we run seam detection before CLEAN step not after.
 I recall the conversation what probably was not recorder properly what CLEAN should be a first step after splits completed.
 
+## Full pipeline run, 2026-09-21
+
+`processor.process` on the source at `MAX_FACES=900000`, after the `by_seams`
+fix. It reproduces the archived figures exactly.
+
+| step | faces | open | nm |
+|---|---:|---:|---:|
+| source | 2,061,994 | 84 | 266 |
+| decimate (fastsimp) | 900,000 | — | — |
+| weld | 900,001 | 19 | 102 |
+| clean | 899,940 | 42 | 77 |
+| split | 39 parts, 899,940 kept | — | — |
+| **part 0** | **562,249 → 391,442** (with warnings) | 0 | 0 |
+| parts 1–38 | essentially unchanged | 0 | 0 |
+| merge | 729,026 | 0 | 0 |
+
+`volume_kept = 85.82%`, `lost_vertices = 85,387` — close to the 85,617 hair
+vertices. Part 0 loses 170,807 faces; every other part passes through intact.
+The merged result is topologically clean, which is why only the volume guard
+notices.
+
+### The current pipeline destroys a pristine model, with no seam splitting
+
+Found while investigating the seam change, and more serious than it. The owner
+confirmed visually that `base_CURRENT.stl` — **what the pipeline produces
+today** — is broken, and separately validated that both Amidara sources are
+good.
+
+`Amidara_Blustmorn_1-12_base.stl` on disk is pristine: 315,482 faces,
+**open=0, nm=0, degenerate=0**, one watertight shell, 89.7 × 11.7 × 89.7 mm. It
+has 922 seam edges in 129 closed loops, and is nonetheless orientable. The
+current path returns 279,168 faces at 96.93% — **36,314 faces deleted from a
+model with nothing wrong with it.**
+
+Step by step, no seam splitting anywhere:
+
+| step | faces | open | nm | seam edges | loops | volume |
+|---|---:|---:|---:|---:|---:|---:|
+| source | 315,482 | 0 | **0** | 922 | 129 | 100% |
+| decimate | not needed | 0 | 0 | 922 | 129 | 100% |
+| weld | 315,482 | 0 | 0 | 922 | 129 | 100% |
+| clean: null faces | 315,482 | 0 | 0 | 922 | 129 | 100% |
+| clean: **merge close** | 315,482 | 0 | **2** | 922 | 129 | 100% |
+| clean: dup, unref | 315,482 | 0 | 2 | 922 | 129 | 100% |
+| **orient** | 315,482 | 0 | 2 | **7,658** | **562** | 100% |
+| **pymeshfix** | **279,168** | 0 | 0 | 0 | 0 | **96.93%** |
+
+Two steps damage the mesh before PyMeshFix sees it.
+`meshing_merge_close_vertices` introduces **2 non-manifold edges** where there
+were none. Then `meshing_re_orient_faces_by_geometry` — whose job is to make
+winding consistent — multiplies seam edges **922 → 7,658** and closed loops
+**129 → 562**, leaving the surface far more self-contradictory than it found it.
+
+PyMeshFix then reports the same warning as Mandy's hair:
+
+    WARNING- forceNormalConsistence: Basic_TMesh was not orientable.
+             Cut performed.
+    WARNING- Some cuts were necessary to cope with non manifold configurations.
+
+**But orientation is not the cause, and removing it is not the fix.** Measured:
+
+| path | faces | volume |
+|---|---:|---:|
+| with orientation (current) | 279,168 | 96.93% |
+| without orientation | 279,140 | 97.26% |
+| without CLEAN *and* without orientation | 279,140 | 97.26% |
+
+PyMeshFix deletes ~36,300 faces from the pristine mesh **on its own**, with no
+CLEAN and no orientation involved. The damage our steps do to the winding is
+real and worth fixing, but it accounts for 0.33 percentage points of a 3-point
+loss. The destruction is PyMeshFix's.
+
+What that loss is, geometrically, is unmeasured — 96.93% passes the 0.90 guard,
+so this model is written out as a success today. The owner's inspection is the
+only evidence it is broken, and it outranks the guard.
+
+### The source self-intersects, and nothing in the pipeline measures that
+
+`base` is watertight and manifold — `open=0, nm=0, degenerate=0`, so
+`scanner.Scan.is_clean` calls it perfect — and it is nonetheless geometrically
+invalid: `PyTMesh.select_intersecting_triangles()` reports **22,707
+self-intersecting triangles, 7.20% of the mesh**.
+
+That is what PyMeshFix deletes. `clean()` removes self-intersecting triangles,
+and the 36,342 faces it takes are the cost of removing all of them:
+
+| variant | faces | volume | self-intersections left |
+|---|---:|---:|---:|
+| `clean(1, 1)` | 292,444 | **99.73%** | **6,187** |
+| `clean(1, 3)` | 279,282 | 97.09% | — |
+| `clean(3, 3)` | 279,174 | 97.01% | — |
+| `clean()` = `(10, 3)`, current | 279,174 | 97.01% | — |
+| `fill_small_boundaries(0, True)` + `clean()`, the shipping path | 279,140 | 97.26% | **0** |
+
+So the current settings are not gratuitously destructive: they clear every
+self-intersection. The gentler call keeps 13,300 more faces and 99.73% of the
+volume, but leaves 6,187 self-intersections in the output. Which result is
+better for printing is a question for a slicer and the owner's eye, not for a
+face count — `base_GENTLE.stl` and `base_CURRENT_pmf.stl` are written for that
+comparison.
+
+Everything from `inner_loops=3` upward converges on the same result, so the
+deletion happens in the first pass and the remaining iterations add nothing.
+
+**But self-intersection is not a printing defect here.** The owner sliced the
+untouched source in Bambu Studio: no complaint, and the layer simulation looks
+correct. That is the authoritative test. A slicer converts each layer to 2D
+polygons and resolves overlaps with a fill rule, so self-intersecting geometry
+inside a solid region is absorbed into the union and the toolpath is unchanged.
+Self-intersections matter for boolean operations, offsetting and some mesh
+algorithms; for FDM slicing of a watertight manifold they generally do not.
+
+Half the reported count is also an artifact of how it was measured.
+`select_intersecting_triangles` counts coincident edges and vertices as
+intersections unless `justproper=True`, and on a closed manifold every triangle
+shares edges with its neighbours:
+
+| model | default | `justproper=True` |
+|---|---:|---:|
+| `base` | 22,707 (7.20%) | **11,365 (3.60%)** |
+| `hands_2` | 5,333 (3.54%) | **1,289 (0.86%)** |
+
+So `base` really does have 11,365 self-intersecting triangles. They are real,
+and they are harmless to the one use this project exists to serve.
+
+**The pipeline therefore destroys a printable model to remove a defect that
+does not affect printing.** 36,342 faces deleted, a result the owner confirms
+is visually broken, scored 96.93% — a pass. Per the project's own standard, a
+pipeline that silently loses a meaningful part has failed regardless of what
+its checks report.
+
+These are the arguments the shipping call does not use:
+
+- `clean(max_iters=10, inner_loops=3)` — `libs/meshfix.py` calls `clean()` bare,
+  taking the aggressive default.
+- `fill_small_boundaries(nbe=0, refine=True)` — `nbe=0` means fill **all**
+  boundaries regardless of size, and `refine=True` is what emits `WARNING- Fill
+  holes: Refinement stage failed to converge. Breaking.` on a mesh whose input
+  had no boundaries at all.
+- `select_intersecting_triangles(tris_per_cell=50, justproper=False)` — never
+  called; it reports without deleting, and is what produced the 22,707 figure.
+- `remove_smallest_components()` — takes no arguments and keeps **only the
+  largest component**. The legacy script calls it; `libs/meshfix.py` does not.
+  It measured as a no-op on single-shell `base`, but restoring it would silently
+  discard every secondary shell, which is the failure the shell split exists to
+  prevent.
+
+### The PyMeshFix call did not change between legacy and refactor
+
+The owner recalls PyMeshFix succeeding on this model before. Reading both
+implementations suggested three differences, and **all three are refuted**:
+
+| variant | faces | volume |
+|---|---:|---:|
+| refactor: `load_array` + `fill_small_boundaries` + `clean` | 279,140 | 97.26% |
+| + `remove_smallest_components` (legacy has it, refactor does not) | 279,140 | 97.26% |
+| legacy: `MeshFix(path).repair()`, reading the file | 279,140 | 97.26% |
+| legacy sequence from our arrays | 279,140 | 97.26% |
+| `clean` only, no fill | 279,174 | 97.01% |
+
+Every path deletes ~36,300 faces. The legacy script — the one that worked —
+does the same thing today. So the regression is not in how the call is made:
+
+- **`remove_smallest_components` being missing from `libs/meshfix.py` changes
+  nothing here.** It is still a real divergence from the legacy sequence, which
+  documented itself as replicating `MeshFix.repair()`'s defaults "verified
+  identical on eight meshes", but it does not explain this model.
+- **File vs arrays makes no difference.** `MeshFix(path)` re-welds by coordinate
+  while `load_array` preserves our index table; both give 279,140 faces.
+- **The paired-open-vertex snap legacy performs first cannot apply**: it returns
+  early when there are no open edges, and `base` has `open=0`.
+
+Environment at the time of measurement: pymeshfix 0.18.1 (installed
+2026-08-24), pymeshlab 2025.7.post1 (2026-08-28), numpy 2.5.2, Python 3.12.3.
+No Amidara run appears in the preserved logs, so the earlier success is
+undated — it may have been a different file, a different stage (decimated, or
+as part of a plate), or a different library version. That remains open.
+
+One new signal seen only in these runs: `WARNING- Fill holes: Refinement stage
+failed to converge. Breaking.` alongside the usual non-orientability cut.
+
+### `merge_close_vertices`: measured, and not the cause here
+
+The owner asked whether this filter is needed and what is wrong with it, after
+inspecting the intermediates and reporting that **steps 2, 3 and 5 are visually
+good** while every output containing PyMeshFix is damaged the same way.
+
+**On the two real models it is not needed.** The final repair is identical with
+and without it:
+
+| model | with merge | without merge |
+|---|---|---|
+| `base` | 279,168f, 96.93% | 279,168f, 96.93% |
+| `hands_2` | 145,290f, 100.00% | 145,290f, 100.00% |
+
+**The threshold is scale-wrong.** `threshold: 0.1` is a `PercentageValue` —
+0.1% of the bounding-box diagonal (`meshlab.apply_filters` converts any float
+this way):
+
+| model | diagonal | merge distance | closest distinct vertices | ratio |
+|---|---:|---:|---:|---:|
+| `base` | 127.46 mm | 0.12746 mm | 0.005701 mm | **22.4x** |
+| `hands_2` | 32.29 mm | 0.03229 mm | 0.003240 mm | **10.0x** |
+
+The distance it welds at is an order of magnitude wider than the mesh's own
+finest detail, so it *can* weld across genuine gaps. It is also a different
+physical distance on every model, and 20x different between whole-mesh and
+per-part application (0.1137 mm vs 0.00519 mm on costume01).
+
+**It introduces defects rather than removing them.** On `base` it merges
+exactly **one** vertex (155,710 → 155,709) and that single merge turns
+**nm=0 into nm=2** on a watertight mesh. On `hands_2` it merges nothing. On the
+probes:
+
+| probe | vertices merged | non-manifold |
+|---|---:|---|
+| `sphere_doubles` | 382 | **0 → 1,140** |
+| `sphere_allbad` | 463 | 4 → **1,140** |
+| `sphere_degenerate` | 0 | 1 → 0 |
+
+The archived line "on `doubles`, merging alone left 1,140 non-manifold edges and
+200% volume" reads as justification for keeping duplicate-face removal *after*
+merging. It is better read as a record of the damage merging does, which the
+later filter then has to repair. The only measured case where this filter
+improves topology by itself is `sphere_degenerate`, a synthetic fixture.
+
+**But it is not what breaks `base`.** Removing it changes the result by nothing
+at all, and the owner's inspection of the step-3 output found no visible fault.
+The defects above are real and worth addressing on their own; they are not this
+model's problem.
+
+### Unconditional seam splitting with independent repair breaks real models
+
+Measured 2026-09-21, then **inspected by the owner**, on two `Done/` models
+after WELD → CLEAN → `by_shells`:
+
+| model | current | shells + unconditional seams |
+|---|---|---|
+| `Amidara_..._hands_2` | 145,290f, 100.00% vol, open=0 | 130,958f, 94.17%, **open=6** |
+| `Amidara_..._base` | 279,168f, 96.93% vol, open=0 | 268,733f, 84.05%, **open=141** |
+
+Cost was not the problem: 157 regions repaired in 10.0s — faster than the single
+call at 22.7s — with zero failures and zero empty results. The geometry was.
+
+The differing faces, isolated as `<name>_LOST.stl`: `hands_2` loses 15,017 faces
+spanning 20.2 × 13.8 × 8.3 mm; `base` loses 11,583 faces spanning
+89.7 × 11.6 × 89.7 mm. Neither is debris.
+
+**Owner's visual inspection: `base` is broken outright. `hands_2` reconstructs
+to roughly the right shape but gains an artifact where none should be.** So
+independent repair of seam regions does not merely lose surface — it *invents*
+geometry, which is PyMeshFix capping each open seam boundary into its own closed
+blob. The same mechanism measures 202.96% volume on `sphere_seam`.
+
+Note what the guard did here: it scored `hands_2` at 94.17%, a pass, on a model
+containing a fabricated artifact. That is a guard failure in the unsafe
+direction, like Mandy's `open=0, nm=0` with the hair missing, and it is
+independent of the seam decision.
+
+#### Localised: the harm is the cut, not what follows it
+
+Measured on `base`, isolating each candidate cause:
+
+| mesh | faces | open | volume |
+|---|---:|---:|---:|
+| uncut shell, before repair | 315,482 | **0** | 100.00% |
+| big region after 156 slivers cut out, before repair | 314,808 | **636** | 100.00% |
+| uncut shell repaired (current path) | 279,168 | 0 | **96.93%** |
+| big region repaired alone | 267,976 | 0 | **84.05%** |
+| all regions repaired and merged | 268,733 | 141 | 84.05% |
+
+The slivers are innocent: 156 regions totalling 674 faces, all surviving repair,
+contributing 757 faces out. They cannot account for an 11,583-face loss.
+
+The merge is not the cause either. Both localisations give **exactly 11,583
+faces absent**, whether the comparison is the merged result or the big region
+repaired by itself. The loss is entirely inside the big region's own repair.
+
+Cutting 674 faces of slivers out of a shell with no boundary edges punches
+**636 open edges** into it, with no repair involved. Its solo repair then yields
+84.05% against the uncut shell's 96.93%.
+
+What is *not* established is the mechanism inside PyMeshFix. The obvious
+candidate — `fill_small_boundaries` reconstructing across the new holes — does
+not survive testing: disabling the fill still gives 83.73%, and disabling
+geometric orientation still gives 83.92%. PyMeshFix's **loading** opens both
+inputs anyway (the uncut shell reaches 2,000 open edges on load, the cut region
+3,638), so "the uncut shell has no holes to fill" is false at the stage that
+matters. The loss localises to the changed input interacting with PyMeshFix, not
+to any one filter. The uncut input also has 2 non-manifold edges, so zero
+boundary edges never meant a valid solid.
+
+**Rejoining before repair does work, and an earlier version of this section
+wrongly said it could not.** That claim reasoned about welding *after* repair;
+the archived sequence welds *before*. Tested:
+
+- split → merge → exact coordinate weld restores **315,482 faces, open=0, nm=2**
+  and the original signed volume;
+- per-region orientation → merge → weld also restores **open=0, nm=2**.
+
+So leftover cut boundaries are not inevitable. Repairing that welded result
+gives 275,910 faces at 117.39% volume magnitude, which is not a demonstrated
+success either — it differs from the archive's negative-region-flip experiment.
+**Neither "rejoin cannot help" nor "rejoin fixes it" is established.**
+
+Two further claims to hold loosely. The archive describes Amidara as "129 closed
+loops of 3–6 vertices each, encircling nothing", but the measured cuts *do*
+separate geometry: 922 seam edges / 129 closed loops produce 157 regions, every
+sliver with positive surface area. "No separation" and "small separation" are
+different things. And `by_seams` gates on a closed loop existing, then blocks
+**every** detected seam edge rather than only the loop's, so the 156 slivers do
+not map one-to-one onto the 129 loops. "Does this cut disconnect the face
+graph?" is threshold-free and answerable; "is the separated geometry meaningful"
+is not answered by anything measured here.
+
+The sliver figures likewise prove less than they appear to: 674 faces in and 757
+out shows neither that original faces survived nor that nothing was fabricated.
+And "11,583 faces absent" is a surface difference between two outputs, not
+11,583 physically deleted patches.
+
+### Adding `by_seams` will not change this result
+
+**Owner decision, 2026-09-21: shell and seam splitting are both unconditional
+pipeline steps.** This supersedes the archived rule that `by_seams` is "recovery
+after measured destructive repair; a seam loop alone is not a reason to split"
+(`archive/.../final-behavior.md`). There is no destructiveness precondition and
+no recovery trigger: the pipeline splits by shells, then by seams, always.
+
+That is a structural change, and it is worth being clear that it does not by
+itself rescue Mandy. Measured across all 39 parts of the real pipeline mesh,
+`by_seams` isolates **0 faces** as hair: part 0 has 9 seam edges and **no closed
+loop**, so the call returns at its first guard without cutting.
+
+So after this change the pipeline still detects the destruction — 85.82% against
+a 0.90 threshold — and still loses the hair. Separating it needs a mechanism
+that follows the hair/body boundary; the only candidate measured so far is the
+non-manifold-edge cut, not seams.
+
 ## Investigation of the owner's note, 2026-09-21
 
 Claude and Codex, collaborating. **No pipeline change was made, and none is
@@ -441,6 +783,21 @@ still comes back whole with its seam edges intact.
 does not run along the hair/body boundary, so no placement of `by_seams` reaches
 it. That remains consistent with the non-manifold-edge cut being the mechanism
 that does separate the hair.
+
+#### The saved part file is not what the pipeline produces
+
+Everything above about part 0's seams was measured on the saved
+`mandy_part0_BEFORE.stl`, which has 52 seam edges and 1 closed loop. Run the
+real pipeline instead — source → decimate(900k) → weld → CLEAN → `by_shells` —
+and part 0 has **9 seam edges and 0 closed loops**.
+
+So on the mesh the pipeline actually builds, `by_seams` returns at its first
+guard (`loops == 0`) without attempting a cut. It never reaches the
+`MIN_SHELL_FACES` gate at all. Measured across all 39 parts, enabling
+`by_seams` isolates **0 faces** as hair.
+
+The saved part came from an earlier pipeline state. Any seam claim measured on
+it describes that file, not the current pipeline, and the two differ.
 
 ### The duplicate-shell defect has no known real-world instance
 
