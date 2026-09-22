@@ -106,7 +106,61 @@ smoothed away, even where volume and topology look perfect. Torso was
 accepted as good by inspection; no comparable fine-texture feature to lose
 in that case.
 
-**Status: unfixed, no viable repair identified.**
+## A two-pass recipe that did work, 2026-09-22
+
+Single-ratio bbox scaling (diagonal, or `min(dX,dY,dZ)` alone) does not
+transfer between models — confirmed above and by a further `min(d)`-ratio
+sweep on `Amidara_..._hands_2.stl` (150,656 faces): fitting `N` from
+`min(d)/alpha` on `base`'s own accepted `alpha=0.15` gives `N≈78`, but
+`hands_2`'s `min(d)` (16.52mm) is *larger* than `base`'s (11.73mm) despite
+`hands_2` being the visually smaller model — `base` is flat/thin (one
+short axis), `hands_2` is chunky/cubic, so `min(d)` conflates flatness
+with size. `N=100` and `N=200` on `hands_2` both missed (42.7% and a
+~20x-worse runtime-to-result ratio than the same `N` on `base`).
+
+What worked instead, validated on `base` and `hands_2`:
+
+1. Run `wrap(mesh, alpha=1.0, offset=0.01)` once — fast, deliberately coarse.
+2. Measure the **median** point-to-source-surface distance of that coarse
+   output (CGAL AABB tree over the source, query each output face
+   centroid).
+3. `alpha = min(dX,dY,dZ) * median_distance_from_step_2`
+4. `offset = alpha / 2`
+
+| model | median@(a=1,o=0.01) | alpha | offset | time | faces out | vs. source | volume |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `base` | 0.0100mm | 0.1173 | 0.0587 | 153.5s | 1,659,236 | 525.9% | 101.98% |
+| `hands_2` | 0.0065mm | 0.1074 | 0.0537 | 19.9s | 152,262 | **101.1%** | 104.20% |
+
+`hands_2` landed almost exactly on source face count, fastest run yet, and
+the owner confirmed fingers survived — accepted as "the best result I
+would ever get." Only 2 data points, both from the same source figure and
+the same rough size class (tens of millimeters) — not yet tested on an
+unrelated model or a very different scale.
+
+**Open caveat, not (per the owner) a fatal one**: step 1's coarse pass uses
+fixed absolute values (`alpha=1.0, offset=0.01`), not scaled to the model —
+untested whether it still produces a usable baseline (rather than an
+empty/near-empty result, or one too fine to count as "coarse") on a model
+much smaller or larger than Amidara's parts. The owner's framing: this is
+a two-wrap process regardless, so step 1 only needs *some* rough initial
+alpha/offset that doesn't fail outright — not that `1.0/0.01` specifically
+is universal.
+
+**Caveat on the AABB metric itself, found via the same coarse `alpha=1`
+baseline used in step 1**: `alpha=1, offset=0.01` alone scores *excellently*
+on AABB distance (median 0.0065–0.0100mm, >85% of faces within 0.02mm of
+the source surface) despite collapsing to as little as 8.5% of source face
+count on `hands_2` — almost certainly destroying the fingers. AABB
+distance only measures how far surviving geometry sits from the source; a
+deleted feature leaves nothing to be "far" from, so whole-feature loss is
+invisible to it. Face-count collapse is what actually flags this failure
+mode; AABB distance said nothing was wrong. Do not use AABB distance alone
+as a validation gate.
+
+**Status: a working recipe exists (above), not yet generalized past 2
+models of the same figure; no viable *surgical* repair (preserving the
+exact source triangulation) identified.**
 → [Amidara](amidara-clean-destroys.md)
 
 ## What CLEAN steps 9 and 10 are worth
