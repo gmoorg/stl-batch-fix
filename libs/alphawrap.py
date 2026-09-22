@@ -1,21 +1,10 @@
 """Reconstruct a mesh as a watertight, manifold solid via CGAL Alpha Wrapping.
 
-`pip install cgal` (SWIG bindings over the CGAL C++ library; observed as a
-prebuilt wheel on this environment, but that is platform- and Python-version
-dependent, not a portable guarantee). Not currently installed by `install.sh`
-and not wired into `repairer` — this module is experimental and unadopted.
-
-Alpha Wrapping is fundamentally different from every other tool module here:
-it *reconstructs* the surface at a resolution controlled by `alpha` rather
-than editing the existing triangulation, so the output does not share
-vertices, indices, or exact geometry with the input. What it guarantees
-unconditionally is topology — watertight, 2-manifold, free of
-self-intersections, output triangle count and fidelity are not guaranteed at
-all. There is no known formula deriving `alpha`/`offset` from a mesh's own
-properties (checked against CGAL's own documentation): two real models
-measured outside this module needed ratios of the bounding-box diagonal that
-disagreed by more than 2x from each other, so callers must supply both
-values themselves rather than rely on a default tuned for one model.
+The default repair step uses the owner-selected whole-mesh diagonal recipe:
+alpha=diag/800, offset=diag/2000. See docs/refactor/discovered-bugs.md,
+"Settled diagonal-ratio recipe", for measurements and visual confirmation.
+Reconstruction guarantees topology, not fidelity or a triangle budget.
+CGAL Alpha Wrapping is a required dependency installed by install.sh.
 """
 
 from __future__ import annotations
@@ -24,6 +13,7 @@ import math
 
 import numpy as np
 
+from . import pipeconfig
 from .mesh_io import Geometry, Mesh, require_geometry
 
 try:
@@ -95,8 +85,8 @@ def wrap(mesh: Mesh, alpha: float, offset: float) -> Mesh:
     `alpha` is, loosely, the radius of the largest probe that can still fit
     through a gap or feature — smaller keeps more detail, at a steep cost in
     triangle count and runtime. `offset` is the maximum distance the output
-    surface is allowed from the input. Neither has a known formula; both must
-    be chosen per mesh (see the module docstring).
+    surface is allowed from the input. The low-level caller supplies both; the default step uses the
+    measured whole-mesh recipe (see the module docstring).
 
     Raises `ValueError` if `mesh` has no loaded geometry, if `alpha` or
     `offset` is not a finite positive number, if the `cgal` package is not
@@ -126,3 +116,21 @@ def wrap(mesh: Mesh, alpha: float, offset: float) -> Mesh:
 
     geometry = _polyhedron_to_geometry(out)
     return mesh.with_geometry(geometry)
+
+
+def step_alpha_wrap(mesh: Mesh, *, whole_diagonal: float | None = None
+                    ) -> tuple[bool, Mesh, str]:
+    """Wrap one part using the pre-split whole mesh's diagonal."""
+    if not pipeconfig.ENABLE_ALPHA_WRAP:
+        return True, mesh, 'skipped (ENABLE_ALPHA_WRAP=False)'
+    try:
+        if whole_diagonal is None:
+            raise ValueError('whole_diagonal is required for alpha wrapping')
+        diagonal = float(whole_diagonal)
+        if not math.isfinite(diagonal) or diagonal <= 0:
+            raise ValueError('whole_diagonal must be finite and positive')
+        alpha, offset = diagonal / 800.0, diagonal / 2000.0
+        result = wrap(mesh, alpha, offset)
+        return True, result, f'alpha={alpha}, offset={offset}'
+    except Exception as exc:
+        return False, mesh, f'{type(exc).__name__}: {exc}'

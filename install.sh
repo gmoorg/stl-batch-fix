@@ -65,6 +65,23 @@ else
     }
 fi
 
+# ── CGAL Alpha Wrapping ───────────────────────────────────────────────────────
+echo "→ cgal (Alpha Wrapping)"
+if "$PYTHON" -c "from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3" 2>/dev/null; then
+    ok "cgal Alpha Wrapping already installed"
+else
+    warn "cgal Alpha Wrapping not found — installing..."
+    "$PYTHON" -m pip install cgal || {
+        fail "cgal install failed — it is REQUIRED for default repair"
+        exit 1
+    }
+    "$PYTHON" -c "from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3" 2>/dev/null || {
+        fail "cgal Alpha Wrapping import failed — it is REQUIRED for default repair"
+        exit 1
+    }
+    ok "cgal Alpha Wrapping installed"
+fi
+
 # ── scipy ─────────────────────────────────────────────────────────────────────
 # Connected-component analysis (shell detection) via scipy.sparse.csgraph.
 # Measured on Mandy_Body_Dinamuuu3D.stl against the per-face Python union-find

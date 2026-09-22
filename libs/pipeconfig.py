@@ -10,13 +10,10 @@ before calling `repair`, not per part. Several are recorded elsewhere as
 docs/refactor/discovered-bugs.md) and the argument for or against a step was
 settled by running the pipeline without it — that is what these exist for.
 
-All default `True` except `ENABLE_SPLIT_SEAMS`. Most of these matched the
-shipping behaviour exactly when this module was created; `ENABLE_BLENDER_PART`
-is the exception — it puts Blender's per-part repair into the default
-sequence for the first time (owner decision, 2026-09-21; see its own note
-below and docs/refactor/open-issues.md). A disabled step still appears in
-`Result.steps`, with `detail` saying it was skipped, so a log never silently
-omits a stage.
+All default `True` except `ENABLE_SPLIT_SEAMS`. The current default route
+uses only shell splitting and alpha wrapping; the other tool flags remain
+available to explicit callers. The older per-flag notes below record the
+experiments that introduced them, not the currently wired sequence.
 
 ## The step contract
 
@@ -28,11 +25,9 @@ shares one signature: `(mesh: Mesh) -> tuple[bool, Mesh, str]`. A function
 defined in another module names that module in its own name
 (`step_<module>_<action>`); one defined in `meshlab.py` does not repeat
 "meshlab" since the module qualifier already says that (`step_<action>`).
-`repairer` composes all of them, in the order `WHOLE_MESH_STEPS` and
-`_repair_part` list, without a step-specific case because of this shared
-shape — naming a specific tool's filters or parameters is that tool's own
-module's job, not `repairer`'s. Each function's own docstring covers only
-what is specific to it; the shared parts are here, once:
+`repairer` composes uniform calls from its authoritative step tuples. Alpha
+wrapping additionally accepts a keyword-only whole_diagonal, bound per repair
+call before splitting. Each step checks its own flag and handles exceptions.
 
 - `ok=True` means the step *ran* (or was intentionally skipped), never that
   the resulting mesh is printable — a tool can succeed and still hand back
@@ -119,3 +114,8 @@ ENABLE_FILL_BOUNDARIES = True
 
 # each step should have it own flag! No master switch!
 ENABLE_CLEAN = True
+
+#: Default repair: alpha=whole diagonal/800, offset=whole diagonal/2000.
+#: Measured and visually confirmed on base, hands_2, and Torso (2026-09-22):
+#: docs/refactor/discovered-bugs.md, "Settled diagonal-ratio recipe".
+ENABLE_ALPHA_WRAP = True

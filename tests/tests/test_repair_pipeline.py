@@ -1,4 +1,7 @@
-"""End-to-end tests for the repair sequence, against known-correct answers.
+"""End-to-end regressions for the explicitly configured historical tool sequence.
+
+The default alpha-wrap sequence is covered by test_repairer/test_alphawrap;
+these preserve exact face/vertex expectations for the retained old tools.
 
 Separate from `tests/tests/test_repairer.py`, which tests the sequence's *structure* with
 step 4 stubbed out. This runs the real tools on real defective meshes and asks
@@ -28,8 +31,9 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
-from libs import blender, mesh_io, meshfix, meshlab, repairer, scanner
+from libs import blender, mesh_io, meshfix, meshlab, repairer, scanner, welder
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEST_ROOT = os.path.dirname(HERE)
@@ -68,7 +72,7 @@ MULTI_SHELL = {
     'shell_inverted': CONTROL_VOLUME * 1.125,
 }
 
-#: This file runs the real default sequence end to end (orient, Blender,
+#: This file explicitly configures the historical sequence (orient, Blender,
 #: PyMeshFix), so it needs all of PyMeshLab, PyMeshFix, and Blender — unlike
 #: `test_repairer.py`'s narrower `needs_tools`, which most of its tests
 #: don't need since they mock the tool-level steps directly.
@@ -84,6 +88,23 @@ def load(name):
 @unittest.skipUnless(HAVE_TOOLS, "pymeshlab and pymeshfix are both needed")
 class ProbeCase(unittest.TestCase):
     """Base: ensures the fixtures exist before anything runs."""
+
+    def setUp(self):
+        # These historical geometry regressions assert the old tools' exact
+        # face/vertex behavior. Keep testing that explicit sequence; alpha
+        # reconstruction has no vertex correspondence (test_alphawrap).
+        whole = (('weld', welder.step_weld_close_tjunctions),
+                 ('clean_null_faces', meshlab.step_clean_null_faces),
+                 ('clean_merge_close', meshlab.step_clean_merge_close),
+                 ('clean_duplicate_faces', meshlab.step_clean_duplicate_faces),
+                 ('clean_unreferenced', meshlab.step_clean_unreferenced))
+        parts = (('step_orient', meshlab.step_orient),
+                 ('step_blender_repair', blender.step_blender_repair),
+                 ('step_meshfix_repair', meshfix.step_meshfix_repair))
+        for name, value in (('WHOLE_MESH_STEPS', whole), ('PART_MESH_STEPS', parts)):
+            patcher = mock.patch.object(repairer, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     @classmethod
     def setUpClass(cls):
@@ -385,7 +406,6 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
                                    f"no fixture exercises {stage}")
 
 
-@unittest.skipUnless(HAVE_TOOLS, "pymeshlab and pymeshfix are both needed")
 class TestToleranceScaling(unittest.TestCase):
     """Scale independence — **fixed 2026-09-17, kept as the guard.**
 

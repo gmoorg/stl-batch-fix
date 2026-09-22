@@ -1,17 +1,8 @@
 """Apply the current mesh repair sequence without writing a file.
 
-`repair` welds T-junctions, runs duplicate cleanup before splitting, splits
-edge-connected shells, orients each part, repairs each with Blender then
-PyMeshFix by default, then merges and reports measurements.
-`splitter.by_seams` is not in the default sequence — see
-`pipeconfig.ENABLE_SPLIT_SEAMS`. `processor` judges the result;
-`repairer.ok` only means the sequence completed. Pass
-`tool=blender.step_blender_repair` to `repair()` for Blender-only repair —
-it already has the uniform signature `tool=` requires, no wrapper needed.
-This module owns operation order, `Step` classification, measurement
-recording, and split/merge orchestration; naming a specific tool's filters
-or parameters belongs to that tool's own module (`meshlab`, `welder`,
-`blender`, `meshfix`) — see each uniform `step_*` function there.
+`repair` splits edge-connected shells, alpha-wraps each retained part using
+one whole-mesh diagonal, then merges and records measurements. `processor`
+judges the result. Explicit `tool=` overrides replace the per-part sequence.
 """
 
 from __future__ import annotations
@@ -20,11 +11,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import blender, meshfix, meshlab, pipeconfig, scanner, splitter, welder
+from . import alphawrap, pipeconfig, scanner, splitter
 from .mesh_io import Mesh, require_geometry
 
 # Should we move it in to pipe config? 
@@ -43,25 +35,17 @@ class Step(Enum):
 #: tuple, read top to bottom, IS the order of operation. Each function is a
 #: uniform `(mesh) -> (ok, mesh, detail)` step owned by the module that
 #: knows its mechanics; `repairer` only sequences them.
-WHOLE_MESH_STEPS: tuple[tuple[str, Callable[[Mesh], tuple[bool, Mesh, str]]], ...] = (
-    ('weild', welder.step_weld_close_tjunctions),
-    ('clean_null_faces', meshlab.step_clean_null_faces),
-    ('clean_merge_close', meshlab.step_clean_merge_close),
-    ('clean_duplicate_faces', meshlab.step_clean_duplicate_faces),
-    ('clean_unreferenced', meshlab.step_clean_unreferenced),
-)
+WHOLE_MESH_STEPS: tuple[tuple[str, Callable[[Mesh], tuple[bool, Mesh, str]]], ...] = ()
 
 #: The per-part steps `_repair_part` runs, in order — visible the same way
 #: `WHOLE_MESH_STEPS` is, rather than an anonymous tuple inline in the
 #: function body. Tests that need to substitute one of these must patch
 #: `repairer.PART_MESH_STEPS` itself (e.g. with `mock.patch.object`), not
 #: the origin module's attribute: this tuple captures the function objects
-#: once, at import time, so patching `blender.step_blender_repair` after
+#: once, at import time, so patching `alphawrap.step_alpha_wrap` after
 #: import does not change what an already-built tuple holds.
 PART_MESH_STEPS: tuple[tuple[str, Callable[[Mesh], tuple[bool, Mesh, str]]], ...] = (
-    ('step_orient', meshlab.step_orient),
-    ('step_blender_repair', blender.step_blender_repair),
-    ('step_meshfix_repair', meshfix.step_meshfix_repair),
+    ('step_alpha_wrap', alphawrap.step_alpha_wrap),
 )
 
 #: Allow float re-rounding when counting retained vertices. This absolute
@@ -234,23 +218,15 @@ def _run_step(step: Step,
     return _StepOutcome(ok, mesh, full_detail)
 
 
-def _repair_part(part: Mesh) -> tuple[bool, Mesh, str]:
-    """Orient one split part, repair it in Blender, then repair it with
-    PyMeshFix — the default per-part sequence, composed from the uniform
-    `(mesh) -> (ok, mesh, detail)` calls in `PART_MESH_STEPS`.
+def _repair_part(part: Mesh, steps=None) -> tuple[bool, Mesh, str]:
+    """Run the supplied sequence, or read PART_MESH_STEPS at call time.
 
-    Stops at the first `ok=False`: a part that could not be repaired is
-    still defective geometry, and continuing to the next stage or merging it
-    back in would produce a mesh that measures plausibly and is not a
-    repair. Each stage's own flag (`pipeconfig.ENABLE_ORIENT`,
-    `ENABLE_BLENDER_PART`, `ENABLE_PART_TOOL`) is checked inside that
-    stage's own step function, not here — this is composition only. The
-    caller (`repair`'s per-part loop) records the whole part as ONE
-    `Step.PART` entry, not one per sub-step here — `_repair_part` only
-    accumulates detail text, it does not call `_record_step` itself.
+    Stop on failure and accumulate detail; repair records one PART result.
     """
+    if steps is None:
+        steps = PART_MESH_STEPS
     notes = []
-    for step_name, step_fn in PART_MESH_STEPS:
+    for step_name, step_fn in steps:
         ok, part, detail = step_fn(part)
         notes.append(_named_detail(step_name, detail))
         if not ok:
@@ -260,34 +236,14 @@ def _repair_part(part: Mesh) -> tuple[bool, Mesh, str]:
 # why we allow overriden repair tools but not prep steps?
 def repair(mesh: Mesh,
            min_shell_faces: int = splitter.MIN_SHELL_FACES,
-           tool: Callable[[Mesh], tuple[bool, Mesh, str]] = _repair_part,
+           tool: Callable[[Mesh], tuple[bool, Mesh, str]] | None = None,
            ) -> Result:
-    """Run weld, clean, split, per-part repair, and merge on a loaded mesh.
+    """Split, wrap each part, and merge; no file is written.
 
-    No file is written and `ok` is not a clean-mesh verdict. The default
-    per-part sequence is orient, then Blender, then PyMeshFix; `tool` can
-    replace the whole per-part sequence, including with
-    `blender.step_blender_repair` directly for Blender alone — it already
-    has the signature this parameter requires. This injection point
-    bypasses the built-in sequence
-    entirely — a custom `tool` does not get orientation, Blender, or
-    PyMeshFix unless it calls them itself. Defect-based routing between
-    Blender and PyMeshFix within the default sequence is not implemented; the
-    default always runs both, in that order. A failure returns `ok=False`
-    with the mesh reached at failure, which may be an intermediate after
-    earlier steps.
-
-    A tool reports a part it could not repair with `ok=False` as the first
-    element of its `(ok, mesh, detail)` return; that stops the run. Raising
-    works too and is reported the same way — every built-in step catches its
-    own tool's exceptions and converts them to `ok=False`, so a custom `tool`
-    is expected to do the same rather than let one escape uncaught.
+    A non-None tool replaces the default sequence and bypasses diagonal
+    calculation and binding. A failed step stops the run with its evidence.
     """
     require_geometry(mesh)
-
-    # this should not be here! it should be a the one of the first command in processor module
-    if not meshlab.is_available():
-        return _failed(mesh, "pymeshlab is not installed")
 
     started = time.monotonic()
     faces_in = len(mesh.geometry.faces)
@@ -302,12 +258,16 @@ def repair(mesh: Mesh,
     destination = mesh.destination
 
     try:
-        #  Whole-mesh steps, in the order WHOLE_MESH_STEPS lists them:
-        #  weld T-junctions, then the four CLEAN filters (duplicates
-        #  before the split, so deduplication sees both copies). Each is
-        #  its own step: its own flag, its own log entry, its own failure
-        #  — not one aggregate CLEAN entry, so a filter's contribution can
-        #  be attributed rather than inferred from a joined string.
+        if tool is None:
+            verts = mesh.geometry.verts.astype(np.float64)
+            whole_diagonal = float(np.linalg.norm(np.ptp(verts, axis=0)))
+            bound_steps = tuple(
+                (name, partial(fn, whole_diagonal=whole_diagonal)
+                 if fn is alphawrap.step_alpha_wrap else fn)
+                for name, fn in PART_MESH_STEPS)
+            tool = partial(_repair_part, steps=bound_steps)
+
+        # Whole-mesh sequence is empty by default.
         for step_name, step_fn in WHOLE_MESH_STEPS:
             outcome = _run_step(Step.PREP, step_name, step_fn, mesh, steps)
             mesh = outcome.mesh
@@ -321,9 +281,7 @@ def repair(mesh: Mesh,
 
         #  Should splitter's steps be moved into splitter and have a ([mesh ...] )  -> ok, [mesh ...], outcome signature or something like that?  
 
-        #  Split, repair each part, merge.  PyMeshFix rebuilds one manifold
-        #  surface and discards the rest, so a multi-shell mesh reaching it
-        #  whole comes back as its largest shell alone.
+        # Split, repair each retained part, then merge.
         mark = time.monotonic()
         was = len(mesh.geometry.faces)
         if pipeconfig.ENABLE_SPLIT_SHELLS:

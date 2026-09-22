@@ -194,5 +194,45 @@ class TestWrap(unittest.TestCase):
                     wrap(self.mesh, self.alpha, self.offset)
 
 
+
+
+class TestStep(unittest.TestCase):
+    def test_disabled_skips_before_parameters_or_cgal(self):
+        with mock.patch.object(alphawrap.pipeconfig, 'ENABLE_ALPHA_WRAP', False), \
+             mock.patch.object(alphawrap, 'wrap') as wrapped:
+            ok, result, detail = alphawrap.step_alpha_wrap(_unloaded())
+        self.assertTrue(ok)
+        self.assertIn('skipped', detail)
+        wrapped.assert_not_called()
+
+    def test_invalid_diagonals_fail_without_raising(self):
+        m = _mesh(*_sphere(0))
+        for diagonal in (None, 0, -1, math.nan, math.inf, 'invalid'):
+            with self.subTest(diagonal=diagonal):
+                ok, result, detail = alphawrap.step_alpha_wrap(m, whole_diagonal=diagonal)
+                self.assertFalse(ok)
+                self.assertIs(result, m)
+                self.assertTrue(detail)
+
+    def test_missing_cgal_is_a_step_failure(self):
+        m = _mesh(*_sphere(0))
+        with mock.patch.object(alphawrap, '_CGAL', False):
+            ok, result, detail = alphawrap.step_alpha_wrap(m, whole_diagonal=10)
+        self.assertFalse(ok)
+        self.assertIs(result, m)
+        self.assertIn('cgal', detail)
+
+    def test_recipe_and_exception_contract(self):
+        m = _mesh(*_sphere(0))
+        with mock.patch.object(alphawrap, 'wrap', return_value=m) as wrapped:
+            self.assertTrue(alphawrap.step_alpha_wrap(m, whole_diagonal=80)[0])
+        wrapped.assert_called_once_with(m, 0.1, 0.04)
+        with mock.patch.object(alphawrap, 'wrap', side_effect=RuntimeError('boom')):
+            ok, result, detail = alphawrap.step_alpha_wrap(m, whole_diagonal=80)
+        self.assertFalse(ok)
+        self.assertIs(result, m)
+        self.assertIn('boom', detail)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
