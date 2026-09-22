@@ -102,6 +102,8 @@ ENABLE_BLENDER_PART = True
 #: the part through untouched by PyMeshFix specifically (Blender's own step
 #: still runs if its own flag allows) — the control for measuring what
 #: PyMeshFix costs on top of whatever came before it.
+
+# each step should have it own flag! No master switch!
 ENABLE_PART_TOOL = True
 
 #: 15a. Close boundary loops before cleaning. `nbe=0` means *every* boundary
@@ -114,4 +116,6 @@ ENABLE_FILL_BOUNDARIES = True
 #: watertight Amidara base, 99.6% of that loss being self-intersection
 #: removal cascading through retriangulation.
 #: See docs/refactor/amidara-clean-destroys.md.
+
+# each step should have it own flag! No master switch!
 ENABLE_CLEAN = True

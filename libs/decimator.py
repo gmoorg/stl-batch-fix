@@ -13,7 +13,7 @@ from enum import Enum
 import numpy as np
 
 from . import mesh_io
-from .mesh_io import Geometry, Mesh
+from .mesh_io import Geometry, Mesh, require_geometry
 
 try:
     import fast_simplification as _fastsimp
@@ -92,9 +92,7 @@ def decimate(mesh: Mesh, max_faces: int) -> Result:
     Raises `ValueError` if the mesh is not loaded — that is a programming error
     at the call site, not a property of the data.
     """
-    if mesh.geometry is None:
-        raise ValueError(
-            f"{mesh.path} has no geometry — load it before decimating")
+    require_geometry(mesh)
 
     faces_in = len(mesh.geometry.faces)
     if max_faces <= 0 or faces_in <= max_faces:

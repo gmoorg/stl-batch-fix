@@ -149,9 +149,7 @@ def process(mesh: Mesh, max_faces: int,
     Raises `ValueError` if the mesh is not loaded — a programming error at the
     call site.
     """
-    if mesh.geometry is None:
-        raise ValueError(f"{mesh.path} has no geometry — load it first")
-
+    mesh_io.require_geometry(mesh)
     decimated = decimator.decimate(mesh, max_faces)
     if decimated.rung is decimator.Rung.FAILED:
         # Its own outcome, not a lesser repair failure.  A file that cannot be
@@ -180,6 +178,10 @@ def write(outcome: Outcome, source_path: str, output_file: str) -> str | None:
     than one that is merely unrepaired.
     """
     if outcome.is_clean:
+        # `Outcome.mesh` is `Mesh | None` — this is the only path that reads
+        # it, so the guard belongs here. `outcome.repair.mesh` below is a
+        # different field, on `repairer.Result`, which is not Optional, so
+        # it needs no equivalent check.
         if outcome.mesh is None:                       # pragma: no cover
             raise ValueError("a clean outcome must carry a mesh")
         mesh_io.write(outcome.mesh.with_destination(output_file))

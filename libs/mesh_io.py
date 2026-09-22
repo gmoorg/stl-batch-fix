@@ -373,8 +373,7 @@ def write(mesh: Mesh) -> None:
     There is no path override: output and marker names must agree. Face normals
     are computed from winding; degenerate faces receive zero normals.
     """
-    if mesh.geometry is None:
-        raise ValueError(f"{mesh.path} has no geometry to write — load it first")
+    require_geometry(mesh)
     path = mesh.destination
 
     verts, faces = mesh.geometry.verts, mesh.geometry.faces
@@ -425,8 +424,7 @@ def write_ply(mesh: Mesh, path: str) -> None:
     subprocess boundary. `path` is explicit because this is a temporary file,
     not `mesh.destination`.
     """
-    if mesh.geometry is None:
-        raise ValueError(f"{mesh.path} has no geometry to write — load it first")
+    require_geometry(mesh)
 
     verts = np.ascontiguousarray(mesh.geometry.verts, dtype=np.float32)
     faces = np.ascontiguousarray(mesh.geometry.faces, dtype=np.uint32)

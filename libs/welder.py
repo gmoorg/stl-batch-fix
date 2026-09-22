@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import pipeconfig
-from .mesh_io import Geometry, Mesh
+from .mesh_io import Geometry, Mesh, require_geometry
 
 #: Search open-edge paths instead of comparing coordinates to an absolute
 #: distance. A changed model scale must not change whether a junction exists.
@@ -292,8 +292,7 @@ def find(mesh: Mesh) -> tuple[TJunction, ...]:
     gets a number that can be too low.  It is never too high, so a non-zero
     answer always means there is real work to do.
     """
-    if mesh.geometry is None:
-        raise ValueError(f"{mesh.path} has no geometry — load it first")
+    require_geometry(mesh)
     verts = mesh.geometry.verts.astype(np.float64)
     faces = [list(t) for t in mesh.geometry.faces.tolist()]
     return tuple(_find_in(verts, faces).values())
@@ -314,9 +313,7 @@ def repair(mesh: Mesh, max_rounds: int = MAX_ROUNDS) -> Result:
     a previous split replaced has to be re-found.  Two rounds suffice on 150
     scattered junctions, the second finding nothing.
     """
-    if mesh.geometry is None:
-        raise ValueError(f"{mesh.path} has no geometry — load it first")
-
+    require_geometry(mesh)
     verts = mesh.geometry.verts.astype(np.float64)
     faces = [list(t) for t in mesh.geometry.faces.tolist()]
     splits = 0

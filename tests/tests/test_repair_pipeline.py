@@ -29,7 +29,7 @@ import subprocess
 import sys
 import unittest
 
-from libs import mesh_io, repairer, scanner
+from libs import blender, mesh_io, meshfix, meshlab, repairer, scanner
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEST_ROOT = os.path.dirname(HERE)
@@ -68,7 +68,12 @@ MULTI_SHELL = {
     'shell_inverted': CONTROL_VOLUME * 1.125,
 }
 
-HAVE_TOOLS = repairer.is_available()
+#: This file runs the real default sequence end to end (orient, Blender,
+#: PyMeshFix), so it needs all of PyMeshLab, PyMeshFix, and Blender — unlike
+#: `test_repairer.py`'s narrower `needs_tools`, which most of its tests
+#: don't need since they mock the tool-level steps directly.
+HAVE_TOOLS = (meshlab.is_available() and meshfix.is_available()
+              and blender.is_available())
 
 
 def load(name):
@@ -316,7 +321,9 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
 
     def test_a_clean_mesh_needs_no_welding(self):
         result = repairer.repair(load('correct'))
-        weld = [s for s in result.steps if s.step is repairer.Step.WELD][0]
+        weld_name = repairer.WHOLE_MESH_STEPS[0][0]
+        weld = [s for s in result.steps if s.step is repairer.Step.PREP
+               and s.detail.startswith(f'{weld_name}:')][0]
         self.assertIn('0 junction', weld.detail)
 
     def test_orientation_runs_on_every_part_of_every_fixture(self):
@@ -340,8 +347,10 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
         """Measured: splitting first left `doubles` at 200% volume in 2
         shells, because each copy became its own part."""
         result = repairer.repair(load('doubles'))
+        last_clean_name = repairer.WHOLE_MESH_STEPS[-1][0]
         clean = [s for s in result.steps
-                if s.step is repairer.Step.CLEAN_UNREFERENCED][0]
+                if s.step is repairer.Step.PREP
+                and s.detail.startswith(f'{last_clean_name}:')][0]
         split = [s for s in result.steps if s.step is repairer.Step.SPLIT][0]
         self.assertEqual(clean.faces_out, CONTROL_FACES)
         self.assertEqual(split.faces_in, CONTROL_FACES)
@@ -356,11 +365,14 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
         the same day — had never executed under test. This fails if that
         happens again.
         """
+        weld_name = repairer.WHOLE_MESH_STEPS[0][0]
         exercised = {'weld': 0, 'split': 0, 'orient': 0, 'merge': 0}
         for name in FIXTURES:
             result = repairer.repair(load(name))
             for step in result.steps:
-                if step.step is repairer.Step.WELD and '0 junction' not in step.detail:
+                if (step.step is repairer.Step.PREP
+                        and step.detail.startswith(f'{weld_name}:')
+                        and '0 junction' not in step.detail):
                     exercised['weld'] += 1
                 elif step.step is repairer.Step.PART and 'oriented' in step.detail:
                     exercised['orient'] += 1

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import pipeconfig
-from .mesh_io import Geometry, Mesh
+from .mesh_io import Geometry, Mesh, require_geometry
 
 try:
     import pymeshfix as _pymeshfix
@@ -119,9 +119,7 @@ def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
     about. With both off this loads and returns the arrays unchanged, which
     is the control.
     """
-    if mesh.geometry is None:
-        raise ValueError(
-            f"{mesh.path} has no geometry — load it before repairing")
+    require_geometry(mesh)
     if not _AVAILABLE:
         return Result(mesh, False, "pymeshfix is not installed", '', '', 0.0)
 

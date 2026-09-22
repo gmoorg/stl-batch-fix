@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from . import pipeconfig
-from .mesh_io import Geometry, Mesh
+from .mesh_io import Geometry, Mesh, require_geometry
 
 try:
     import pymeshlab as _pymeshlab
@@ -50,9 +50,7 @@ def apply_filters(mesh: Mesh,
     Float parameters are interpreted as percentages because that is the
     contract used by the filter policy in the repair pipeline.
     """
-    if mesh.geometry is None:
-        raise ValueError(
-            f"{mesh.path} has no geometry — load it before filtering")
+    require_geometry(mesh)
     ms = _pymeshlab.MeshSet()
     ms.add_mesh(to_mesh(mesh.geometry))
     for name, params in filters:

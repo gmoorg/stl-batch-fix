@@ -31,7 +31,8 @@ from unittest import mock
 
 import numpy as np
 
-from libs import blender, meshfix, meshlab, pipeconfig, repairer, scanner
+from libs import blender, meshfix, meshlab, pipeconfig, repairer, scanner, \
+    welder
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.repairer import Result, Step, StepResult, repair
 
@@ -50,10 +51,11 @@ CLEAN_FILTERS_COMBINED: tuple[tuple[str, dict], ...] = (
     ('meshing_remove_unreferenced_vertices', {}),
 )
 
-#: PyMeshLab + PyMeshFix only, deliberately not `repairer.is_available()` —
-#: that now also depends on `pipeconfig.ENABLE_BLENDER_PART` and Blender's
-#: own availability, which would silently widen this guard on a machine
-#: without Blender and skip tests that never touch it.
+#: PyMeshLab + PyMeshFix only. `repairer` no longer has its own
+#: `is_available()` — Blender/fast_simplification/PyMeshFix/PyMeshLab are
+#: hard requirements, so that check belongs at startup, not per-module (see
+#: open-issues.md). Kept separate from Blender's own `needs_blender` below
+#: so a machine without Blender does not skip tests that never touch it.
 HAVE_TOOLS = meshlab.is_available() and meshfix.is_available()
 needs_tools = unittest.skipUnless(
     HAVE_TOOLS, "pymeshlab and pymeshfix are both needed")
@@ -123,14 +125,9 @@ class TestContract(unittest.TestCase):
             result.faces_out = 9
 
     def test_step_result_is_immutable(self):
-        step = StepResult(Step.WELD, 4, 4, 'none', 0.0)
+        step = StepResult(Step.PREP, 4, 4, 'none', 0.0)
         with self.assertRaises(Exception):
             step.faces_in = 9
-
-    def test_do_not_retry_names_are_documented(self):
-        """Each entry must carry why, or it is a list nobody can act on."""
-        for name, reason in repairer.DO_NOT_RETRY.items():
-            self.assertTrue(reason.strip(), f"{name} has no reason recorded")
 
     def _clean_filter_calls(self):
         """The (name, params) PyMeshLab filter calls the actual CLEAN steps
@@ -148,17 +145,37 @@ class TestContract(unittest.TestCase):
         m = tetra()
         with mock.patch.object(meshlab, 'apply_filters',
                                recording_apply_filters):
-            for step_enum, step_fn in repairer.WHOLE_MESH_STEPS:
-                if step_enum is Step.WELD:
+            for step_name, step_fn in repairer.WHOLE_MESH_STEPS:
+                if step_fn is welder.step_weld_close_tjunctions:
                     continue
                 step_fn(m)
         return calls
 
     def test_remove_t_vertices_is_not_in_the_clean_set(self):
-        """It reduced a 910-face mesh to zero faces reporting nm=0 open=0."""
+        """`meshing_remove_t_vertices` must never come back into the CLEAN
+        set: at threshold >= 10 it is a no-op, and at <= 1 it reduced a
+        910-face mesh to ZERO faces while reporting nm=0 open=0 — a clean
+        empty mesh. `welder` owns T-junction repair instead.
+        """
         names = [name for name, _ in self._clean_filter_calls()]
         self.assertNotIn('meshing_remove_t_vertices', names)
-        self.assertIn('meshing_remove_t_vertices', repairer.DO_NOT_RETRY)
+
+    def test_re_orient_faces_coherently_is_not_used(self):
+        """`meshing_re_orient_faces_coherently` unifies the winding but may
+        pick the wrong direction: measured -4094.9 (of +4094.9) on the seam
+        fixture, i.e. it inverted the whole shell. `by_geometry` decides
+        which way is out by comparing against geometry; `coherently` only
+        agrees with itself, which is not the same guarantee — so
+        `meshlab.step_orient` must call `by_geometry`, never `coherently`.
+        """
+        calls = []
+        with mock.patch.object(meshlab, 'apply_filters',
+                               lambda mesh, filters: (calls.extend(filters),
+                                                      mesh)[1]):
+            meshlab.step_orient(tetra())
+        names = [name for name, _ in calls]
+        self.assertIn('meshing_re_orient_faces_by_geometry', names)
+        self.assertNotIn('meshing_re_orient_faces_coherently', names)
 
     def test_clean_keeps_all_four_filters(self):
         """`merge_close_vertices` alone is worse than nothing: it collapsed
@@ -245,16 +262,43 @@ class TestLostVertices(unittest.TestCase):
 class TestSequence(unittest.TestCase):
     """Which steps run, in what order — with step 4 stubbed out."""
 
+    def test_production_whole_mesh_sequence_is_weld_then_the_four_clean_filters(self):
+        """Guards against a mocked test suite concealing a wrong default:
+        the actual tuple `repair()` iterates must be exactly these five
+        (name, function) pairs, in this order — independent of
+        `WHOLE_MESH_STEPS` itself, the way
+        `test_production_sequence_is_orient_blender_pymeshfix` independently
+        checks `PART_MESH_STEPS`."""
+        self.assertEqual(
+            repairer.WHOLE_MESH_STEPS,
+            (('weild', welder.step_weld_close_tjunctions),
+             ('clean_null_faces', meshlab.step_clean_null_faces),
+             ('clean_merge_close', meshlab.step_clean_merge_close),
+             ('clean_duplicate_faces', meshlab.step_clean_duplicate_faces),
+             ('clean_unreferenced', meshlab.step_clean_unreferenced)))
+
     def test_every_step_is_reported_in_order(self):
+        """`Step` only classifies WELD+CLEAN as one coarse `Step.PREP` now;
+        which of the five whole-mesh steps ran, in what order, is carried
+        in each entry's `detail` string instead. Checked against a literal
+        expected list here, not against `WHOLE_MESH_STEPS` itself — reading
+        the order back from the same tuple that drives execution would
+        compare it to itself and could never catch a reorder; that
+        production sequence is independently pinned by
+        `test_production_whole_mesh_sequence_is_weld_then_the_four_clean_filters`.
+        """
         tool = Recorder()
         result = repair(tetra(), min_shell_faces=0, tool=tool)
         self.assertTrue(result.ok, result.problem)
         order = [s.step for s in result.steps]
         self.assertEqual(order[:6],
-                         [Step.WELD, Step.CLEAN_NULL_FACES,
-                          Step.CLEAN_MERGE_CLOSE, Step.CLEAN_DUPLICATE_FACES,
-                          Step.CLEAN_UNREFERENCED, Step.SPLIT])
+                         [Step.PREP, Step.PREP, Step.PREP, Step.PREP,
+                          Step.PREP, Step.SPLIT])
         self.assertEqual(order[-1], Step.MERGE)
+        prep_names = [s.detail.split(':')[0] for s in result.steps[:5]]
+        self.assertEqual(prep_names,
+                         ['weild', 'clean_null_faces', 'clean_merge_close',
+                          'clean_duplicate_faces', 'clean_unreferenced'])
 
     def test_there_is_no_orientation_step_before_the_split(self):
         """Orientation moved into step 3, per part, and became unconditional.
@@ -268,11 +312,16 @@ class TestSequence(unittest.TestCase):
         self.assertFalse(hasattr(Step, 'ORIENT'),
                          "Step.ORIENT still exists; orientation is per-part")
         split = [s for s in result.steps if s.step is Step.SPLIT][0]
-        weld = [s for s in result.steps if s.step is Step.WELD][0]
-        last_clean = [s for s in result.steps
-                     if s.step is Step.CLEAN_UNREFERENCED][0]
-        first_clean = [s for s in result.steps
-                       if s.step is Step.CLEAN_NULL_FACES][0]
+        prep = [s for s in result.steps if s.step is Step.PREP]
+        weld_name = repairer.WHOLE_MESH_STEPS[0][0]
+        first_clean_name = repairer.WHOLE_MESH_STEPS[1][0]
+        last_clean_name = repairer.WHOLE_MESH_STEPS[-1][0]
+        weld = next(s for s in prep
+                   if s.detail.startswith(f'{weld_name}:'))
+        first_clean = next(s for s in prep
+                          if s.detail.startswith(f'{first_clean_name}:'))
+        last_clean = next(s for s in prep
+                         if s.detail.startswith(f'{last_clean_name}:'))
         self.assertEqual(first_clean.faces_in, weld.faces_out)
         self.assertEqual(split.faces_in, last_clean.faces_out)
 
@@ -285,7 +334,9 @@ class TestSequence(unittest.TestCase):
         with mock.patch.object(pipeconfig, 'ENABLE_WELD', False):
             result = repair(tetra(), min_shell_faces=0, tool=Recorder())
         self.assertTrue(result.ok, result.problem)
-        weld = [s for s in result.steps if s.step is Step.WELD][0]
+        weld_name = repairer.WHOLE_MESH_STEPS[0][0]
+        weld = next(s for s in result.steps if s.step is Step.PREP
+                   and s.detail.startswith(f'{weld_name}:'))
         self.assertEqual(weld.faces_in, weld.faces_out)
         self.assertIn('ENABLE_WELD=False', weld.detail)
 
@@ -334,10 +385,7 @@ class TestSequence(unittest.TestCase):
         the record does not describe one sequence."""
         result = repair(tetra(), min_shell_faces=0, tool=Recorder())
         chain = [s for s in result.steps
-                 if s.step in (Step.WELD, Step.CLEAN_NULL_FACES,
-                              Step.CLEAN_MERGE_CLOSE,
-                              Step.CLEAN_DUPLICATE_FACES,
-                              Step.CLEAN_UNREFERENCED, Step.SPLIT)]
+                 if s.step in (Step.PREP, Step.SPLIT)]
         for earlier, later in zip(chain, chain[1:]):
             self.assertEqual(later.faces_in, earlier.faces_out)
 
@@ -368,7 +416,7 @@ class TestFailure(unittest.TestCase):
         def explode(part):
             raise RuntimeError("boom")
         result = repair(tetra(), min_shell_faces=0, tool=explode)
-        self.assertIn(Step.WELD, [s.step for s in result.steps])
+        self.assertIn(Step.PREP, [s.step for s in result.steps])
 
     def test_a_tool_that_returns_a_failure_is_not_reported_as_success(self):
         """R02: the tool did not raise — it came back and said it failed.
@@ -394,7 +442,7 @@ class TestFailure(unittest.TestCase):
             return False, part, "pymeshfix failed: it gave up"
 
         result = repair(tetra(), min_shell_faces=0, tool=fails)
-        self.assertIn(Step.WELD, [s.step for s in result.steps])
+        self.assertIn(Step.PREP, [s.step for s in result.steps])
         self.assertIsNotNone(result.mesh.geometry)
 
     def test_a_scan_failure_while_recording_still_advances_the_mesh(self):
@@ -425,7 +473,7 @@ class TestFailure(unittest.TestCase):
                 raise RuntimeError("scan fell over")
             return scanner.scan(m)
 
-        fake_whole_mesh_steps = ((Step.WELD, fake_first_step),)
+        fake_whole_mesh_steps = (('weld', fake_first_step),)
         with mock.patch.object(repairer, 'WHOLE_MESH_STEPS',
                                fake_whole_mesh_steps), \
              mock.patch.object(repairer.scanner, 'scan', poison_scan):
@@ -717,14 +765,16 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
     def test_production_sequence_is_orient_blender_pymeshfix(self):
         """Guards against a mocked test suite concealing a wrong default:
         the actual tuple `_repair_part` uses in production must be exactly
-        these three functions, in this order."""
+        these three (name, function) pairs, in this order."""
         self.assertEqual(repairer.PART_MESH_STEPS,
-                         (meshlab.step_orient, blender.step_blender_repair,
-                          meshfix.step_meshfix_repair))
+                         (('step_orient', meshlab.step_orient),
+                          ('step_blender_repair', blender.step_blender_repair),
+                          ('step_meshfix_repair', meshfix.step_meshfix_repair)))
 
     def test_blender_runs_before_pymeshfix(self):
-        fake_steps = (self._record('orient'), self._record('blender'),
-                     self._record('pymeshfix'))
+        fake_steps = (('orient', self._record('orient')),
+                     ('blender', self._record('blender')),
+                     ('pymeshfix', self._record('pymeshfix')))
         with mock.patch.object(repairer, 'PART_MESH_STEPS', fake_steps):
             ok, _, detail = repairer._repair_part(tetra())
         self.assertTrue(ok, detail)
@@ -747,7 +797,8 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
             seen_by_pymeshfix.append(m)
             return True, m, 'pymeshfix ran'
 
-        fake_steps = (fake_orient, fake_blender, fake_pymeshfix)
+        fake_steps = (('orient', fake_orient), ('blender', fake_blender),
+                     ('pymeshfix', fake_pymeshfix))
         with mock.patch.object(repairer, 'PART_MESH_STEPS', fake_steps):
             repairer._repair_part(original)
 
@@ -759,9 +810,9 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
             "pymeshfix must see blender's changed geometry, not the input")
 
     def test_a_hard_blender_failure_stops_before_pymeshfix(self):
-        fake_steps = (lambda m: (True, m, 'oriented'),
-                     self._record('blender', ok=False),
-                     self._record('pymeshfix'))
+        fake_steps = (('orient', lambda m: (True, m, 'oriented')),
+                     ('blender', self._record('blender', ok=False)),
+                     ('pymeshfix', self._record('pymeshfix')))
         with mock.patch.object(repairer, 'PART_MESH_STEPS', fake_steps):
             ok, _, detail = repairer._repair_part(tetra())
         self.assertFalse(ok)
@@ -786,8 +837,9 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
         against a real, patched flag — proving PyMeshFix's own flag check,
         not just that `_repair_part` forwards a stub's answer.
         """
-        fake_steps = (lambda m: (True, m, 'oriented'),
-                     self._record('blender'), meshfix.step_meshfix_repair)
+        fake_steps = (('orient', lambda m: (True, m, 'oriented')),
+                     ('blender', self._record('blender')),
+                     ('pymeshfix', meshfix.step_meshfix_repair))
         with mock.patch.object(pipeconfig, 'ENABLE_PART_TOOL', False), \
              mock.patch.object(repairer, 'PART_MESH_STEPS', fake_steps):
             ok, _, detail = repairer._repair_part(tetra())
@@ -801,8 +853,9 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
         checks themselves, not just that `_repair_part` forwards whatever a
         stub says.
         """
-        fake_steps = (lambda m: (True, m, 'oriented'),
-                     blender.step_blender_repair, meshfix.step_meshfix_repair)
+        fake_steps = (('orient', lambda m: (True, m, 'oriented')),
+                     ('blender', blender.step_blender_repair),
+                     ('pymeshfix', meshfix.step_meshfix_repair))
         with mock.patch.object(pipeconfig, 'ENABLE_BLENDER_PART', False), \
              mock.patch.object(pipeconfig, 'ENABLE_PART_TOOL', False), \
              mock.patch.object(repairer, 'PART_MESH_STEPS', fake_steps):
@@ -810,38 +863,6 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
         self.assertTrue(ok, detail)
         self.assertIn('ENABLE_BLENDER_PART=False', detail)
         self.assertIn('ENABLE_PART_TOOL=False', detail)
-
-
-class TestIsAvailable(unittest.TestCase):
-    """`is_available` must follow which steps are actually enabled."""
-
-    def test_blender_missing_but_disabled_is_still_available(self):
-        with mock.patch.object(pipeconfig, 'ENABLE_BLENDER_PART', False), \
-             mock.patch.object(blender, 'is_available', lambda: False), \
-             mock.patch.object(meshfix, 'is_available', lambda: True), \
-             mock.patch.object(meshlab, 'is_available', lambda: True):
-            self.assertTrue(repairer.is_available())
-
-    def test_blender_missing_and_enabled_is_unavailable(self):
-        with mock.patch.object(pipeconfig, 'ENABLE_BLENDER_PART', True), \
-             mock.patch.object(blender, 'is_available', lambda: False), \
-             mock.patch.object(meshfix, 'is_available', lambda: True), \
-             mock.patch.object(meshlab, 'is_available', lambda: True):
-            self.assertFalse(repairer.is_available())
-
-    def test_pymeshfix_missing_but_disabled_is_still_available(self):
-        with mock.patch.object(pipeconfig, 'ENABLE_BLENDER_PART', False), \
-             mock.patch.object(pipeconfig, 'ENABLE_PART_TOOL', False), \
-             mock.patch.object(meshfix, 'is_available', lambda: False), \
-             mock.patch.object(meshlab, 'is_available', lambda: True):
-            self.assertTrue(repairer.is_available())
-
-    def test_meshlab_missing_is_always_unavailable(self):
-        """Meshlab runs CLEAN and orient unconditionally — no flag gates it."""
-        with mock.patch.object(pipeconfig, 'ENABLE_BLENDER_PART', False), \
-             mock.patch.object(pipeconfig, 'ENABLE_PART_TOOL', False), \
-             mock.patch.object(meshlab, 'is_available', lambda: False):
-            self.assertFalse(repairer.is_available())
 
 
 if __name__ == '__main__':
