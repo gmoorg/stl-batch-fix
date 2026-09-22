@@ -38,6 +38,42 @@ printed undecimated at 11.71% against `base`'s 3.60%. `base` is not clean
 after all: 1,506 inverted normals, which `is_clean` does not test. Four repair
 attempts failed; three left the repaired faces inverted.
 
+With `ENABLE_CLEAN` also disabled (WELD, CLEAN_MERGE_CLOSE, ORIENT, CLEAN all
+off, run through the live `repairer.repair()`, not a bare `PyTMesh` script),
+`base` comes back at **320,152 faces (+4,670), 99.81%, `lost_vertices=0`** —
+the same figures the investigation's bare `fix_connectivity()+fill` experiment
+found. With `clean()` out of the loop, `fill_small_boundaries` alone adds
+geometry and loses none; `clean()` is the entire loss. That output still
+carries 11,365 unrepaired self-intersections — measured harmless for printing
+elsewhere in this doc, but not zero. Disabling `ENABLE_CLEAN` is not yet an
+adopted config change; this is a measurement, not a decision.
+
+## CGAL alpha wrapping — spiked, not adopted
+
+Tested 2026-09-21 outside the pipeline (`pip install cgal`, prebuilt wheel,
+no build needed): CGAL 6.0's `alpha_wrap_3` on `base`, tuned by hand. It makes
+one unconditional guarantee — watertight, 2-manifold, self-intersection-free
+output on any input — by reconstructing the surface at a chosen resolution
+(`alpha`) and offset distance (`offset`), not by repairing the existing
+triangulation. Three points swept:
+
+| alpha | offset | faces | vs. source | volume |
+|---|---|---:|---:|---:|
+| 0.42 (bbox/300) | 0.11 (bbox/1200, CGAL's suggested ratio) | 121,662 | 39% | 104.00% |
+| 0.28 | 0.05 | 308,354 | **97.7%** | 102.11% |
+| 0.22 | 0.035 | 523,852 | 166% | 101.45% |
+| 0.15 | 0.02 | 1,197,134 | 380% | 100.77% |
+
+`alpha=0.28` lands closest to the source's own 315,482-face resolution and
+looks decent by eye, though visibly softer than the original — this is a
+full remesh, not a preservation of the source triangulation, so some loss of
+sharp detail is inherent even at a well-matched alpha. Not yet checked:
+whether the output actually reduces the 11,365 self-intersections to zero
+(the property this was tried for) or how closely the surface tracks the
+source geometrically beyond matching face count and volume. Not integrated
+into the pipeline; this is a spike, done with a plain script outside
+`libs/`, not a `pipeconfig`-gated step.
+
 **Status: unfixed, no viable repair identified.**
 → [Amidara](amidara-clean-destroys.md)
 
@@ -118,6 +154,23 @@ repair tool (which fixed 1,506 inverted normals by adding 25,478 triangles),
 and it is **not a repair on its own**: the earlier, separately-measured count
 found new/old edges it produced wound the same way (the same-winding defect)
 while `winding_seams` reports 0. No working repair for `base` has been found.
+
+## Tested and refuted: `fix_connectivity` + fill, then Blender
+
+**Tested 2026-09-21.** The hypothesis: `fix_connectivity` + fill genuinely
+produces the 762-flipped-pair defect above, and Blender's repair loop exists
+specifically to find and fix non-manifold geometry — so give it that
+intermediate, where it has a real defect to act on, instead of the pristine
+source (`open=0, nm=0`), where it does nothing.
+
+Result: **no change at all** — 320,152 faces in, 320,152 faces out,
+byte-identical, `BLENDER_OK`. Refuted for a precise reason, not just "it
+didn't work": Blender's own defect check (`count_defects`/`nm_faces_of` in
+`libs/blender_fx/repair.blender`) asks *how many* faces share an edge, the
+same question `scanner.winding_seams` asks — never *which direction* each
+face walks it. The 762 pairs sit on edges shared by exactly 2 faces, wound
+the same way; both tools read that as fine. Detail in
+[Amidara](amidara-clean-destroys.md#blender-cannot-see-the-defect-either--same-blind-spot-as-the-scanner).
 
 ## Blocked
 

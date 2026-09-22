@@ -154,7 +154,10 @@ both make the winding worse:
 | `re_orient_faces_by_geometry` | **7,659** | **562** | 50,627.82 | 11,365 |
 
 `coherently` loses 30% of the signed volume — it flipped large regions the wrong
-way, which is the failure already recorded in `repairer.DO_NOT_RETRY`.
+way, which is the failure already recorded in
+`tests/tests/test_repairer.py::test_re_orient_faces_coherently_is_not_used`
+(formerly `repairer.DO_NOT_RETRY`, removed as a production constant since it
+was only ever read by its own tests — see modules.md).
 `by_geometry`, which the pipeline runs on every part, multiplies the seam edges
 by more than eight. Neither is a fix, and the self-intersections are independent
 geometry rather than a symptom of the winding.
@@ -246,6 +249,19 @@ Filling the holes `fix_connectivity` makes closes the trade:
 Every defect the online tool reported is resolved, the mesh stays watertight,
 and **geometry is added rather than deleted** — the same direction the online
 tool moved (+4,670 triangles against its +25,478).
+
+**Confirmed at the pipeline level, not just the bare `PyTMesh` calls above.**
+Running `repairer.repair()` on `base` with `ENABLE_WELD`,
+`ENABLE_CLEAN_MERGE_CLOSE`, `ENABLE_ORIENT` and `ENABLE_CLEAN` all disabled
+(`ENABLE_PART_TOOL` and `ENABLE_FILL_BOUNDARIES` left on) reaches the identical
+320,152 faces / 99.81% / `lost_vertices=0`, through `step_meshfix_repair`'s own
+`fill_small_boundaries` call rather than a standalone `fix_connectivity()`. So
+`ENABLE_CLEAN` alone isolates `clean()`'s contribution: with it off, the part
+survives with zero face loss. The output still carries the unrepaired
+self-intersections (this document's "not a printing defect" section) —
+disabling `ENABLE_CLEAN` trades `clean()`'s over-aggressive deletion for
+leaving self-intersections in place, not a genuine repair of either defect.
+Not yet adopted as a config change.
 
 ### The owner's inspection refutes the table above
 
@@ -342,7 +358,38 @@ particular check is not sensitive enough to trust, on either output. Treat
 "0 incidences detected" here as a statement about this ad hoc method's
 detection floor, not about the mesh.
 
-### A gap in the scanner, independent of any of this
+### Blender cannot see the defect either — same blind spot as the scanner
+
+Owner's proposal, 2026-09-21: `fix_connectivity()` + `fill_small_boundaries()`
+genuinely produces the 762-flipped-pair defect, and Blender's repair loop
+exists specifically to find and fix non-manifold geometry — so run Blender
+*on the intermediate*, where it has a real defect to act on, rather than on
+the pristine source (`open=0, nm=0`), where Blender's own early-exit check
+("mesh already clean — writing without repair", `repair.blender`'s first
+check before the main loop) fires immediately and it does nothing.
+
+Measured: `blender.step_blender_repair(FIXCONN_FILL)` — 320,152 faces in,
+**320,152 faces out, byte-identical**. `ok=True`, `BLENDER_OK`. No change at
+all.
+
+**Why: `repair.blender`'s `count_defects`/`nm_faces_of` have the identical
+blind spot as `scanner.winding_seams`.** Both ask *how many* faces share an
+edge (`not edge.is_manifold` in Blender's BMesh terms; `counts > 2` in
+`scanner`'s), never *which direction* each face walks it. The 762 flipped
+pairs sit on edges genuinely shared by exactly 2 faces — wound the same way,
+which is the defect — so `is_manifold` reads them as fine. Confirmed from the
+script directly (`libs/blender_fx/repair.blender`'s `count_defects`,
+`nm_faces_of`): no code path in the repair loop inspects edge winding
+direction at all, only edge-to-face cardinality. Forcing the loop to run
+anyway (bypassing the "already clean" early exit) would not help — the loop
+that would run afterward is built entirely on the same defect-free reading,
+so it would still see nothing to repair.
+
+**This sequence is refuted for the same underlying reason the scanner gap is
+open (see below): neither this project's own topology counters nor Blender's
+repair loop test winding consistency on non-manifold-cardinality edges.**
+Fixing that requires a genuinely different check — not a different tool run
+on the same numbers.
 
 `scanner.winding_seams` misses winding inconsistency on edges shared by more
 than two faces. `Scan.is_clean` does not consider winding at all. Between them,

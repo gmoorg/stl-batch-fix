@@ -17,9 +17,48 @@ pipeline's steps and their order are unchanged.
 |---|---|---|
 | `mandy_ours_decimated.stl`, the 2026-09-17 input | **46.27%** | DESTROYED |
 | full pipeline from source, decimated to 900k | **85.82%** | DESTROYED |
+| CGAL `alpha_wrap_3(0.11, 0.1)` on part 0, outside the pipeline | **105.43%** | **hair survives — see below** |
 
 The 46.27% figure reproduces to two decimal places against the measurement
 recorded in the archive, so nothing since has changed that path.
+
+## CGAL alpha wrapping keeps the hair, 2026-09-21
+
+Spiked outside the pipeline (`pip install cgal`, no build — see
+[discovered-bugs.md](discovered-bugs.md#cgal-alpha-wrapping--spiked-not-adopted)
+for the tool and how alpha/offset were chosen on Amidara). Same tool, same
+parameters that had already been tuned on Amidara base, run on
+`mandy_part0_BEFORE.stl` (562,249 faces, the exact file this section's
+PyMeshFix measurements above use — `open=31, nm=67`, the 67 non-manifold
+edges being "the only mechanism that isolates the hair" per this doc):
+
+| | source | PyMeshFix (current pipeline) | `alpha_wrap_3(0.11, 0.1)` |
+|---|---:|---:|---:|
+| faces | 562,249 | 391,442 | 901,184 |
+| open / nm | 31 / 67 | 0 / 0 | 0 / 0 |
+| volume | 100% | **85.82%** | **105.43%** |
+
+Volume goes *up*, not down — the opposite signature from PyMeshFix's hair
+deletion. **Owner inspected the output directly: the hair survived, and it
+survived Bambu Studio's decimation afterward with no defects produced.**
+This is the first result in this investigation's entire history — including
+the Codex review above, which explicitly concluded "no successful
+hair-preserving repair is demonstrated" — where hair-preservation and a
+clean topology were both achieved on the actual file this section measures,
+not a synthetic fixture or an isolated sub-region.
+
+What this does not yet establish: whether the body (not just the hair)
+still matches source geometry closely — Amidara base's own alpha-wrap
+sweep found up to ~0.5% of faces sitting measurably off the source surface
+even at good parameter choices, verified by a CGAL AABB-tree point-to-
+surface distance check, not eyeballing; that same check has not yet been
+run on this Mandy output. Also unmeasured here: self-intersections in the
+alpha-wrap output, whether `alpha=0.11, offset=0.1` was a lucky parameter
+choice for this specific part or generalizes, and integration into the
+pipeline (`libs/`, `pipeconfig`) — this was a standalone script, not a
+pipeline step. Not yet adopted; the next step is deciding whether to
+pursue integrating alpha wrapping as a real alternative to PyMeshFix for
+cases like this.
 
 ## It is real loss, confirmed by eye
 
