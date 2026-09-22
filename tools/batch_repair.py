@@ -39,7 +39,7 @@ def _run(args):
     try:
         summary = converter.prepare(
             args.input, args.output, collect,
-            copy_extensions={'.png', '.jpg', '.txt'},
+            copy_extensions={'.png', '.jpg', '.jpeg', '.gif', '.txt'},
             convert=blender.convert, workers=1,
         )
     except Exception as error:
