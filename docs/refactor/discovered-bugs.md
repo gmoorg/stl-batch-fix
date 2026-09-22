@@ -74,6 +74,38 @@ source geometrically beyond matching face count and volume. Not integrated
 into the pipeline; this is a spike, done with a plain script outside
 `libs/`, not a `pipeconfig`-gated step.
 
+**Now a real module**, `libs/alphawrap.py` (`wrap(mesh, alpha, offset) ->
+Mesh`), committed 2026-09-21 — see `modules.md`. No `step_*` uniform-contract
+adapter yet: no formula derives alpha/offset from a mesh's own properties,
+and bbox-diagonal ratios do not transfer between models (below).
+
+## Bbox-diagonal ratio does not transfer between models
+
+Tested 2026-09-21 via the new `libs/alphawrap.py` on two further real models
+(`Fixing/Torso.stl`, 2,733,798 faces, 272 non-manifold edges; `Fixing/
+Madelyne_Arm_Left.stl`, 500,000 faces, already clean), scaling Amidara's and
+Mandy's own best-tuned ratios by each new model's bounding-box diagonal:
+
+| model | ratio source | alpha | offset | faces out | vs. source |
+|---|---|---:|---:|---:|---:|
+| Torso (diag 121.69, ~Amidara's 127.46) | Amidara's ratio | 0.267 | 0.048 | 387,186 | **14.2%** |
+| Madelyne arm (diag 58.63) | Mandy's ratio | 0.0595 | 0.0541 | 933,678 | **186.7%** |
+| Madelyne arm, retried | hand bisected | 0.12 | 0.05 | 228,724 | 45.7% |
+
+Both scaled guesses missed badly, in opposite directions, confirming the
+`alphawrap` module docstring's claim from first principles rather than
+just the original two data points. Torso's volume (101.16%) and topology
+(272 nm edges → 0) came out fine regardless — the miss was face count/
+fidelity, not correctness.
+
+**Owner's inspection: Madelyne's arm had a cloth texture that came out
+looking like leather.** Concrete visual confirmation of the fidelity
+tradeoff the AABB point-to-surface numbers only measured indirectly —
+fine surface detail (fabric weave) sits below the alpha resolution and is
+smoothed away, even where volume and topology look perfect. Torso was
+accepted as good by inspection; no comparable fine-texture feature to lose
+in that case.
+
 **Status: unfixed, no viable repair identified.**
 → [Amidara](amidara-clean-destroys.md)
 
