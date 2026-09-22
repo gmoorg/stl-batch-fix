@@ -1,15 +1,4 @@
-"""Run caller-selected work in threads.
-
-`Pool(n, select, handle).start()` calls `select(done, error)` under a lock;
-`handle(item)` runs outside it. A selector returns None to retire that worker.
-Each completed item, including a failed one, is reported exactly once at its
-next selection. The caller owns queue order, admission, and error policy.
-
-A handler exception is delivered to `select` as `error`. A `select` exception
-is different in kind — it breaks the very channel failures are reported on —
-so it stops the pool and is re-raised from `start()` once the workers have
-joined.
-"""
+"""Run caller-selected work in threads."""
 
 from __future__ import annotations
 

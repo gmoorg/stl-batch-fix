@@ -1,12 +1,4 @@
-"""Run PyMeshLab filters on in-memory project geometry.
-
-This module owns the PyMeshLab boundary: dependency availability, dtype
-conversion, and filter parameter preparation, plus the uniform pipeline
-steps built from a single PyMeshLab filter — the four CLEAN filters and
-orient. Naming a specific filter and its parameters is PyMeshLab-specific
-mechanics, so it lives here, not in `repairer`; the *order* those steps run
-in is `repairer`'s policy, not this module's.
-"""
+"""Run PyMeshLab filters on in-memory project geometry."""
 
 from __future__ import annotations
 

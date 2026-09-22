@@ -1,10 +1,4 @@
-"""Probe, load, and write meshes.
-
-`probe` returns cheap metadata; an unknown triangle count is None, never zero.
-`load` returns a new frozen `Mesh` carrying welded geometry. `write` writes its
-destination, and PLY helpers preserve the vertex table at the Blender boundary.
-Loading is explicit because it materially changes memory use.
-"""
+"""Probe, load, and write meshes."""
 
 from __future__ import annotations
 

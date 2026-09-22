@@ -1,9 +1,4 @@
-"""Prepare a source tree and emit each mesh to a consumer.
-
-`prepare` copies companion files, converts ASCII STL/OBJ when needed, and
-emits valid and failed meshes. Emission is serialized even when conversion
-uses workers. Arrival order is unspecified; the consumer owns sorting.
-"""
+"""Prepare a source tree and emit each mesh to a consumer."""
 
 from __future__ import annotations
 

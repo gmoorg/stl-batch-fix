@@ -1,10 +1,4 @@
-"""Repair T-junctions by splitting the face that spans an open-edge path.
-
-A T-junction is a subdivided edge (A-M-C) beside a face still using A-C.
-`find` requires the open-edge path and adjacent face strip to agree; a nearby
-vertex on a separate surface is not enough. `repair` adds faces without moving
-vertices. The search uses topology and edge position, not an absolute gap.
-"""
+"""Repair T-junctions by splitting the face that spans an open-edge path."""
 
 from __future__ import annotations
 

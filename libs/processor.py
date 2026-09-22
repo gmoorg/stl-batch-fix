@@ -1,10 +1,4 @@
-"""Decimate, repair, judge, and optionally write one file.
-
-`process` returns an `Outcome` without I/O. It checks destructive volume loss
-before topology: a partial model can have zero mesh defects. `write` commits a
-clean mesh or a full-mesh marker. A marker uses the source for destructive or
-failed work, and the repaired mesh when geometry survives but defects remain.
-"""
+"""Decimate, repair, judge, and optionally write one file."""
 
 from __future__ import annotations
 

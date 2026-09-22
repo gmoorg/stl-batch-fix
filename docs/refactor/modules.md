@@ -13,11 +13,26 @@ reference material until the refactor is complete.
 Every repair operation — `welder.step_weld_close_tjunctions`,
 `blender.step_blender_repair`, `meshfix.step_meshfix_repair`,
 `meshlab.step_clean_*`/`step_orient`, `alphawrap.step_alpha_wrap` — shares one
-signature: `(mesh: Mesh) -> tuple[bool, Mesh, str]`. Full contract rules
-(what `ok=False` means, how a disabled flag reports itself, exception
-handling) live in `libs/pipeconfig.py`'s own "The step contract" docstring
-section, next to the flags that gate these steps; this is the *why*, once,
-rather than repeated in every module entry below.
+signature: `(mesh: Mesh) -> tuple[bool, Mesh, str]`. A function defined in
+another module names that module in its own name (`step_<module>_<action>`);
+one defined in `meshlab.py` does not repeat "meshlab" since the module
+qualifier already says that (`step_<action>`). `repairer` composes uniform
+calls from its authoritative step tuples; alpha wrapping additionally
+accepts a keyword-only `whole_diagonal`, bound per `repair()` call before
+splitting.
+
+The contract's rules:
+
+- `ok=True` means the step *ran* (or was intentionally skipped), never that
+  the resulting mesh is printable — a tool can succeed and still hand back
+  a defective mesh, which is `scanner`'s question to answer, not this one's.
+- `ok=False` stops the sequence at that step; the caller does not proceed to
+  the next one.
+- A disabled flag returns `(True, mesh, 'skipped (ENABLE_X=False)')` —
+  unchanged input, not a failure — and the flag is checked *inside* the
+  step, not by the caller.
+- Every step catches what its own underlying call raises and converts it to
+  `(False, mesh, detail)`, so an exception never escapes past this contract.
 
 **Owner decision, 2026-09-21.** Before this, the repair sequence was three
 near-identical hand-written blocks — "mark time, call the tool, record the

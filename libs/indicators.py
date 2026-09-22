@@ -1,9 +1,4 @@
-"""Read existing outputs and markers for a source file.
-
-An export in `stl-exported/` replaces the source path; an output or marker
-means a previous attempt already dealt with the file. Markers are full mesh
-copies. This module reports the finding; the caller chooses what to do.
-"""
+"""Read existing outputs and markers for a source file."""
 
 from __future__ import annotations
 

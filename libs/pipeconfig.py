@@ -1,49 +1,8 @@
 """Every pipeline step's on/off switch, in one place.
 
-`meshfix` and `repairer` read these as `pipeconfig.ENABLE_X` at the point of
-use, not by importing the name — a name import binds the value at import
-time, so a later `pipeconfig.ENABLE_X = False` would silently stop taking
-effect. These are module-level rather than function parameters because they
-describe an experiment on the whole run, not a property of one mesh: set them
-before calling `repair`, not per part. Several are recorded elsewhere as
-*harmful* on real models (see the per-flag notes and
-archive/docs-refactor-2026-09-22/discovered-bugs.md) and the argument for or
-against a step was settled by running the pipeline without it — that is
-what these exist for.
-
-All default `True` except `ENABLE_SPLIT_SEAMS`. The current default route
-uses only shell splitting and alpha wrapping; the other tool flags remain
-available to explicit callers. The older per-flag notes below record the
-experiments that introduced them, not the currently wired sequence.
-
-## The step contract
-
-Every operation the repair sequence can run — `welder.step_weld_close_tjunctions`,
-`blender.step_blender_repair`, `meshfix.step_meshfix_repair`, and
-`meshlab`'s own `step_clean_null_faces`/`step_clean_merge_close`/
-`step_clean_duplicate_faces`/`step_clean_unreferenced`/`step_orient` —
-shares one signature: `(mesh: Mesh) -> tuple[bool, Mesh, str]`. A function
-defined in another module names that module in its own name
-(`step_<module>_<action>`); one defined in `meshlab.py` does not repeat
-"meshlab" since the module qualifier already says that (`step_<action>`).
-`repairer` composes uniform calls from its authoritative step tuples. Alpha
-wrapping additionally accepts a keyword-only whole_diagonal, bound per repair
-call before splitting. Each step checks its own flag and handles exceptions.
-
-- `ok=True` means the step *ran* (or was intentionally skipped), never that
-  the resulting mesh is printable — a tool can succeed and still hand back
-  a defective mesh, which is `scanner`'s question to answer, not this one's.
-- `ok=False` stops the sequence at that step; the caller does not proceed to
-  the next one.
-- A disabled flag returns `(True, mesh, 'skipped (ENABLE_X=False)')` —
-  unchanged input, not a failure — and the flag is checked *inside* the step,
-  not by the caller.
-- Every step catches what its own underlying call raises and converts it to
-  `(False, mesh, detail)`, so an exception never escapes past this contract.
-
-Why this shape rather than tool-specific code inline in `repairer` — owner
-decision, 2026-09-21 — is in docs/refactor/modules.md's "The uniform step
-interface, and why it exists", once, rather than repeated per module.
+See docs/refactor/modules.md's `pipeconfig` entry for why these are
+module-level rather than parameters, and its "uniform step interface"
+section for the step contract every flag here gates.
 """
 
 from __future__ import annotations

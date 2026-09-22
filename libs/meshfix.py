@@ -1,10 +1,4 @@
-"""Run PyMeshFix on a loaded mesh and capture its output.
-
-The tool works on arrays. `ok` means it returned geometry, not that the mesh is
-clean; the caller must rescan it. Input should be split into parts first:
-PyMeshFix can discard smaller shells even without an explicit
-`remove_smallest_components` call. Capture includes C++ output on both fds.
-"""
+"""Run PyMeshFix on a loaded mesh and capture its output."""
 
 from __future__ import annotations
 

@@ -1,9 +1,4 @@
-"""Reduce a loaded mesh to a face budget with fast_simplification.
-
-Decimation is a required deliverable. If the required decimator is unavailable
-or fails, this module returns the input unchanged so the caller can write an
-undecimated marker rather than silently shipping an over-budget mesh.
-"""
+"""Reduce a loaded mesh to a face budget with fast_simplification."""
 
 from __future__ import annotations
 

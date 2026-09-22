@@ -1,10 +1,4 @@
-"""Measure topology from a loaded mesh's vertex and face arrays.
-
-An edge used by one face is open; one used by three or more is non-manifold.
-`scan` counts defects, `winding_seams` finds opposing face directions, and
-`shells` returns edge-connected components. A missing geometry array raises
-instead of producing an unverified zero count. No size ceiling is imposed.
-"""
+"""Measure topology from a loaded mesh's vertex and face arrays."""
 
 from __future__ import annotations
 

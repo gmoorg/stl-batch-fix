@@ -1,9 +1,4 @@
-"""Apply the current mesh repair sequence without writing a file.
-
-`repair` splits edge-connected shells, alpha-wraps each retained part using
-one whole-mesh diagonal, then merges and records measurements. `processor`
-judges the result. Explicit `tool=` overrides replace the per-part sequence.
-"""
+"""Apply the current mesh repair sequence without writing a file."""
 
 from __future__ import annotations
 

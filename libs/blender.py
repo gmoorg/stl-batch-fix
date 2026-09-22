@@ -1,9 +1,4 @@
-"""Run headless Blender with a deadline and captured output.
-
-`Runner` owns process launch, timeout, kill, and capture. The caller supplies
-a rendered script and interprets its markers. `convert` produces binary STL;
-`repair` uses binary PLY at both ends. Budget policy belongs to the caller.
-"""
+"""Run headless Blender with a deadline and captured output."""
 
 from __future__ import annotations
 

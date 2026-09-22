@@ -1,12 +1,4 @@
-"""Split loaded meshes by shells or winding seams, then merge parts.
-
-`by_shells` uses edge connectivity and drops components below `min_faces` when
-larger parts exist. `by_seams` is available but the current repair sequence
-does not call it, and it has no such floor: it returns every region the seam
-produced and leaves worth-saving judgements to its caller. Both return a
-one-item tuple when nothing splits. Parts get their own destinations; neither
-function writes files.
-"""
+"""Split loaded meshes by shells or winding seams, then merge parts."""
 
 from __future__ import annotations
 

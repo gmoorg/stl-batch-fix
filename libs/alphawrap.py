@@ -1,14 +1,7 @@
 """Reconstruct a mesh as a watertight, manifold solid via CGAL Alpha Wrapping.
 
-The default repair step uses the owner-selected whole-mesh diagonal recipe:
-alpha=min(diag/800, 0.15), offset=min(diag/2000, 0.06). See
-archive/docs-refactor-2026-09-22/discovered-bugs.md,
-"Settled diagonal-ratio recipe", for
-measurements and visual confirmation; the cap keeps a large model at the
-finest resolution actually validated rather than scaling alpha/offset up
-unbounded.
-Reconstruction guarantees topology, not fidelity or a triangle budget.
-CGAL Alpha Wrapping is a required dependency installed by install.sh.
+See docs/refactor/modules.md's `alphawrap` entry for the default recipe,
+its provenance, and what this module does and does not guarantee.
 """
 
 from __future__ import annotations
