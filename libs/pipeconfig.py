@@ -115,7 +115,9 @@ ENABLE_FILL_BOUNDARIES = True
 # each step should have it own flag! No master switch!
 ENABLE_CLEAN = True
 
-#: Default repair: alpha=whole diagonal/800, offset=whole diagonal/2000.
-#: Measured and visually confirmed on base, hands_2, and Torso (2026-09-22):
-#: docs/refactor/discovered-bugs.md, "Settled diagonal-ratio recipe".
+#: Default repair: alpha=min(whole diagonal/800, 0.15), offset=min(whole
+#: diagonal/2000, 0.06). Measured and visually confirmed on base, hands_2,
+#: and Torso (2026-09-22): docs/refactor/discovered-bugs.md, "Settled
+#: diagonal-ratio recipe"; the cap was added afterward so a large model
+#: stays at the finest validated resolution instead of scaling up unbounded.
 ENABLE_ALPHA_WRAP = True

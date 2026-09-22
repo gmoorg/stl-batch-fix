@@ -796,6 +796,18 @@ class TestAlphaWrapBinding(unittest.TestCase):
             self.assertAlmostEqual(call.args[1], diagonal / 800)
             self.assertAlmostEqual(call.args[2], diagonal / 2000)
 
+    def test_default_step_caps_alpha_and_offset_on_a_large_mesh(self):
+        original = two_tetrahedra()
+        large = original.with_geometry(Geometry(
+            original.geometry.verts * 50, original.geometry.faces))
+        with mock.patch.object(alphawrap, 'wrap', side_effect=lambda m, a, o: m) as wrapped:
+            result = repair(large, min_shell_faces=0)
+        self.assertTrue(result.ok, result.problem)
+        self.assertEqual(wrapped.call_count, 2)
+        for call in wrapped.call_args_list:
+            self.assertAlmostEqual(call.args[1], 0.15)
+            self.assertAlmostEqual(call.args[2], 0.06)
+
     def test_custom_tool_bypasses_cgal_and_diagonal_binding(self):
         with mock.patch.object(alphawrap, '_CGAL', False), \
              mock.patch.object(repairer, 'partial', side_effect=AssertionError('binding')), \

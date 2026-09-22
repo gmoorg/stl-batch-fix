@@ -1,8 +1,11 @@
 """Reconstruct a mesh as a watertight, manifold solid via CGAL Alpha Wrapping.
 
 The default repair step uses the owner-selected whole-mesh diagonal recipe:
-alpha=diag/800, offset=diag/2000. See docs/refactor/discovered-bugs.md,
-"Settled diagonal-ratio recipe", for measurements and visual confirmation.
+alpha=min(diag/800, 0.15), offset=min(diag/2000, 0.06). See
+docs/refactor/discovered-bugs.md, "Settled diagonal-ratio recipe", for
+measurements and visual confirmation; the cap keeps a large model at the
+finest resolution actually validated rather than scaling alpha/offset up
+unbounded.
 Reconstruction guarantees topology, not fidelity or a triangle budget.
 CGAL Alpha Wrapping is a required dependency installed by install.sh.
 """
@@ -129,7 +132,8 @@ def step_alpha_wrap(mesh: Mesh, *, whole_diagonal: float | None = None
         diagonal = float(whole_diagonal)
         if not math.isfinite(diagonal) or diagonal <= 0:
             raise ValueError('whole_diagonal must be finite and positive')
-        alpha, offset = diagonal / 800.0, diagonal / 2000.0
+        alpha = min(diagonal / 800.0, 0.15)
+        offset = min(diagonal / 2000.0, 0.06)
         result = wrap(mesh, alpha, offset)
         return True, result, f'alpha={alpha}, offset={offset}'
     except Exception as exc:

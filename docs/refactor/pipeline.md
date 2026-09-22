@@ -7,7 +7,7 @@ load finite, non-empty source
   → decimate whole file to max_faces
   → compute the already-decimated whole mesh's bounding-box diagonal once
   → split into edge-connected shells
-  → alpha-wrap each retained part (alpha=diag/800, offset=diag/2000)
+  → alpha-wrap each retained part (alpha=min(diag/800, 0.15), offset=min(diag/2000, 0.06))
   → merge accepted parts
   → apply existing repair failure, volume-loss, topology, and solid checks
   → decimate again with the same max_faces
@@ -34,6 +34,8 @@ PyMeshFix remain intact as tools but no longer run by default.
 - Wrap parts independently using one whole-mesh scale: the measured recipe is
   `diag/800`, `diag/2000`, visually confirmed on three real models; see
   [the recipe evidence](discovered-bugs.md#settled-diagonal-ratio-recipe-alphadiag800-offsetdiag2000).
+  Capped at 0.15/0.06 so a large model stays at the finest resolution
+  actually validated rather than scaling up unbounded.
 - Judge repair before final decimation: later operations must not hide destruction.
 - Validate final output: re-decimation can recreate defects or destroy geometry.
   Final volume retention uses the existing repair input volume baseline.
