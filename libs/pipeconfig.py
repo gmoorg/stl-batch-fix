@@ -39,6 +39,10 @@ call before splitting. Each step checks its own flag and handles exceptions.
   not by the caller.
 - Every step catches what its own underlying call raises and converts it to
   `(False, mesh, detail)`, so an exception never escapes past this contract.
+
+Why this shape rather than tool-specific code inline in `repairer` — owner
+decision, 2026-09-21 — is in docs/refactor/modules.md's "The uniform step
+interface, and why it exists", once, rather than repeated per module.
 """
 
 from __future__ import annotations

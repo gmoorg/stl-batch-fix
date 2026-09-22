@@ -8,6 +8,41 @@ without importing `stl_batch_fix.py`, depending on its globals, or assuming
 its CLI, TUI, worker lifecycle, or filesystem layout. The legacy script remains
 reference material until the refactor is complete.
 
+## The uniform step interface, and why it exists
+
+Every repair operation — `welder.step_weld_close_tjunctions`,
+`blender.step_blender_repair`, `meshfix.step_meshfix_repair`,
+`meshlab.step_clean_*`/`step_orient`, `alphawrap.step_alpha_wrap` — shares one
+signature: `(mesh: Mesh) -> tuple[bool, Mesh, str]`. Full contract rules
+(what `ok=False` means, how a disabled flag reports itself, exception
+handling) live in `libs/pipeconfig.py`'s own "The step contract" docstring
+section, next to the flags that gate these steps; this is the *why*, once,
+rather than repeated in every module entry below.
+
+**Owner decision, 2026-09-21.** Before this, the repair sequence was three
+near-identical hand-written blocks — "mark time, call the tool, record the
+result, stop on failure" — one for weld, one for CLEAN, one for the per-part
+tools. `repairer.py` was hard to read because tool mechanics (which
+PyMeshLab filter, which parameters) were mixed into repair policy (what runs,
+in what order). A uniform shape fixes that on three axes at once:
+
+- **`repairer` reads as an ordered list, not tool-specific code.** Every
+  step is a `(name, step_fn)` pair in a tuple; the sequence is legible
+  without reading into any one tool's implementation.
+- **`repair(tool=...)` needs no adapter.** A caller-supplied replacement for
+  the whole per-part sequence already satisfies the same interface every
+  built-in step does, so injecting one is a plain substitution.
+- **A skip and a real run take the same code path.** The flag is checked
+  *inside* the step, not by `repairer` calling it — so `repairer` never
+  needs its own `if enabled:`, and a skipped step still appears in
+  `Result.steps` with `detail` saying so, rather than silently vanishing
+  from the log.
+
+Exceptions are caught *inside* each step, not centrally in `repairer`, for
+the same reason: the `detail` string already says where a failure happened
+without `repairer` needing to know what could go wrong inside a specific
+tool.
+
 ## Data and tools
 
 ### `mesh_io`
