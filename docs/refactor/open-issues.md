@@ -83,7 +83,7 @@ No final face-budget gate is required; `max_faces` is a decimation target. See t
 
 ## Runner and concurrency
 
-- **Add a startup hard-requirement check to the main entry script, once it exists.** Owner decision, 2026-09-21: Blender, `fast_simplification`, PyMeshFix, and PyMeshLab are all hard requirements — none has an in-process fallback. `repairer.is_available()` used to report this (`(not ENABLE_BLENDER_PART or blender.is_available()) and (not ENABLE_PART_TOOL or meshfix.is_available()) and meshlab.is_available()`) but was removed: `repairer`/`processor` are not the right place for a whole-run startup check, and there is no new-refactor main script yet to hold it (the batch runner itself is the unfinished item directly below). Re-add an equivalent check — now that they're all hard requirements, likely just "assert all four `is_available()`" rather than the old flag-conditional version — as one of the first things the runner does, once it exists.
+- **Startup hard-requirement check implemented** in [`tools/batch_repair.py`](../../tools/batch_repair.py) (runner milestone 1). Owner decision, 2026-09-21: Blender, `fast_simplification`, PyMeshFix, and PyMeshLab are all hard requirements — none has an in-process fallback. The runner checks all four plus CGAL before intake, regardless of pipeline flags, and exits with status 2 naming every missing dependency.
 - Build serial runner, per-file isolation, scheduling, reporting, and shared adapters.
 - Surface converter, copy, selector, child, and reporting failures exactly once.
 - Resolve OBJ/STL same-stem collisions.
