@@ -50,7 +50,8 @@ def _run(args):
     terminal = Counter()
     published = Counter()
     diagnostics = []
-    for mesh in emitted:
+    for index, mesh in enumerate(emitted, start=1):
+        print(f'[{index}/{len(emitted)}] {mesh.path}', file=sys.stderr, flush=True)
         stage = 'intake'
         category = 'intake_failure'
         reason = mesh.problem or 'invalid intake mesh'
@@ -78,7 +79,10 @@ def _run(args):
         except Exception as error:
             reason = f'{type(error).__name__}: {error}'
         terminal[category] += 1
-        if category != 'published' or outcome.indicator is not Indicator.PROCESS:
+        clean = category == 'published' and outcome.indicator is Indicator.PROCESS
+        print(f'[{index}/{len(emitted)}] {"ok" if clean else category}: {mesh.path}',
+              file=sys.stderr, flush=True)
+        if not clean:
             diagnostics.append((mesh.path, stage, reason))
 
     total = sum(terminal.values())
