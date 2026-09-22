@@ -49,7 +49,8 @@ PART_MESH_STEPS: tuple[tuple[str, Callable[[Mesh], tuple[bool, Mesh, str]]], ...
 )
 
 #: Allow float re-rounding when counting retained vertices. This absolute
-#: threshold is a known scale risk; see docs/refactor/open-issues.md.
+#: threshold is a known scale risk; see
+#: archive/docs-refactor-2026-09-22/open-issues.md.
 LOST_VERTEX_TOLERANCE = 1e-4
 
 

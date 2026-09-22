@@ -4,9 +4,8 @@ Repair STL models in batches for **FDM printing** while preserving the intended 
 
 ## Start here in a new session
 
-1. Open the compact [refactor index](docs/refactor/README.md) and follow only the topic needed: modules, pipeline, orchestration, interfaces, tests, or open issues.
-2. Read [review findings](libs/review/CODE_REVIEW.md) only when detailed reproductions or the owner's comment slots are needed.
-3. Check the relevant `libs/*.py` and `tests/tests/test_*.py` before editing.
+1. Read [modules](docs/refactor/modules.md), [orchestration](docs/refactor/orchestration.md), and [tests](docs/refactor/tests.md) — the three live compact references. Older investigation docs (Amidara/Mandy findings, the pre-alpha-wrap pipeline order, open issues, `.fixcfg`/CLI interfaces) moved to `archive/docs-refactor-2026-09-22/` on 2026-09-22 once alpha wrapping replaced the tools they were investigating; read them only for historical measurement detail.
+2. Check the relevant `libs/*.py` and `tests/tests/test_*.py` before editing.
 
 For every non-trivial task, Claude Code leads the [Claude–Codex workflow](COLLABORATION.md): Codex independently validates intent before planning, challenges the plan, and reviews the completed change when Claude implements. Agreement advances automatically; user input is reserved for material ambiguity, consequential disagreement or preference, and actions requiring explicit approval.
 
@@ -40,4 +39,4 @@ tools/project_python.sh tests/tests/make_fixtures.py --check
 tools/project_python.sh tools/make_probe_meshes.py tests/probes
 ```
 
-Test modules live under `tests/tests/`; legacy pipeline fixtures remain in `tests/fixtures/`, while refactor regression models live in `tests/probes/`. `tests/tests/make_fixtures.py` regenerates and validates both sets. Direct test files, including `tests/tests/test_pipeline.py`, also require the environment interpreter. That pipeline test exercises the **legacy** script and is not refactor coverage. When changing a refactor step, update its focused test and the relevant compact reference or [open issue](docs/refactor/open-issues.md). Keep code comments on local contracts and invariants; keep experiments and rationale in docs.
+Test modules live under `tests/tests/`; legacy pipeline fixtures remain in `tests/fixtures/`, while refactor regression models live in `tests/probes/`. `tests/tests/make_fixtures.py` regenerates and validates both sets. Direct test files, including `tests/tests/test_pipeline.py`, also require the environment interpreter. That pipeline test exercises the **legacy** script and is not refactor coverage. When changing a refactor step, update its focused test and the relevant compact reference or [open issue](archive/docs-refactor-2026-09-22/open-issues.md). Keep code comments on local contracts and invariants; keep experiments and rationale in docs.

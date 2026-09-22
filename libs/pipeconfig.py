@@ -7,8 +7,9 @@ effect. These are module-level rather than function parameters because they
 describe an experiment on the whole run, not a property of one mesh: set them
 before calling `repair`, not per part. Several are recorded elsewhere as
 *harmful* on real models (see the per-flag notes and
-docs/refactor/discovered-bugs.md) and the argument for or against a step was
-settled by running the pipeline without it — that is what these exist for.
+archive/docs-refactor-2026-09-22/discovered-bugs.md) and the argument for or
+against a step was settled by running the pipeline without it — that is
+what these exist for.
 
 All default `True` except `ENABLE_SPLIT_SEAMS`. The current default route
 uses only shell splitting and alpha wrapping; the other tool flags remain
@@ -72,7 +73,8 @@ ENABLE_SPLIT_SHELLS = True
 #: when True, `repairer.repair` does call `splitter.by_seams` on each shell
 #: part. Enabling it is an experiment, not a default, because repairing the
 #: resulting open regions independently is measured as destructive on real
-#: models — see mandy-volume-loss.md's unconditional-seam-splitting finding.
+#: models — see archive/docs-refactor-2026-09-22/mandy-volume-loss.md's
+#: unconditional-seam-splitting finding.
 ENABLE_SPLIT_SEAMS = False
 
 #: 3b/14. Orient each part outward. **Measured harmful**: takes Amidara base
@@ -85,16 +87,18 @@ ENABLE_ORIENT = True
 #: an explicit wholesale replacement for PyMeshFix
 #: (`repair(tool=blender.step_blender_repair)`) and was never reachable in
 #: the default sequence — this switch puts it there, before PyMeshFix, so
-#: it stops being unused. This fulfils the
-#: *order* half of the open target in libs/review/CODE_REVIEW.md ("Blender
-#: must appear in the final per-part route"); the defect-based selector half
-#: — routing a part to one tool, the other, or both based on what it
-#: actually needs — remains unimplemented, tracked in open-issues.md. Not a
-#: claim that Blender specifically fixes non-manifold geometry: an earlier
-#: version of this comment made that claim and the owner retracted it —
-#: docs/refactor/pipeline.md's own measurement record says the opposite
-#: (Blender better on holes/fins, PyMeshFix better on non-manifold geometry
-#: and winding seams).
+#: it stops being unused. This fulfilled the *order* half of a target
+#: recorded in the (since removed, 2026-09-22, no longer relevant)
+#: libs/review/CODE_REVIEW.md ("Blender must appear in the final per-part
+#: route"); the defect-based selector half — routing a part to one tool,
+#: the other, or both based on what it actually needs — was never built,
+#: and this whole per-part sequence (orient/Blender/PyMeshFix) was unwired
+#: 2026-09-22 in favor of alpha wrapping regardless. Not a claim that
+#: Blender specifically fixes non-manifold geometry: an earlier version of
+#: this comment made that claim and the owner retracted it —
+#: archive/docs-refactor-2026-09-22/pipeline.md's own measurement record
+#: says the opposite (Blender better on holes/fins, PyMeshFix better on
+#: non-manifold geometry and winding seams).
 ENABLE_BLENDER_PART = True
 
 #: 3b/15. Run PyMeshFix on each part, after Blender. Disabling this passes
@@ -114,14 +118,15 @@ ENABLE_FILL_BOUNDARIES = True
 #: **This is the destructive call**: it deletes 36,342 faces from a
 #: watertight Amidara base, 99.6% of that loss being self-intersection
 #: removal cascading through retriangulation.
-#: See docs/refactor/amidara-clean-destroys.md.
+#: See archive/docs-refactor-2026-09-22/amidara-clean-destroys.md.
 
 # each step should have it own flag! No master switch!
 ENABLE_CLEAN = True
 
 #: Default repair: alpha=min(whole diagonal/800, 0.15), offset=min(whole
 #: diagonal/2000, 0.06). Measured and visually confirmed on base, hands_2,
-#: and Torso (2026-09-22): docs/refactor/discovered-bugs.md, "Settled
-#: diagonal-ratio recipe"; the cap was added afterward so a large model
-#: stays at the finest validated resolution instead of scaling up unbounded.
+#: and Torso (2026-09-22): archive/docs-refactor-2026-09-22/discovered-bugs.md,
+#: "Settled diagonal-ratio recipe"; the cap was added afterward so a large
+#: model stays at the finest validated resolution instead of scaling up
+#: unbounded.
 ENABLE_ALPHA_WRAP = True

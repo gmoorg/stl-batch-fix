@@ -8,7 +8,7 @@ isolated per-file children. Steps 5 ("sort/admit Jobs with `pool.Pool`")
 and the isolated-child boundary ("isolated child per file", `FileResult`
 over JSON) are the next planned milestone, not yet built. See
 [Build order](#build-order) below and
-[open issues](open-issues.md#runner-and-concurrency).
+[open issues](../archive/docs-refactor-2026-09-22/open-issues.md#runner-and-concurrency).
 
 ## Module order
 
@@ -33,8 +33,8 @@ CLI or TUI → RunConfig
 Every call the pipeline makes to a single mesh, in order, with what each step
 is for and when it runs. Steps marked **conditional** are skipped when their
 condition is not met. This table reflects the alpha-wrap default sequence
-adopted 2026-09-22 (see [discovered bugs](discovered-bugs.md#a-two-pass-recipe-that-did-work-2026-09-22)
-and [the one-file pipeline](pipeline.md)) — the earlier weld/CLEAN/orient/
+adopted 2026-09-22 (see [discovered bugs](../archive/docs-refactor-2026-09-22/discovered-bugs.md#a-two-pass-recipe-that-did-work-2026-09-22)
+and [the one-file pipeline](../archive/docs-refactor-2026-09-22/pipeline.md)) — the earlier weld/CLEAN/orient/
 Blender/PyMeshFix sequence this table used to describe is no longer the
 default; those tools remain in the codebase and importable, only unwired.
 
@@ -77,7 +77,7 @@ default; those tools remain in the codebase and importable, only unwired.
 | 17 | `scanner.scan` → `UNREPAIRED` | reject remaining non-manifold edges | **conditional** — when `scan.non_manifold > 0` |
 | 18 | → `OPEN_EDGES` | reject remaining holes | **conditional** — when `scan.open_edges > 0` |
 | 19 | `scanner.component_volume` → `BROKEN` | reject a surface that encloses nothing. Four faces on a line own every edge twice and score `nm=0, open=0, is_clean=True` while being no solid at all | **conditional** — when the enclosed volume is not finite and positive |
-| — | *the second decimation pass (step 14/14a above) and its own face-budget/finite/volume/topology validation happen here too, before* | `PROCESS` *is reached — see* [pipeline.md](pipeline.md) *for the exact order* | |
+| — | *the second decimation pass (step 14/14a above) and its own face-budget/finite/volume/topology validation happen here too, before* | `PROCESS` *is reached — see* [pipeline.md](../archive/docs-refactor-2026-09-22/pipeline.md) *for the exact order* | |
 | 20 | → `PROCESS` | accept | when every gate above passed |
 
 ### Commit
@@ -123,8 +123,8 @@ destructive on real models.
 The weld/CLEAN/orient/Blender/PyMeshFix rows above, and the measurement
 table that used to compare their on/off combinations on `Amidara_..._base`,
 described the pre-2026-09-22 default sequence — see
-[discovered bugs](discovered-bugs.md) and
-[pipeline.md](pipeline.md#why-this-order) for the alpha-wrap era's own
+[discovered bugs](../archive/docs-refactor-2026-09-22/discovered-bugs.md) and
+[pipeline.md](../archive/docs-refactor-2026-09-22/pipeline.md#why-this-order) for the alpha-wrap era's own
 measurements (the settled `alpha=diag/800, offset=diag/2000` recipe,
 capped at 0.15/0.06).
 
@@ -134,7 +134,7 @@ Steps 15–20 are the entire verdict, and they do not test winding directly —
 though alpha-wrap's own watertight/manifold/self-intersection-free guarantee
 (unconditional, regardless of input winding) sidesteps the specific failure
 mode this section originally documented (a mesh with hundreds of inverted
-faces reaching `PROCESS` unnoticed). See [discovered bugs](discovered-bugs.md)
+faces reaching `PROCESS` unnoticed). See [discovered bugs](../archive/docs-refactor-2026-09-22/discovered-bugs.md)
 for what alpha-wrap does and does not guarantee — topology, not fidelity or
 triangle budget.
 

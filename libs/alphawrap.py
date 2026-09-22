@@ -2,7 +2,8 @@
 
 The default repair step uses the owner-selected whole-mesh diagonal recipe:
 alpha=min(diag/800, 0.15), offset=min(diag/2000, 0.06). See
-docs/refactor/discovered-bugs.md, "Settled diagonal-ratio recipe", for
+archive/docs-refactor-2026-09-22/discovered-bugs.md,
+"Settled diagonal-ratio recipe", for
 measurements and visual confirmation; the cap keeps a large model at the
 finest resolution actually validated rather than scaling alpha/offset up
 unbounded.
