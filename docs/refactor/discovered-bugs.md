@@ -163,6 +163,34 @@ models of the same figure; no viable *surgical* repair (preserving the
 exact source triangulation) identified.**
 → [Amidara](amidara-clean-destroys.md)
 
+## Settled diagonal-ratio recipe: alpha=diag/800, offset=diag/2000
+
+Tested 2026-09-22, separately from the two-pass median-distance recipe
+above: a simpler formula with offset held fixed at `diag/2000`, alpha
+swept from `diag/300` to `diag/1000`, on 3 real models (`base`, `hands_2`,
+`Fixing/Torso.stl` decimated to 900k faces first):
+
+| alpha | offset | base time/vol | hands_2 time/vol | torso time/vol | combined time |
+|---|---|---|---|---|---:|
+| diag/300 | diag/2000 | 14.5s / 102.85% | 21.3s / 101.31% | 47.3s / 101.56% | 83.1s |
+| **diag/800** | **diag/2000** | 84.4s / 102.20% | 127.6s / 101.25% | 206.7s / 101.38% | **418.7s** |
+| diag/1000 | diag/2000 | 129.9s / 102.16% | 195.5s / 101.25% | 299.0s / 101.37% | 624.4s |
+
+All three score nearly identically on volume (within 0.3 percentage
+points). **The owner inspected the actual files and rejected `diag/300`
+as visually terrible despite its good numbers** — another instance of
+this project's recurring finding that automated metrics (volume, AABB
+distance) do not reliably predict visual quality; every number above is
+a screening step, not a verdict. `diag/1000` over `diag/800` cost ~50%
+more time (30s combined) for no visible difference, which the owner
+judged not worth it.
+
+**Settled: `alpha = diag/800, offset = diag/2000`.** Not yet reconciled
+with the two-pass median-distance recipe above — both were found in the
+same session; this one needs no coarse first pass and is the one chosen
+by direct visual inspection across 3 models, but the two have not been
+compared head-to-head on the same model.
+
 ## What CLEAN steps 9 and 10 are worth
 
 Measured 2026-09-21 with the new step switches, running every sphere probe with
