@@ -1,5 +1,15 @@
 # Final batch orchestration
 
+**Status, 2026-09-22:** `tools/batch_repair.py` (milestone 1, committed
+2026-09-22) implements steps 1–4 and 6–8 of this diagram — intake via
+`converter.prepare`, dependency validation, and commit — but processes
+jobs **serially in the main process**, not through `pool.Pool` with
+isolated per-file children. Steps 5 ("sort/admit Jobs with `pool.Pool`")
+and the isolated-child boundary ("isolated child per file", `FileResult`
+over JSON) are the next planned milestone, not yet built. See
+[Build order](#build-order) below and
+[open issues](open-issues.md#runner-and-concurrency).
+
 ## Module order
 
 ```text
@@ -22,8 +32,11 @@ CLI or TUI → RunConfig
 
 Every call the pipeline makes to a single mesh, in order, with what each step
 is for and when it runs. Steps marked **conditional** are skipped when their
-condition is not met. Anything marked *(not implemented)* is designed but
-absent from `repairer.repair` today.
+condition is not met. This table reflects the alpha-wrap default sequence
+adopted 2026-09-22 (see [discovered bugs](discovered-bugs.md#a-two-pass-recipe-that-did-work-2026-09-22)
+and [the one-file pipeline](pipeline.md)) — the earlier weld/CLEAN/orient/
+Blender/PyMeshFix sequence this table used to describe is no longer the
+default; those tools remain in the codebase and importable, only unwired.
 
 ### Intake
 
@@ -45,37 +58,33 @@ absent from `repairer.repair` today.
 
 | # | step | goal | condition |
 |---|---|---|---|
-| 7 | `welder.repair` | split faces at T-junctions, where a vertex sits on another face's edge without being part of it. Adds faces, moves and deletes nothing | always |
-| 8 | `meshing_remove_null_faces` | drop zero-area faces, which own edges without enclosing anything and corrupt every later edge count | always |
-| 9 | `meshing_merge_close_vertices` | weld vertices within 0.1% of the bounding-box diagonal, so duplicate surfaces become one | always — **and measured harmful**: on `Amidara_..._base` it merges one vertex and creates two non-manifold edges. See [discovered bugs](discovered-bugs.md) |
-| 10 | `meshing_remove_duplicate_faces` | remove faces repeated after the merge, which would otherwise read as non-manifold | always |
-| 11 | `meshing_remove_unreferenced_vertices` | drop vertices no face uses any more | always |
-| 12 | `splitter.by_shells` | separate edge-connected components, because PyMeshFix rebuilds one surface and discards the rest — an unsplit multi-shell mesh comes back as its largest shell alone | **conditional** — returns the mesh unchanged when there is one component; components under `MIN_SHELL_FACES=100` are **dropped** |
-| 13 | `splitter.by_seams` | separate regions whose winding contradicts itself | *(not implemented in the default sequence)* — exists and is tested; `repairer.repair` calls it only when `pipeconfig.ENABLE_SPLIT_SEAMS` is explicitly set True (default False) |
-| — | **per part, steps 14–15b run once each, composed from uniform `step(mesh) -> (ok, mesh, detail)` calls** | | |
-| 14 | `meshing_re_orient_faces_by_geometry` | make every face point outward, since a signed-volume check misses locally inverted patches | always, per part — takes `base` from 922 winding-seam edges to 7,659 before the next steps see it, but **not harmful to the result**: disabling it changes the output by 28 faces and +0.33pp |
-| 14a | `blender.step_blender_repair` → `blender_fx/repair.blender` through PLY | delete wire edges and non-manifold faces, remove fins, fill holes — targets non-manifold geometry and open boundaries specifically | **conditional** — `pipeconfig.ENABLE_BLENDER_PART`, default **on** (owner decision, 2026-09-21; was previously reachable only as an explicit `tool=` replacement, never in the default sequence) |
-| 15 | `meshfix.step_meshfix_repair` → `fill_small_boundaries(0, True)` then `clean()` | close holes, then delete self-intersecting and degenerate geometry — runs on whatever step 14a produced | **conditional** — `pipeconfig.ENABLE_PART_TOOL`, default on — **and the destructive half**: removes 36,342 faces from a watertight `base` run through this step alone. See [Amidara](amidara-clean-destroys.md) |
-| 16 | *part failure gate* | stop the whole file rather than merging back a part that could not be repaired | **conditional** — only when any of steps 14, 14a, or 15 returns `ok=False` |
-| 17 | `splitter.merge` | concatenate the repaired parts into one mesh. Does **not** weld coincident vertices at former cuts | **conditional** — returns the single part unchanged when there is one |
-| 18 | *finite check* | reject NaN or infinite coordinates before any measurement touches them | always |
+| 7 | *(none)* — `WHOLE_MESH_STEPS` is `()` | weld and the four CLEAN filters ran here through 2026-09-21; removed from the default sequence, tools remain importable (`welder.step_weld_close_tjunctions`, `meshlab.step_clean_*`) | *(unwired — no longer runs by default)* |
+| 8 | `splitter.by_shells` | separate edge-connected components before repair runs, since alpha-wrap operates on one part at a time | **conditional** — returns the mesh unchanged when there is one component; components under `MIN_SHELL_FACES=100` are **dropped** |
+| 9 | `splitter.by_seams` | separate regions whose winding contradicts itself | *(not implemented in the default sequence)* — exists and is tested; `repairer.repair` calls it only when `pipeconfig.ENABLE_SPLIT_SEAMS` is explicitly set True (default False) |
+| 10 | `alphawrap.step_alpha_wrap` — CGAL Alpha Wrapping | reconstruct each retained part as a watertight, manifold, self-intersection-free solid at `alpha=min(diag/800, 0.15)`, `offset=min(diag/2000, 0.06)`, where `diag` is the **whole pre-split mesh's** bounding-box diagonal, bound once per `repair()` call via `functools.partial` — not each part's own diagonal | always, per part — **conditional** on `pipeconfig.ENABLE_ALPHA_WRAP` (default True); orient/Blender/PyMeshFix (`meshlab.step_orient`, `blender.step_blender_repair`, `meshfix.step_meshfix_repair`) ran here through 2026-09-21 and remain importable but unwired |
+| 11 | *part failure gate* | stop the whole file rather than merging back a part that could not be repaired | **conditional** — only when step 10 returns `ok=False` |
+| 12 | `splitter.merge` | concatenate the repaired parts into one mesh. Does **not** weld coincident vertices at former cuts | **conditional** — returns the single part unchanged when there is one |
+| 13 | *finite check* | reject NaN or infinite coordinates before any measurement touches them | always |
+| 14 | `decimator.decimate` (second pass) | alpha-wrap can produce far more triangles than it was given; bring the merged, repaired mesh back under the same `max_faces` the first pass used | **conditional** — only runs once the repair-stage measurability/destruction checks below (steps 15–16) already passed on the pre-decimation repair result, so a later operation cannot conceal an already-rejected repair; `max_faces <= 0` disables it, same as the first pass |
+| 14a | *final face-budget gate* | reject rather than silently ship an over-budget mesh — the only one of the two decimation passes with this hard postcondition | **conditional** — only when the second pass's actual output exceeds a positive `max_faces` |
 
 ### Judge — `processor._decide`, in this order
 
 | # | step | goal | condition |
 |---|---|---|---|
-| 19 | measurability gate → `FAILED` | refuse an unmeasurable volume instead of comparing it, since every `<` test below is False against NaN and would wave it through | **conditional** — when `volume_in`, `volume_out` or their ratio is not finite |
-| 20 | destruction gate → `DESTROYED` | catch a repair that kept less than `MIN_VOLUME_KEPT=0.90` of the volume. **Asked before the topology tests**, because a half-model is a valid closed surface and would otherwise pass them | **conditional** — when `volume_kept < 0.90` |
-| 21 | `scanner.scan` → `UNREPAIRED` | reject remaining non-manifold edges | **conditional** — when `scan.non_manifold > 0` |
-| 22 | → `OPEN_EDGES` | reject remaining holes | **conditional** — when `scan.open_edges > 0` |
-| 23 | `scanner.component_volume` → `BROKEN` | reject a surface that encloses nothing. Four faces on a line own every edge twice and score `nm=0, open=0, is_clean=True` while being no solid at all | **conditional** — when the enclosed volume is not finite and positive |
-| 24 | → `PROCESS` | accept | when every gate above passed |
+| 15 | measurability gate → `FAILED` | refuse an unmeasurable volume instead of comparing it, since every `<` test below is False against NaN and would wave it through | **conditional** — when `volume_in`, `volume_out` or their ratio is not finite |
+| 16 | destruction gate → `DESTROYED` | catch a repair that kept less than `MIN_VOLUME_KEPT=0.90` of the volume. **Asked before the topology tests**, because a half-model is a valid closed surface and would otherwise pass them | **conditional** — when `volume_kept < 0.90` |
+| 17 | `scanner.scan` → `UNREPAIRED` | reject remaining non-manifold edges | **conditional** — when `scan.non_manifold > 0` |
+| 18 | → `OPEN_EDGES` | reject remaining holes | **conditional** — when `scan.open_edges > 0` |
+| 19 | `scanner.component_volume` → `BROKEN` | reject a surface that encloses nothing. Four faces on a line own every edge twice and score `nm=0, open=0, is_clean=True` while being no solid at all | **conditional** — when the enclosed volume is not finite and positive |
+| — | *the second decimation pass (step 14/14a above) and its own face-budget/finite/volume/topology validation happen here too, before* | `PROCESS` *is reached — see* [pipeline.md](pipeline.md) *for the exact order* | |
+| 20 | → `PROCESS` | accept | when every gate above passed |
 
 ### Commit
 
 | # | step | goal | condition |
 |---|---|---|---|
-| 25 | `processor.write` | write the repaired STL, or the marker naming why not, atomically so an interrupted write cannot look finished | always |
+| 21 | `processor.write` | write the repaired STL, or the marker naming why not, atomically so an interrupted write cannot look finished | always |
 
 ## Turning steps off
 
@@ -83,59 +92,51 @@ Every repair step has an on/off switch in `pipeconfig`, so what a step
 contributes can be measured instead of argued about. All default to the
 shipping behaviour; a disabled step still appears in `Result.steps` with
 `detail` saying it was skipped, so a log never silently omits a stage.
+The weld/CLEAN/orient/Blender/PyMeshFix flags below still exist and still
+work — they gate tools that remain fully importable — but none of them are
+in the default sequence any more; only `ENABLE_ALPHA_WRAP`,
+`ENABLE_SPLIT_SHELLS`, and `ENABLE_SPLIT_SEAMS` affect what a default run
+actually does.
 
-| step | switch | default |
-|---|---|---|
-| 7 weld | `pipeconfig.ENABLE_WELD` | True |
-| 8 null faces | `pipeconfig.ENABLE_CLEAN_NULL_FACES` | True |
-| 9 merge close | `pipeconfig.ENABLE_CLEAN_MERGE_CLOSE` | True |
-| 10 duplicate faces | `pipeconfig.ENABLE_CLEAN_DUPLICATE_FACES` | True |
-| 11 unreferenced verts | `pipeconfig.ENABLE_CLEAN_UNREFERENCED` | True |
-| 12 shell split | `pipeconfig.ENABLE_SPLIT_SHELLS` | True |
-| 13 seam split | `pipeconfig.ENABLE_SPLIT_SEAMS` | **False** |
-| 14 orient | `pipeconfig.ENABLE_ORIENT` | True |
-| 15 part tool | `pipeconfig.ENABLE_PART_TOOL` | True |
-| 15a fill boundaries | `pipeconfig.ENABLE_FILL_BOUNDARIES` | True |
-| 15b `clean()` | `pipeconfig.ENABLE_CLEAN` | True |
-| 15b arguments | `meshfix.CLEAN_MAX_ITERS`, `CLEAN_INNER_LOOPS` | 10, 3 |
+| step | switch | default | in default sequence? |
+|---|---|---|---|
+| alpha wrap | `pipeconfig.ENABLE_ALPHA_WRAP` | True | **yes** |
+| shell split | `pipeconfig.ENABLE_SPLIT_SHELLS` | True | **yes** |
+| seam split | `pipeconfig.ENABLE_SPLIT_SEAMS` | **False** | yes (as the off-by-default case) |
+| weld | `pipeconfig.ENABLE_WELD` | True | no — unwired 2026-09-22 |
+| null faces | `pipeconfig.ENABLE_CLEAN_NULL_FACES` | True | no — unwired 2026-09-22 |
+| merge close | `pipeconfig.ENABLE_CLEAN_MERGE_CLOSE` | True | no — unwired 2026-09-22 |
+| duplicate faces | `pipeconfig.ENABLE_CLEAN_DUPLICATE_FACES` | True | no — unwired 2026-09-22 |
+| unreferenced verts | `pipeconfig.ENABLE_CLEAN_UNREFERENCED` | True | no — unwired 2026-09-22 |
+| orient | `pipeconfig.ENABLE_ORIENT` | True | no — unwired 2026-09-22 |
+| Blender part | `pipeconfig.ENABLE_BLENDER_PART` | True | no — unwired 2026-09-22 |
+| part tool (PyMeshFix) | `pipeconfig.ENABLE_PART_TOOL` | True | no — unwired 2026-09-22 |
+| fill boundaries | `pipeconfig.ENABLE_FILL_BOUNDARIES` | True | no — unwired 2026-09-22 |
+| `clean()` | `pipeconfig.ENABLE_CLEAN` | True | no — unwired 2026-09-22 |
+| `clean()` arguments | `meshfix.CLEAN_MAX_ITERS`, `CLEAN_INNER_LOOPS` | 10, 3 | no — unwired 2026-09-22 |
 
 `ENABLE_SPLIT_SEAMS` is the one switch that is off by default and turns a step
 *on*: when True, `repairer.repair` does call `by_seams` on each shell part.
 Enabling it repairs each seam region independently, which is measured as
 destructive on real models.
 
-```python
-from libs import meshfix, pipeconfig
-pipeconfig.ENABLE_CLEAN_MERGE_CLOSE = False   # step 9
-pipeconfig.ENABLE_CLEAN = False               # step 15b
-```
-
-The `CLEAN_MAX_ITERS`/`CLEAN_INNER_LOOPS` value-parameters on the row above
-are not yet in `pipeconfig` — only the on/off switches have moved there so
-far; see [open issues](open-issues.md) for the deferred value-parameter
-inventory.
-
-Measured on `Amidara_..._base.stl` (315,482 faces in):
-
-| configuration | faces out | volume kept |
-|---|---:|---:|
-| default | 279,168 | 96.93% |
-| steps 9 + 10 off | 279,168 | **96.93% — identical** |
-| step 14 off | 279,140 | 97.26% |
-| step 15b off | 318,968 | **99.81%** |
-| steps 9, 14, 15b off | 320,152 | **99.81%** |
-
-Two things that reads off directly: the CLEAN filters do no useful work on this
-model, and `clean()` alone accounts for essentially the whole loss. Note that
-99.81% is not a repair — the owner's inspection found the patched faces
-inverted in those outputs. See [discovered bugs](discovered-bugs.md).
+The weld/CLEAN/orient/Blender/PyMeshFix rows above, and the measurement
+table that used to compare their on/off combinations on `Amidara_..._base`,
+described the pre-2026-09-22 default sequence — see
+[discovered bugs](discovered-bugs.md) and
+[pipeline.md](pipeline.md#why-this-order) for the alpha-wrap era's own
+measurements (the settled `alpha=diag/800, offset=diag/2000` recipe,
+capped at 0.15/0.06).
 
 ### What the judge cannot see
 
-Steps 19–24 are the entire verdict, and they do not test winding. A mesh with
-hundreds of inverted faces reaches step 24 and is written as a success — which
-is how both known model-destroying bugs pass every check. See
-[discovered bugs](discovered-bugs.md).
+Steps 15–20 are the entire verdict, and they do not test winding directly —
+though alpha-wrap's own watertight/manifold/self-intersection-free guarantee
+(unconditional, regardless of input winding) sidesteps the specific failure
+mode this section originally documented (a mesh with hundreds of inverted
+faces reaching `PROCESS` unnoticed). See [discovered bugs](discovered-bugs.md)
+for what alpha-wrap does and does not guarantee — topology, not fidelity or
+triangle budget.
 
 ## Required behavior
 
@@ -162,3 +163,46 @@ is how both known model-destroying bugs pass every check. See
 ## Build order
 
 Define `RunConfig`, `Job`, `FileResult`, `RunEvent`, and `RunSummary`; build a serial runner; add child isolation; add scheduling/admission; add reporting; then point CLI and TUI at the shared runner. Do not port legacy `_process_file_impl` repair logic.
+
+**Status, 2026-09-22:**
+
+1. ~~Define `RunConfig`, `Job`, `FileResult`, `RunEvent`, `RunSummary`~~ —
+   **not done**. `tools/batch_repair.py` uses plain function arguments and
+   in-memory counters/lists instead of these named value types.
+2. **Done, informally.** `tools/batch_repair.py` is a serial runner:
+   `converter.prepare` intake, then a serial per-mesh loop
+   (`mesh_io.load` → `processor.process` → `processor.write`), with
+   per-file try/except, mutually-exclusive terminal-result categories,
+   and a printed run summary. Milestone 1, deliberately scoped narrower
+   than this document — no `RunConfig`/`FileResult` types, no event
+   stream, no child isolation.
+3. **Not done — next milestone.** Move one job into a child process
+   (matching the legacy `--one-file` entry's role, described in the
+   archived design at
+   `archive/docs-before-compact-2026-09-19/refactor/pool/d3.md`,
+   `d8.md`, `d10.md`): a worker thread owns a `Popen`, and
+   `communicate(timeout=)` is the sole timeout/kill mechanism — there is
+   no watchdog process, because the thread that spawned the child is
+   the thread that can kill it. This also fixes a real problem found
+   2026-09-22: CGAL's `alpha_wrap_3` runs in-process and cannot be
+   interrupted by Ctrl+C while it is running (no Python bytecode
+   boundary for the signal to land on); putting it behind a subprocess
+   boundary makes it killable the same way Blender already is.
+4. **Not done.** `pool.Pool` is not yet driving `batch_repair.py`'s
+   per-file loop; there is no scheduling, admission, or memory-aware
+   worker sizing.
+5. **Not done.** No structured event stream; only printed summary text.
+6. **Not applicable yet.** No CLI/TUI beyond `batch_repair.py`'s own
+   `argparse` interface; `stl_batch_fix_tui.py` still drives the legacy
+   script, untouched.
+
+The original 2026-09-18 plan for this build order, including the
+`RunConfig`/`Job`/`FileResult`/`RunEvent`/`RunSummary` shared contracts and
+the full phase-by-phase implementation plan, survives at
+`archive/docs-before-compact-2026-09-19/refactor/final-behavior.md` — it
+was dropped from the live doc set during the 2026-09-19 compaction without
+being carried forward. Its **batch-level architecture is still the target**
+(thread pool driving isolated `--one-file`-style child processes, not a
+process pool); only its **mesh-level step sequence** (the old weld → CLEAN →
+split → orient → PyMeshFix → Blender → merge order) is superseded by the
+alpha-wrap sequence this file's own step table now describes.
