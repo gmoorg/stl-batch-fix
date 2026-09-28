@@ -1,15 +1,8 @@
 # Refactor decisions
 
-The live record was compacted into topic references. As of 2026-09-22, only
-three stay live in `docs/refactor/` — the rest moved to
-`archive/docs-refactor-2026-09-22/` once alpha wrapping replaced the tools
-they were investigating (weld/CLEAN/orient/Blender/PyMeshFix):
+Current behavior: [modules](docs/refactor/modules.md) and
+[pipeline](docs/refactor/orchestration.md). Open decisions and planned changes:
+[TODO](docs/refactor/TODO.md). Read only the section needed for the task.
 
-- [Module responsibilities, interfaces, implementation notes, and rejected attempts](docs/refactor/modules.md) — live
-- [Final module orchestration and runner plan](docs/refactor/orchestration.md) — live
-- [Tests and fixtures](docs/refactor/tests.md) — live
-- [One-file pipeline order and rejected orders](archive/docs-refactor-2026-09-22/pipeline.md) — archived
-- [CLI, TUI, and `.fixcfg`](archive/docs-refactor-2026-09-22/interfaces.md) — archived
-- [Open issues](archive/docs-refactor-2026-09-22/open-issues.md) — archived
-
-The original D1–D27 notes and experiments are preserved under `archive/docs-before-compact-2026-09-19/refactor/`. Use them only for exact historical evidence; the compact references and current code take precedence.
+Exact historical D1–D27 rationale and investigation records are routed through
+[the archive index](archive/README.md); they are not current specifications.

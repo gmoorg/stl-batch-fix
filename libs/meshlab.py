@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import pipeconfig
 from .mesh_io import Geometry, Mesh, require_geometry
 
 try:
@@ -55,16 +54,13 @@ def apply_filters(mesh: Mesh,
     return mesh.with_geometry(from_mesh(ms.current_mesh()))
 
 
-def _step(mesh: Mesh, enabled: bool, flag_name: str,
-         filter_name: str, params: dict) -> tuple[bool, Mesh, str]:
+def _step(mesh: Mesh, filter_name: str, params: dict) -> tuple[bool, Mesh, str]:
     """Shared body for the five uniform steps built from a single PyMeshLab
-    filter (the four CLEAN filters and orient): check its flag, run its
-    filter, catch what `apply_filters` raises — `apply_filters` raises
-    rather than returning a failure, so it is this function's job to
-    convert that into `pipeconfig`'s uniform step contract.
+    filter (the four CLEAN filters and orient): run its filter, catch what
+    `apply_filters` raises — `apply_filters` raises rather than returning a
+    failure, so it is this function's job to convert that into
+    `pipeconfig`'s uniform step contract.
     """
-    if not enabled:
-        return True, mesh, f'skipped ({flag_name}=False)'
     try:
         result = apply_filters(mesh, ((filter_name, params),))
     except Exception as exc:
@@ -72,43 +68,33 @@ def _step(mesh: Mesh, enabled: bool, flag_name: str,
     return True, result, filter_name.replace('meshing_', '')
 
 
-def step_clean_null_faces(mesh: Mesh) -> tuple[bool, Mesh, str]:
+def step_clean_null_faces(mesh: Mesh, config: object | None = None) -> tuple[bool, Mesh, str]:
     """Drop zero-area faces. Uniform step: see `_step`."""
-    return _step(mesh, pipeconfig.ENABLE_CLEAN_NULL_FACES,
-                'ENABLE_CLEAN_NULL_FACES', 'meshing_remove_null_faces', {})
+    return _step(mesh, 'meshing_remove_null_faces', {})
 
 
-def step_clean_merge_close(mesh: Mesh) -> tuple[bool, Mesh, str]:
+def step_clean_merge_close(mesh: Mesh, config: object | None = None) -> tuple[bool, Mesh, str]:
     """Weld vertices within 0.1% of the bbox diagonal. Uniform step: see
     `_step`. **Measured harmful** on Amidara base — see
-    `pipeconfig.ENABLE_CLEAN_MERGE_CLOSE`."""
-    return _step(mesh, pipeconfig.ENABLE_CLEAN_MERGE_CLOSE,
-                'ENABLE_CLEAN_MERGE_CLOSE',
-                'meshing_merge_close_vertices', {'threshold': 0.1})
+    docs/refactor/modules.md's meshlab entry."""
+    return _step(mesh, 'meshing_merge_close_vertices', {'threshold': 0.1})
 
 
-def step_clean_duplicate_faces(mesh: Mesh) -> tuple[bool, Mesh, str]:
+def step_clean_duplicate_faces(mesh: Mesh, config: object | None = None) -> tuple[bool, Mesh, str]:
     """Remove faces duplicated after the merge. Uniform step: see `_step`."""
-    return _step(mesh, pipeconfig.ENABLE_CLEAN_DUPLICATE_FACES,
-                'ENABLE_CLEAN_DUPLICATE_FACES',
-                'meshing_remove_duplicate_faces', {})
+    return _step(mesh, 'meshing_remove_duplicate_faces', {})
 
 
-def step_clean_unreferenced(mesh: Mesh) -> tuple[bool, Mesh, str]:
+def step_clean_unreferenced(mesh: Mesh, config: object | None = None) -> tuple[bool, Mesh, str]:
     """Drop vertices no face references. Uniform step: see `_step`."""
-    return _step(mesh, pipeconfig.ENABLE_CLEAN_UNREFERENCED,
-                'ENABLE_CLEAN_UNREFERENCED',
-                'meshing_remove_unreferenced_vertices', {})
+    return _step(mesh, 'meshing_remove_unreferenced_vertices', {})
 
 
-def step_orient(mesh: Mesh) -> tuple[bool, Mesh, str]:
+def step_orient(mesh: Mesh, config: object | None = None) -> tuple[bool, Mesh, str]:
     """Orient one part outward, by geometry. Uniform step: see `_step`.
     Runs unconditionally after splitting, without a signed-volume guard —
     a signed-volume guard misses local inversions. **Measured harmful** on
-    Amidara base — see `pipeconfig.ENABLE_ORIENT`.
+    Amidara base — see docs/refactor/modules.md's meshlab entry.
     """
-    if not pipeconfig.ENABLE_ORIENT:
-        return True, mesh, 'orient skipped (ENABLE_ORIENT=False)'
-    ok, result, detail = _step(mesh, True, 'ENABLE_ORIENT',
-                               'meshing_re_orient_faces_by_geometry', {})
+    ok, result, detail = _step(mesh, 'meshing_re_orient_faces_by_geometry', {})
     return ok, result, ('oriented' if ok else detail)

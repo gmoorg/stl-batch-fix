@@ -13,6 +13,25 @@ A task is non-trivial when it changes behavior, algorithms, architecture, interf
 
 Codex must not merely endorse Claude's framing. It should locate contrary repository evidence and identify omitted requirements. The reviewer must judge the actual diff, not the implementer's summary.
 
+## Honest review of user proposals
+
+The user expects an honest, independent assessment of their proposals from
+both agents, not automatic agreement. Read a proposal as a whole and understand
+its purpose before evaluating the implementation suggested. Check it against
+the current code, requirements, and evidence; identify benefits, flaws,
+tradeoffs, unnecessary complexity, and conflicts with the intended outcome.
+
+State disagreement plainly when warranted, explain why with concrete evidence
+or an example, and suggest a simpler or more reliable alternative when one
+exists. Distinguish verified facts from assumptions and unresolved questions.
+Understanding a proposal does not mean endorsing it; do not describe it as
+validated merely because the user suggested it. Agreement should be reasoned,
+and objections should be substantive rather than manufactured for balance.
+
+Respect the user's final decisions after explaining relevant tradeoffs, while
+keeping factual limitations explicit. This rule applies throughout discussion,
+planning, implementation, and review, not only formal peer-review phases.
+
 ## Phase 1: validate intent before planning
 
 1. Claude reads the original user prompt and only enough repository context to state its understanding.

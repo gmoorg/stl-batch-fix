@@ -115,14 +115,20 @@ def wrap(mesh: Mesh, alpha: float, offset: float) -> Mesh:
     return mesh.with_geometry(geometry)
 
 
-def step_alpha_wrap(mesh: Mesh, *, whole_diagonal: float | None = None
+def step_alpha_wrap(mesh: Mesh, config: "pipeconfig.StepConfig | None" = None
                     ) -> tuple[bool, Mesh, str]:
-    """Wrap one part using the pre-split whole mesh's diagonal."""
-    if not pipeconfig.ENABLE_ALPHA_WRAP:
-        return True, mesh, 'skipped (ENABLE_ALPHA_WRAP=False)'
+    """Wrap one part using the pre-split whole mesh's diagonal.
+
+    Uniform step: reads `config.whole_model_diag`, set once per `repair()`
+    call and carried unchanged into every part's own `StepConfig` — see
+    `repairer._repair_sequence`. There is no on/off flag any more: whether
+    this step runs is decided by whether it appears in the caller's step
+    sequence, not by a boolean read here.
+    """
     try:
+        whole_diagonal = config.whole_model_diag if config is not None else None
         if whole_diagonal is None:
-            raise ValueError('whole_diagonal is required for alpha wrapping')
+            raise ValueError('whole_model_diag is required for alpha wrapping')
         diagonal = float(whole_diagonal)
         if not math.isfinite(diagonal) or diagonal <= 0:
             raise ValueError('whole_diagonal must be finite and positive')

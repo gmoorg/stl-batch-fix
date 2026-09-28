@@ -18,7 +18,7 @@ from unittest import mock
 
 import numpy as np
 
-from libs import mesh_io, pipeconfig, scanner, welder
+from libs import mesh_io, scanner, welder
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.welder import Result, TJunction, find, repair
 
@@ -522,14 +522,6 @@ class TestStep(unittest.TestCase):
         self.assertEqual(len(result.geometry.faces),
                          len(m.geometry.faces) + 1)
         self.assertIn('junction(s)', detail)
-
-    def test_disabled_skips_and_leaves_the_mesh_unchanged(self):
-        m, _ = with_tjunction()
-        with mock.patch.object(pipeconfig, 'ENABLE_WELD', False):
-            ok, result, detail = welder.step_weld_close_tjunctions(m)
-        self.assertTrue(ok)
-        self.assertIs(result, m)
-        self.assertIn('ENABLE_WELD=False', detail)
 
     def test_a_raised_exception_is_reported_not_propagated(self):
         unloaded = Mesh('/a.stl', '/b.stl', Kind.BINARY_STL, 4, True)

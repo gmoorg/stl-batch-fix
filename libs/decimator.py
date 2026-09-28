@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -106,3 +107,43 @@ def decimate(mesh: Mesh, max_faces: int) -> Result:
                         f"{type(exc).__name__}: {exc}"),))
     return Result(mesh.with_geometry(geometry), Rung.FAST_SIMPLIFICATION,
                   faces_in, len(geometry.faces))
+
+
+def _detail_for(result: Result) -> str:
+    """The uniform step's own detail string for one `decimate()` result."""
+    if result.rung is Rung.FAILED:
+        attempts = '; '.join(f'{rung.value}: {why}' for rung, why in result.attempts)
+        return f'decimate to {result.faces_in}f failed ({attempts})'
+    return f'{result.rung.value}, {result.faces_out} faces out'
+
+
+def make_step(sink: list[Result] | None = None
+             ) -> Callable[[Mesh, object], tuple[bool, Mesh, str]]:
+    """Build the uniform step `(mesh, config) -> (ok, mesh, detail)` for
+    decimation, reading its target from `config.faceCount`.
+
+    Both places decimation runs in the pipeline — the CLI's initial
+    whole-mesh pass in `processor.process`, and each part's post-wrap pass
+    in `repairer.repair` — call this same function, so there is one
+    implementation of "decimation as a step", not two (docs/refactor/TODO.md's
+    "use one decimator step implementation in both positions").
+
+    `sink`, when given, receives the rich `decimator.Result` for this call
+    (exactly one `append` per call) — for a caller that needs more than the
+    step's own `(ok, mesh, detail)` triple, such as `processor.process`
+    building its `Outcome.decimation` field. `sink=None` (the default)
+    retains nothing anywhere: no module state, no per-call list a caller
+    forgot to drain — the closure created by one call to `make_step()` is
+    the only place any state could live, and by default there is none. Two
+    independent calls to `make_step()` never share anything, whether or not
+    either is given a sink.
+    """
+    def step(mesh: Mesh, config: object | None = None) -> tuple[bool, Mesh, str]:
+        face_count = getattr(config, 'faceCount', 0) if config is not None else 0
+        result = decimate(mesh, face_count)
+        if sink is not None:
+            sink.append(result)
+        if result.rung is Rung.FAILED:
+            return False, mesh, _detail_for(result)
+        return True, result.mesh, _detail_for(result)
+    return step

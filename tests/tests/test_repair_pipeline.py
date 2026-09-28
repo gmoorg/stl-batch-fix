@@ -33,7 +33,7 @@ import sys
 import unittest
 from unittest import mock
 
-from libs import blender, mesh_io, meshfix, meshlab, repairer, scanner, welder
+from libs import blender, execstep, mesh_io, meshfix, meshlab, repairer, scanner, welder
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEST_ROOT = os.path.dirname(HERE)
@@ -85,6 +85,22 @@ def load(name):
     return mesh_io.load(mesh_io.probe(path, '/tmp/unused_destination.stl'))
 
 
+def tool_call_parts(result):
+    """The named per-part `Step.PART` entries for this suite's explicitly
+    configured sequence (orient, Blender, PyMeshFix — installed in
+    `ProbeCase.setUp` via `repairer.DEFAULT_PART_STEPS`).
+
+    Each entry in the sequence produces its own `Step.PART` record (the
+    uniform-step refactor removed the old force-appended
+    `_decimate_to_target_and_fix` tail — see docs/refactor/TODO.md's
+    "Uniform-step refactor" section), so this filters to the orient step's
+    own record, which is the one every test here keys off ("oriented" in
+    its detail).
+    """
+    return [s for s in result.steps
+           if s.step is repairer.Step.PART and 'oriented' in s.detail]
+
+
 @unittest.skipUnless(HAVE_TOOLS, "pymeshlab and pymeshfix are both needed")
 class ProbeCase(unittest.TestCase):
     """Base: ensures the fixtures exist before anything runs."""
@@ -93,15 +109,22 @@ class ProbeCase(unittest.TestCase):
         # These historical geometry regressions assert the old tools' exact
         # face/vertex behavior. Keep testing that explicit sequence; alpha
         # reconstruction has no vertex correspondence (test_alphawrap).
-        whole = (('weld', welder.step_weld_close_tjunctions),
-                 ('clean_null_faces', meshlab.step_clean_null_faces),
-                 ('clean_merge_close', meshlab.step_clean_merge_close),
-                 ('clean_duplicate_faces', meshlab.step_clean_duplicate_faces),
-                 ('clean_unreferenced', meshlab.step_clean_unreferenced))
-        parts = (('step_orient', meshlab.step_orient),
-                 ('step_blender_repair', blender.step_blender_repair),
-                 ('step_meshfix_repair', meshfix.step_meshfix_repair))
-        for name, value in (('WHOLE_MESH_STEPS', whole), ('PART_MESH_STEPS', parts)):
+        # `repairer.repair()` reads `entry.name`/`entry.fn` directly off
+        # `DEFAULT_PART_STEPS` (unlike a caller's own `part_steps=`, which it
+        # normalizes itself) -- see `repairer.repair`'s `part_step_name`
+        # line -- so this module-level patch must hand it real `Entry`
+        # objects, built with `execstep.mesh_entry`, not plain tuples.
+        whole = (execstep.mesh_entry('weld', welder.step_weld_close_tjunctions),
+                 execstep.mesh_entry('clean_null_faces', meshlab.step_clean_null_faces),
+                 execstep.mesh_entry('clean_merge_close', meshlab.step_clean_merge_close),
+                 execstep.mesh_entry('clean_duplicate_faces', meshlab.step_clean_duplicate_faces),
+                 execstep.mesh_entry('clean_unreferenced', meshlab.step_clean_unreferenced))
+        parts = (execstep.mesh_entry('step_orient', meshlab.step_orient),
+                 execstep.mesh_entry('step_blender_repair', blender.step_blender_repair),
+                 execstep.mesh_entry('step_meshfix_repair', meshfix.step_meshfix_repair))
+        # `PART_MESH_STEPS` was renamed `DEFAULT_PART_STEPS` in the
+        # uniform-step refactor (docs/refactor/TODO.md).
+        for name, value in (('WHOLE_MESH_STEPS', whole), ('DEFAULT_PART_STEPS', parts)):
             patcher = mock.patch.object(repairer, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -311,7 +334,7 @@ class TestTheSplitPath(ProbeCase):
         result = repairer.repair(load('shell_inverted'))
         self.assertTrue(result.ok, result.problem)
 
-        parts = [s for s in result.steps if s.step is repairer.Step.PART]
+        parts = tool_call_parts(result)
         self.assertEqual(len(parts), 2)
         oriented = [s for s in parts if 'oriented' in s.detail]
         self.assertEqual(len(oriented), 2,
@@ -321,11 +344,18 @@ class TestTheSplitPath(ProbeCase):
         self.assertTrue(scanner.scan(result.mesh).is_clean)
 
     def test_merge_puts_the_parts_back(self):
-        """`merge` concatenates; the face count must be the sum of the parts."""
+        """`merge` concatenates; the face count must be the sum of the parts.
+
+        This suite's configured per-part sequence is (orient, Blender,
+        PyMeshFix) — see `ProbeCase.setUp` — so MERGE consumes the LAST
+        entry's output (PyMeshFix's), one `Step.PART` record per part.
+        """
         result = repairer.repair(load('two_shells'))
-        parts = [s for s in result.steps if s.step is repairer.Step.PART]
+        pymeshfix_parts = [s for s in result.steps
+                          if s.step is repairer.Step.PART
+                          and s.detail.startswith('step_meshfix_repair:')]
         merge = [s for s in result.steps if s.step is repairer.Step.MERGE][0]
-        self.assertEqual(merge.faces_in, sum(s.faces_out for s in parts))
+        self.assertEqual(merge.faces_in, sum(s.faces_out for s in pymeshfix_parts))
         self.assertEqual(merge.faces_out, len(result.mesh.geometry.faces))
 
     def test_the_merged_mesh_keeps_the_parents_destination(self):
@@ -342,7 +372,7 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
 
     def test_a_clean_mesh_needs_no_welding(self):
         result = repairer.repair(load('correct'))
-        weld_name = repairer.WHOLE_MESH_STEPS[0][0]
+        weld_name = repairer.WHOLE_MESH_STEPS[0].name
         weld = [s for s in result.steps if s.step is repairer.Step.PREP
                and s.detail.startswith(f'{weld_name}:')][0]
         self.assertIn('0 junction', weld.detail)
@@ -358,8 +388,7 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
         for name in ('correct', 'inverted', 'seam', 'inverted_third'):
             with self.subTest(fixture=name):
                 result = repairer.repair(load(name))
-                parts = [s for s in result.steps
-                         if s.step is repairer.Step.PART]
+                parts = tool_call_parts(result)
                 self.assertTrue(parts)
                 for step in parts:
                     self.assertIn('oriented', step.detail)
@@ -368,7 +397,7 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
         """Measured: splitting first left `doubles` at 200% volume in 2
         shells, because each copy became its own part."""
         result = repairer.repair(load('doubles'))
-        last_clean_name = repairer.WHOLE_MESH_STEPS[-1][0]
+        last_clean_name = repairer.WHOLE_MESH_STEPS[-1].name
         clean = [s for s in result.steps
                 if s.step is repairer.Step.PREP
                 and s.detail.startswith(f'{last_clean_name}:')][0]
@@ -386,7 +415,7 @@ class TestTheSequenceItselfOnRealMeshes(ProbeCase):
         the same day — had never executed under test. This fails if that
         happens again.
         """
-        weld_name = repairer.WHOLE_MESH_STEPS[0][0]
+        weld_name = repairer.WHOLE_MESH_STEPS[0].name
         exercised = {'weld': 0, 'split': 0, 'orient': 0, 'merge': 0}
         for name in FIXTURES:
             result = repairer.repair(load(name))

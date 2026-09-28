@@ -150,6 +150,49 @@ def by_seams(mesh: Mesh,
                  for i, r in enumerate(regions))
 
 
+def make_shell_split_step(min_faces: int = MIN_SHELL_FACES,
+                          name: Callable[[Mesh, int, int], str] = _default_name,
+                          ) -> Callable[[tuple[Mesh, ...], object], tuple[bool, tuple[Mesh, ...], str]]:
+    """Build the collection step `(parts, config) -> (ok, parts, detail)`
+    for shell splitting, closing over `min_faces` so a caller's own
+    `min_shell_faces` reaches `by_shells` without a `StepConfig` field for
+    it — the floor is a property of which step is in the sequence, not of
+    the mesh being processed.
+
+    Splits EACH input part and flattens the results, so this composes
+    correctly whether it receives the one whole mesh (the common case) or
+    several parts from an earlier stage. `by_shells` never fails (a mesh
+    with no shell above the floor comes back as itself), so `ok` is always
+    `True`.
+    """
+    def step(parts: tuple[Mesh, ...], config: object | None = None
+            ) -> tuple[bool, tuple[Mesh, ...], str]:
+        flattened: list[Mesh] = []
+        for part in parts:
+            flattened.extend(by_shells(part, min_faces=min_faces, name=name))
+        how = f"{len(flattened)} shell part(s)"
+        return True, tuple(flattened), how
+    return step
+
+
+def make_seam_split_step(name: Callable[[Mesh, int, int], str] = _default_name,
+                         ) -> Callable[[tuple[Mesh, ...], object], tuple[bool, tuple[Mesh, ...], str]]:
+    """Build the collection step `(parts, config) -> (ok, parts, detail)`
+    for seam splitting — every region, including debris (see `by_seams`).
+    Not present in the default split composition; add it as one more
+    `execstep.collection_entry` in `repairer._split_stage` when enabling it,
+    not as a flag — see docs/refactor/TODO.md.
+    """
+    def step(parts: tuple[Mesh, ...], config: object | None = None
+            ) -> tuple[bool, tuple[Mesh, ...], str]:
+        flattened: list[Mesh] = []
+        for part in parts:
+            flattened.extend(by_seams(part, name=name))
+        how = f"{len(flattened)} region(s) after seams"
+        return True, tuple(flattened), how
+    return step
+
+
 def merge(parts: tuple[Mesh, ...] | list[Mesh],
           destination: str | None = None) -> Mesh:
     """Concatenate parts' arrays into one mesh; do not geometrically union.

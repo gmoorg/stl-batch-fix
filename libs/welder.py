@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from . import pipeconfig
 from .mesh_io import Geometry, Mesh, require_geometry
 
 #: Search open-edge paths instead of comparing coordinates to an absolute
@@ -334,15 +333,13 @@ def repair(mesh: Mesh, max_rounds: int = MAX_ROUNDS) -> Result:
                   splits, rounds)
 
 
-def step_weld_close_tjunctions(mesh: Mesh) -> tuple[bool, Mesh, str]:
+def step_weld_close_tjunctions(mesh: Mesh, config: object | None = None) -> tuple[bool, Mesh, str]:
     """`pipeconfig`'s uniform step contract, wrapping `repair()`.
 
     `repair()` has no partial-failure return of its own — it either
     produces a `Result` or raises (e.g. on unloaded geometry) — so any
     exception here is caught and converted rather than escaping.
     """
-    if not pipeconfig.ENABLE_WELD:
-        return True, mesh, 'skipped (ENABLE_WELD=False)'
     try:
         result = repair(mesh)
     except Exception as exc:

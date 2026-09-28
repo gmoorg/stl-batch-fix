@@ -9,7 +9,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from . import pipeconfig
 from .mesh_io import Geometry, Mesh, require_geometry
 
 try:
@@ -107,11 +106,6 @@ def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
     `fill_holes=True` fills small boundaries before `clean`; False runs `clean`
     alone. The current repair sequence uses the default. Failure returns the
     input mesh with `ok=False`; successful execution still needs a topology scan.
-
-    `pipeconfig.ENABLE_FILL_BOUNDARIES`/`ENABLE_CLEAN` disable either call
-    independently, so what each one costs can be measured rather than argued
-    about. With both off this loads and returns the arrays unchanged, which
-    is the control.
     """
     require_geometry(mesh)
     if not _AVAILABLE:
@@ -125,10 +119,9 @@ def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
             tin.load_array(
                 np.ascontiguousarray(mesh.geometry.verts, dtype=np.float64),
                 np.ascontiguousarray(mesh.geometry.faces, dtype=np.int32))
-            if fill_holes and pipeconfig.ENABLE_FILL_BOUNDARIES:
+            if fill_holes:
                 tin.fill_small_boundaries(0, True)
-            if pipeconfig.ENABLE_CLEAN:
-                tin.clean(CLEAN_MAX_ITERS, CLEAN_INNER_LOOPS)
+            tin.clean(CLEAN_MAX_ITERS, CLEAN_INNER_LOOPS)
             verts, faces = tin.return_arrays()
     except Exception as exc:
         return Result(mesh, False, f"{type(exc).__name__}: {exc}",
@@ -148,19 +141,16 @@ def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
                   elapsed)
 
 
-def step_meshfix_repair(mesh: Mesh) -> tuple[bool, Mesh, str]:
-    """`pipeconfig`'s uniform step contract, wrapping `repair()`.
+def step_meshfix_repair(mesh: Mesh, config: object | None = None) -> tuple[bool, Mesh, str]:
+    """The uniform step contract, wrapping `repair()`.
 
-    `pipeconfig.ENABLE_PART_TOOL` gates PyMeshFix specifically.
-    `ENABLE_FILL_BOUNDARIES`/`ENABLE_CLEAN` stay inside `repair()` itself —
-    they tune what this one tool call does, not whether a separate tool
-    runs, so splitting them into their own steps would mean reloading
-    PyMeshFix's state for no behavioural reason. `repair()` raises for a
-    caller error (unloaded geometry) rather than returning a `Result` for
-    it — that exception is caught here rather than escaping.
+    Ignores `config` — MeshFix needs no per-call context, unlike decimation
+    or alpha wrap.
+
+    `repair()` raises for a caller error (unloaded geometry) rather than
+    returning a `Result` for it — that exception is caught here rather than
+    escaping.
     """
-    if not pipeconfig.ENABLE_PART_TOOL:
-        return True, mesh, 'skipped (ENABLE_PART_TOOL=False)'
     try:
         faces_in = len(mesh.geometry.faces)
         result = repair(mesh)

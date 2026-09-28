@@ -5,10 +5,15 @@ The tools this sequences are tested elsewhere: `welder` splits T-junctions,
 is **what runs, in what order, and on what** — so most of these assert about
 `Result.steps` and about injected tools rather than about vertex arrays.
 
-`tool=` is the seam that makes that possible. Step 4's repair is injectable, so
-a test can substitute a recording stub and assert on the sequence without
-PyMeshFix running at all: fast, deterministic, and it does not conflate "the
-sequence is right" with "PyMeshFix behaved".
+`part_steps=` is the seam that makes that possible. Step 4's repair is
+injectable, so a test can substitute a recording stub and assert on the
+sequence without PyMeshFix running at all: fast, deterministic, and it does
+not conflate "the sequence is right" with "PyMeshFix behaved". Each stub is
+supplied as `part_steps=(('name', step_fn),)` — the same
+`((name, step_fn), ...)` shape `PART_MESH_STEPS` itself uses — not a bare
+callable: the earlier `tool=` parameter accepted one, which threw away the
+step's own name and left the step log with nothing but a generic fallback
+to identify it by.
 
 **The two measured behaviours that most need guarding are negative**, and both
 have a test here:
@@ -30,9 +35,9 @@ from unittest import mock
 
 import numpy as np
 
-from libs import alphawrap, blender, meshfix, meshlab, pipeconfig, repairer, scanner, \
-    welder
+from libs import alphawrap, execstep, meshfix, meshlab, pipeconfig, repairer, scanner, welder
 from libs.mesh_io import Geometry, Kind, Mesh
+from libs.pipeconfig import StepConfig
 from libs.repairer import Result, Step, StepResult, repair
 
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
@@ -92,7 +97,7 @@ class Recorder:
         self.seen = []
         self.transform = transform
 
-    def __call__(self, part):
+    def __call__(self, part, config=None):
         self.seen.append(part)
         if self.transform is not None:
             return True, self.transform(part), 'transformed'
@@ -134,7 +139,7 @@ class TestContract(unittest.TestCase):
                             meshlab.step_clean_unreferenced):
                 if step_fn is welder.step_weld_close_tjunctions:
                     continue
-                step_fn(m)
+                step_fn(m, None)
         return calls
 
     def test_remove_t_vertices_is_not_in_the_clean_set(self):
@@ -251,34 +256,42 @@ class TestSequence(unittest.TestCase):
         self.assertEqual(repairer.WHOLE_MESH_STEPS, ())
 
     def test_every_step_is_reported_in_order(self):
-        result = repair(tetra(), min_shell_faces=0, tool=Recorder())
+        result = repair(tetra(), min_shell_faces=0, part_steps=(('recorder', Recorder()),))
         self.assertTrue(result.ok, result.problem)
+        # One Step.PART entry per part: `part_steps=` now REPLACES the
+        # default per-part sequence entirely (the uniform-step refactor
+        # removed the old auto-appended `_decimate_to_target_and_fix` tail —
+        # see docs/refactor/TODO.md's "Uniform-step refactor" section), so a
+        # single-entry custom `part_steps` produces exactly one PART record.
         self.assertEqual([s.step for s in result.steps],
                          [Step.SPLIT, Step.PART, Step.MERGE])
 
     def test_there_is_no_orientation_step_before_the_split(self):
-        result = repair(tetra(), min_shell_faces=0, tool=Recorder())
+        result = repair(tetra(), min_shell_faces=0, part_steps=(('recorder', Recorder()),))
         self.assertEqual(result.steps[0].step, Step.SPLIT)
 
-    def test_pipeconfig_enable_alpha_wrap_is_read_at_call_time(self):
-        with mock.patch.object(pipeconfig, 'ENABLE_ALPHA_WRAP', False):
-            result = repair(tetra(), min_shell_faces=0)
-        self.assertTrue(result.ok, result.problem)
-        self.assertIn('skipped (ENABLE_ALPHA_WRAP=False)', result.steps[1].detail)
+    # test_pipeconfig_enable_alpha_wrap_is_read_at_call_time removed: it
+    # tested the pipeconfig.ENABLE_ALPHA_WRAP flag, which was removed in the
+    # uniform-step refactor (docs/refactor/TODO.md) -- there is no on/off
+    # flag any more, so this premise no longer applies.
 
     @unittest.skipUnless(alphawrap.is_available(), "cgal is needed")
     def test_an_inverted_mesh_comes_back_outward(self):
         """Real alpha wrapping reconstructs outward-facing geometry."""
         result = repair(inverted_tetra(), min_shell_faces=0,
-                        tool=lambda m: (True, alphawrap.wrap(m, 0.1, 0.001), 'wrapped'))
+                        part_steps=(('alpha_wrap_cheap', lambda m, config=None: (True, alphawrap.wrap(m, 0.1, 0.001), 'wrapped')),))
         self.assertTrue(result.ok, result.problem)
         self.assertGreater(scanner.volume(result.mesh), 0)
 
     def test_the_tool_sees_one_call_per_part(self):
         tool = Recorder()
-        result = repair(two_tetrahedra(), min_shell_faces=0, tool=tool)
+        result = repair(two_tetrahedra(), min_shell_faces=0,
+                        part_steps=(('recorder', tool),))
         self.assertEqual(len(tool.seen), 2)
         self.assertEqual(result.parts, 2)
+        # One Step.PART StepResult entry PER part -- a single-entry custom
+        # `part_steps` replaces the default sequence entirely (see
+        # test_every_step_is_reported_in_order's comment), so 2 parts -> 2.
         self.assertEqual(
             len([s for s in result.steps if s.step is Step.PART]), 2)
 
@@ -286,7 +299,8 @@ class TestSequence(unittest.TestCase):
         """A part is renumbered into its own vertex block, so the tool can
         treat it as a complete model."""
         tool = Recorder()
-        repair(two_tetrahedra(), min_shell_faces=0, tool=tool)
+        repair(two_tetrahedra(), min_shell_faces=0,
+              part_steps=(('recorder', tool),))
         for part in tool.seen:
             self.assertEqual(len(part.geometry.verts), 4)
             self.assertEqual(len(part.geometry.faces), 4)
@@ -295,17 +309,17 @@ class TestSequence(unittest.TestCase):
         """Inheriting part 0's would write the whole model to
         `<base>.part.0.stl` and hang the parent's markers off a part's path."""
         source = two_tetrahedra()
-        result = repair(source, min_shell_faces=0, tool=Recorder())
+        result = repair(source, min_shell_faces=0, part_steps=(('recorder', Recorder()),))
         self.assertEqual(result.mesh.destination, source.destination)
 
     def test_a_single_shell_mesh_is_not_split(self):
-        result = repair(tetra(), min_shell_faces=0, tool=Recorder())
+        result = repair(tetra(), min_shell_faces=0, part_steps=(('recorder', Recorder()),))
         self.assertEqual(result.parts, 1)
 
     def test_face_counts_chain_through_the_steps(self):
         """Each step's `faces_in` must be the previous one's `faces_out`, or
         the record does not describe one sequence."""
-        result = repair(tetra(), min_shell_faces=0, tool=Recorder())
+        result = repair(tetra(), min_shell_faces=0, part_steps=(('recorder', Recorder()),))
         chain = [s for s in result.steps
                  if s.step in (Step.PREP, Step.SPLIT)]
         for earlier, later in zip(chain, chain[1:]):
@@ -316,27 +330,27 @@ class TestFailure(unittest.TestCase):
     """A failure returns the input unchanged, never a partial result."""
 
     def test_a_raising_tool_is_reported_not_propagated(self):
-        def explode(part):
+        def explode(part, config=None):
             raise RuntimeError("the tool fell over")
-        result = repair(tetra(), min_shell_faces=0, tool=explode)
+        result = repair(tetra(), min_shell_faces=0, part_steps=(('explode', explode),))
         self.assertFalse(result.ok)
         self.assertIn("the tool fell over", result.problem)
 
     def test_a_failure_hands_back_a_usable_mesh(self):
         """The caller must be able to tell "not repaired" from "repaired
         badly" and write the marker rather than ship the file."""
-        def explode(part):
+        def explode(part, config=None):
             raise RuntimeError("boom")
         source = tetra()
-        result = repair(source, min_shell_faces=0, tool=explode)
+        result = repair(source, min_shell_faces=0, part_steps=(('explode', explode),))
         self.assertIsNotNone(result.mesh.geometry)
         self.assertEqual(result.faces_in, result.faces_out)
 
     def test_the_steps_before_the_failure_are_kept(self):
         """Where it got to is the useful part of a failure report."""
-        def explode(part):
+        def explode(part, config=None):
             raise RuntimeError("boom")
-        result = repair(tetra(), min_shell_faces=0, tool=explode)
+        result = repair(tetra(), min_shell_faces=0, part_steps=(('explode', explode),))
         self.assertIn(Step.SPLIT, [s.step for s in result.steps])
 
     def test_a_tool_that_returns_a_failure_is_not_reported_as_success(self):
@@ -347,22 +361,23 @@ class TestFailure(unittest.TestCase):
         failed repair `ok=True`.  The reason has to survive to the caller: a
         marker gets written instead of a broken model being shipped.
         """
-        def fails(part):
+        def fails(part, config=None):
             return False, part, "pymeshfix failed: it gave up"
 
-        result = repair(tetra(), min_shell_faces=0, tool=fails)
+        result = repair(tetra(), min_shell_faces=0, part_steps=(('fails', fails),))
         self.assertFalse(result.ok)
         self.assertIn("it gave up", result.problem)
-        # Prefixed exactly once ("part 0: ..."), not doubled by both
-        # `_run_step` and the caller separately prepending it.
-        self.assertEqual(result.problem, "part 0: pymeshfix failed: it gave up")
+        # Prefixed exactly once, by `execstep.run_step`'s own per-entry
+        # naming ("fails: ...") — there is no separate "part N: " framing
+        # in the uniform-step refactor's `repairer.repair`.
+        self.assertEqual(result.problem, "fails: pymeshfix failed: it gave up")
 
     def test_a_failed_part_still_reports_where_it_got_to(self):
         """A failure is only actionable with the steps that preceded it."""
-        def fails(part):
+        def fails(part, config=None):
             return False, part, "pymeshfix failed: it gave up"
 
-        result = repair(tetra(), min_shell_faces=0, tool=fails)
+        result = repair(tetra(), min_shell_faces=0, part_steps=(('fails', fails),))
         self.assertIn(Step.SPLIT, [s.step for s in result.steps])
         self.assertIsNotNone(result.mesh.geometry)
 
@@ -386,7 +401,7 @@ class TestFailure(unittest.TestCase):
         original = mesh(TETRA_VERTS + [[9, 9, 9]],
                         TETRA_FACES + [[0, 1, 4]])  # 5 faces — "pre-step"
 
-        def fake_first_step(m):
+        def fake_first_step(m, config=None):
             return True, advanced, 'advanced'
 
         def poison_scan(m):
@@ -416,13 +431,13 @@ class TestFailure(unittest.TestCase):
         pipeline makes.  Guarding the file entrances does not cover this:
         the geometry is produced mid-repair, not read.
         """
-        def poison(part):
+        def poison(part, config=None):
             verts = part.geometry.verts.copy()
             verts[0, 0] = float('nan')
             return True, part.with_geometry(
                 Geometry(verts, part.geometry.faces)), 'poisoned'
 
-        result = repair(tetra(), min_shell_faces=0, tool=poison)
+        result = repair(tetra(), min_shell_faces=0, part_steps=(('poison', poison),))
         self.assertFalse(result.ok)
 
         # Not merely "something raised": the reason has to name the defect.
@@ -447,7 +462,7 @@ class TestFailure(unittest.TestCase):
 
         with mock.patch.object(repairer, '_count_lost', explode):
             result = repair(tetra(), min_shell_faces=0,
-                            tool=lambda part: (True, part, 'noop'))
+                            part_steps=(('noop', lambda part, config=None: (True, part, 'noop')),))
 
         self.assertFalse(result.ok)
         self.assertIn("measurement fell over", result.problem)
@@ -473,7 +488,7 @@ class TestFailure(unittest.TestCase):
 
         with mock.patch.object(repairer.scanner, 'component_volume', flaky):
             result = repair(tetra(), min_shell_faces=0,
-                            tool=lambda part: (True, part, 'noop'))
+                            part_steps=(('noop', lambda part, config=None: (True, part, 'noop')),))
 
         self.assertFalse(result.ok)
         self.assertIn("volume fell over", result.problem)
@@ -618,21 +633,21 @@ class TestZeroThicknessSheets(unittest.TestCase):
 
 @unittest.skipUnless(alphawrap.is_available(), "cgal is needed")
 class TestRealTools(unittest.TestCase):
-    """Real CGAL topology through tool= at a cheap explicit resolution.
+    """Real CGAL topology through part_steps= at a cheap explicit resolution.
 
     Default-resolution parameter binding is covered by TestAlphaWrapBinding.
     """
 
     def test_a_clean_tetrahedron_survives(self):
         result = repair(tetra(), min_shell_faces=0,
-                        tool=lambda m: (True, alphawrap.wrap(m, 0.1, 0.001), 'wrapped'))
+                        part_steps=(('alpha_wrap_cheap', lambda m, config=None: (True, alphawrap.wrap(m, 0.1, 0.001), 'wrapped')),))
         self.assertTrue(result.ok, result.problem)
         self.assertTrue(scanner.scan(result.mesh).is_clean)
         self.assertAlmostEqual(result.volume_kept, 1.0, delta=0.03)
 
     def test_an_inverted_tetrahedron_comes_back_outward(self):
         result = repair(inverted_tetra(), min_shell_faces=0,
-                        tool=lambda m: (True, alphawrap.wrap(m, 0.1, 0.001), 'wrapped'))
+                        part_steps=(('alpha_wrap_cheap', lambda m, config=None: (True, alphawrap.wrap(m, 0.1, 0.001), 'wrapped')),))
         self.assertTrue(result.ok, result.problem)
         self.assertGreater(result.volume_out, 0)
         self.assertAlmostEqual(result.volume_kept, 1.0, delta=0.03)
@@ -641,36 +656,58 @@ class TestRealTools(unittest.TestCase):
         """Wrapping a doubled surface produces sound topology."""
         doubled = mesh(TETRA_VERTS, TETRA_FACES + TETRA_FACES)
         result = repair(doubled, min_shell_faces=0,
-                        tool=lambda m: (True, alphawrap.wrap(m, 0.1, 0.001), 'wrapped'))
+                        part_steps=(('alpha_wrap_cheap', lambda m, config=None: (True, alphawrap.wrap(m, 0.1, 0.001), 'wrapped')),))
         self.assertTrue(result.ok, result.problem)
         self.assertTrue(scanner.scan(result.mesh).is_clean)
 
 
 class TestBlenderBeforePymeshfix(unittest.TestCase):
-    """Composition and flag behavior for an explicitly configured old route.
+    """Composition and ordering behavior for an explicitly configured route.
 
-    The production tuple is pinned separately to the single alpha-wrap step.
+    `repairer.PART_MESH_STEPS`/`_repair_part` (a fixed, always-composed
+    per-part pipeline) no longer exist -- the uniform-step refactor
+    (docs/refactor/TODO.md) replaced them with `execstep.run_sequence` over
+    whatever ordered tuple of entries a caller supplies (`DEFAULT_PART_STEPS`
+    or a `part_steps=` override). These tests keep their original intent --
+    order is respected, geometry is forwarded step to step, and a hard
+    failure stops the sequence before the next step runs -- expressed
+    directly against `execstep.run_sequence`, the mechanism that now owns
+    that behavior for every stage, not just this composed "old route".
+
+    The production per-part tuple itself is pinned separately, in
+    `TestSequence`/module-level assertions on `repairer.DEFAULT_PART_STEPS`.
     """
 
     def setUp(self):
         self.calls = []
 
+    def test_production_sequence_is_alpha_wrap_decimate_meshfix(self):
+        """`DEFAULT_PART_STEPS` replaces the removed `PART_MESH_STEPS`
+        (renamed and recomposed in the uniform-step refactor): alpha-wrap,
+        then decimate, then conditional meshfix, as ordinary entries rather
+        than a `step_alpha_wrap`-only tuple plus a force-appended
+        `_decimate_to_target_and_fix` tail.
+        """
+        names = [entry.name for entry in repairer.DEFAULT_PART_STEPS]
+        self.assertEqual(names, ['alpha_wrap', 'decimate', 'meshfix'])
+
     def _record(self, name, ok=True, note=None):
-        def step(mesh):
+        def step(mesh, config=None):
             self.calls.append(name)
             return ok, mesh, note or f"{name} ran"
         return step
 
-    def test_production_sequence_is_alpha_wrap(self):
-        self.assertEqual(repairer.PART_MESH_STEPS,
-                         (('step_alpha_wrap', alphawrap.step_alpha_wrap),))
+    def _run(self, entries, mesh_in):
+        steps = []
+        outcome = execstep.run_sequence(
+            entries, mesh_in, None, steps, step=Step.PART)
+        return outcome.ok, outcome.mesh, outcome.detail
 
     def test_blender_runs_before_pymeshfix(self):
         fake_steps = (('orient', self._record('orient')),
                      ('blender', self._record('blender')),
                      ('pymeshfix', self._record('pymeshfix')))
-        with mock.patch.object(repairer, 'PART_MESH_STEPS', fake_steps):
-            ok, _, detail = repairer._repair_part(tetra())
+        ok, _, detail = self._run(fake_steps, tetra())
         self.assertTrue(ok, detail)
         self.assertEqual(self.calls, ['orient', 'blender', 'pymeshfix'])
 
@@ -681,20 +718,19 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
                               TETRA_FACES)
         seen_by_pymeshfix = []
 
-        def fake_orient(m):
+        def fake_orient(m, config=None):
             return True, m, 'oriented'
 
-        def fake_blender(m):
+        def fake_blender(m, config=None):
             return True, blender_output, 'blender ran'
 
-        def fake_pymeshfix(m):
+        def fake_pymeshfix(m, config=None):
             seen_by_pymeshfix.append(m)
             return True, m, 'pymeshfix ran'
 
         fake_steps = (('orient', fake_orient), ('blender', fake_blender),
                      ('pymeshfix', fake_pymeshfix))
-        with mock.patch.object(repairer, 'PART_MESH_STEPS', fake_steps):
-            repairer._repair_part(original)
+        self._run(fake_steps, original)
 
         self.assertEqual(len(seen_by_pymeshfix), 1)
         self.assertIs(seen_by_pymeshfix[0], blender_output)
@@ -704,86 +740,45 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
             "pymeshfix must see blender's changed geometry, not the input")
 
     def test_a_hard_blender_failure_stops_before_pymeshfix(self):
-        fake_steps = (('orient', lambda m: (True, m, 'oriented')),
+        fake_steps = (('orient', lambda m, config=None: (True, m, 'oriented')),
                      ('blender', self._record('blender', ok=False)),
                      ('pymeshfix', self._record('pymeshfix')))
-        with mock.patch.object(repairer, 'PART_MESH_STEPS', fake_steps):
-            ok, _, detail = repairer._repair_part(tetra())
+        ok, _, detail = self._run(fake_steps, tetra())
         self.assertFalse(ok)
         self.assertEqual(self.calls, ['blender'])
         self.assertNotIn('pymeshfix', self.calls)
 
-    @needs_tools
-    def test_disabling_blender_alone_still_runs_pymeshfix(self):
-        """Explicitly configure the old route to test the retained flags."""
-        with mock.patch.object(pipeconfig, 'ENABLE_BLENDER_PART', False), \
-             mock.patch.object(repairer, 'PART_MESH_STEPS', (
-                 ('orient', meshlab.step_orient),
-                 ('blender', blender.step_blender_repair),
-                 ('pymeshfix', meshfix.step_meshfix_repair))):
-            ok, _, detail = repairer._repair_part(tetra())
-        self.assertTrue(ok, detail)
-        self.assertIn('ENABLE_BLENDER_PART=False', detail)
-        self.assertIn('pymeshfix', detail)
-
-    def test_disabling_pymeshfix_alone_still_runs_blender(self):
-        """The real `meshfix.step_meshfix_repair` (not a mock) checked
-        against a real, patched flag — proving PyMeshFix's own flag check,
-        not just that `_repair_part` forwards a stub's answer.
-        """
-        fake_steps = (('orient', lambda m: (True, m, 'oriented')),
-                     ('blender', self._record('blender')),
-                     ('pymeshfix', meshfix.step_meshfix_repair))
-        with mock.patch.object(pipeconfig, 'ENABLE_PART_TOOL', False), \
-             mock.patch.object(repairer, 'PART_MESH_STEPS', fake_steps):
-            ok, _, detail = repairer._repair_part(tetra())
-        self.assertTrue(ok, detail)
-        self.assertEqual(self.calls, ['blender'])
-        self.assertIn('ENABLE_PART_TOOL=False', detail)
-
-    def test_disabling_both_runs_neither(self):
-        """The real `blender.step_blender_repair`/`meshfix.step_meshfix_repair`
-        (not mocks) checked against real, patched flags — proving the flag
-        checks themselves, not just that `_repair_part` forwards whatever a
-        stub says.
-        """
-        fake_steps = (('orient', lambda m: (True, m, 'oriented')),
-                     ('blender', blender.step_blender_repair),
-                     ('pymeshfix', meshfix.step_meshfix_repair))
-        with mock.patch.object(pipeconfig, 'ENABLE_BLENDER_PART', False), \
-             mock.patch.object(pipeconfig, 'ENABLE_PART_TOOL', False), \
-             mock.patch.object(repairer, 'PART_MESH_STEPS', fake_steps):
-            ok, part, detail = repairer._repair_part(tetra())
-        self.assertTrue(ok, detail)
-        self.assertIn('ENABLE_BLENDER_PART=False', detail)
-        self.assertIn('ENABLE_PART_TOOL=False', detail)
-
-
-
-
 class TestAlphaWrapBinding(unittest.TestCase):
     def test_authoritative_steps_bind_whole_diagonal_without_leaking(self):
+        """`whole_model_diag` reaches every part's own `StepConfig`
+        unchanged, computed once from the pre-split whole mesh -- not
+        leaked/rebound per part despite each part being much smaller.
+
+        `PART_MESH_STEPS`, the fixed tuple the old test patched to install
+        this recording step, no longer exists -- the uniform-step refactor
+        makes a caller's `part_steps=` REPLACE the sequence entirely (see
+        docs/refactor/TODO.md), so the recording step is installed the same
+        way any other custom per-part sequence is: via `part_steps=`.
+        """
         original = two_tetrahedra()
         seen = []
-        real_step = alphawrap.step_alpha_wrap
 
-        def step(part, *, whole_diagonal=None):
+        def step(part, config=None):
+            whole_diagonal = config.whole_model_diag if config is not None else None
             seen.append((whole_diagonal, np.linalg.norm(np.ptp(
                 part.geometry.verts.astype(np.float64), axis=0))))
             return True, part, 'recorded'
 
-        with mock.patch.object(alphawrap, 'step_alpha_wrap', step), \
-             mock.patch.object(repairer, 'PART_MESH_STEPS', (('step_alpha_wrap', step),)):
-            for scale in (1, 3):
-                whole = original.with_geometry(Geometry(
-                    original.geometry.verts * scale, original.geometry.faces))
-                result = repair(whole, min_shell_faces=0)
-                self.assertTrue(result.ok, result.problem)
+        for scale in (1, 3):
+            whole = original.with_geometry(Geometry(
+                original.geometry.verts * scale, original.geometry.faces))
+            result = repair(whole, min_shell_faces=0,
+                            part_steps=(('step_alpha_wrap', step),))
+            self.assertTrue(result.ok, result.problem)
         self.assertEqual(len(seen), 4)
         for i, (diagonal, part_diagonal) in enumerate(seen):
             self.assertAlmostEqual(diagonal, np.sqrt(363) * (1 if i < 2 else 3))
             self.assertGreater(diagonal, part_diagonal * 5)
-        self.assertIs(repairer.PART_MESH_STEPS[0][1], real_step)
 
     def test_default_step_uses_whole_mesh_recipe(self):
         whole = two_tetrahedra()
@@ -808,12 +803,76 @@ class TestAlphaWrapBinding(unittest.TestCase):
             self.assertAlmostEqual(call.args[1], 0.15)
             self.assertAlmostEqual(call.args[2], 0.06)
 
-    def test_custom_tool_bypasses_cgal_and_diagonal_binding(self):
+    def test_custom_tool_bypasses_cgal(self):
+        """A custom `part_steps` that never mentions `step_alpha_wrap` never
+        touches CGAL.
+
+        The uniform-step refactor (docs/refactor/TODO.md) made
+        `whole_model_diag` an unconditional part of `repair()` — computed
+        once, via `scanner.diagonal` (bounding-box max/min, not `np.ptp`),
+        and bound into every part's `StepConfig` regardless of what
+        `part_steps` is — so the old premise "diagonal is only computed for
+        an alpha-wrap sequence" no longer holds and that half of this test
+        is removed rather than asserted falsely. What still holds, and is
+        still worth guarding, is that CGAL itself is never invoked when the
+        supplied sequence has no step that calls it.
+        """
         with mock.patch.object(alphawrap, '_CGAL', False), \
-             mock.patch.object(repairer, 'partial', side_effect=AssertionError('binding')), \
-             mock.patch.object(repairer.np, 'ptp', side_effect=AssertionError('diagonal')):
-            result = repair(tetra(), min_shell_faces=0, tool=Recorder())
+             mock.patch.object(alphawrap, '_alpha_wrap_3',
+                               side_effect=AssertionError('CGAL touched')):
+            result = repair(tetra(), min_shell_faces=0, part_steps=(('recorder', Recorder()),))
         self.assertTrue(result.ok, result.problem)
+
+
+class TestIsAlreadyClean(unittest.TestCase):
+    """`is_already_clean(mesh) -> bool` — the skip-gate spike's own check,
+    stateless and independent of `pipeconfig`/any other module state (see
+    docs/refactor/TODO.md's "Algorithm questions" section for the spike this
+    was written for). Not wired into `repair`/`process` yet — this only
+    tests the function itself.
+    """
+
+    def test_a_consistently_wound_watertight_mesh_is_clean(self):
+        self.assertTrue(repairer.is_already_clean(tetra()))
+
+    def test_an_open_edge_is_not_clean(self):
+        # Drop one face: the tetrahedron's remaining three faces leave a
+        # triangular hole, i.e. open edges.
+        m = mesh(TETRA_VERTS, TETRA_FACES[:-1])
+        self.assertFalse(repairer.is_already_clean(m))
+
+    def test_a_non_manifold_edge_is_not_clean(self):
+        # A flap sharing an edge with the tetrahedron: that edge is now
+        # owned by three faces.
+        verts = TETRA_VERTS + [[0, 0, 2]]
+        faces = TETRA_FACES + [[0, 2, 4]]
+        m = mesh(verts, faces)
+        self.assertFalse(repairer.is_already_clean(m))
+
+    def test_inverted_winding_is_not_clean_even_though_scan_is_clean(self):
+        """The exact case `Scan.is_clean` alone misses — one face reversed
+        relative to its neighbors is still open_edges=0, non_manifold=0
+        (`test_a_consistently_wound_watertight_mesh_is_clean`'s own
+        topology is unaffected by winding), so `is_already_clean` must
+        check winding separately rather than trusting `scan.is_clean` alone.
+        """
+        faces = [list(f) for f in TETRA_FACES]
+        faces[3] = [faces[3][0], faces[3][2], faces[3][1]]
+        m = mesh(TETRA_VERTS, faces)
+        scan = scanner.scan(m)
+        self.assertTrue(scan.is_clean, 'fixture assumption: topology reads clean')
+        self.assertFalse(repairer.is_already_clean(m))
+
+    def test_a_fully_inverted_mesh_is_still_clean(self):
+        """Every face reversed is globally inside-out but LOCALLY
+        consistent — neighboring faces still agree with each other, so
+        `winding_seams` finds no seam edges. This is a real, if unusual,
+        case this function does not claim to catch — `is_already_clean` is
+        about LOCAL winding consistency between adjacent faces, not global
+        orientation (which `meshlab.step_orient`/alpha-wrap's own
+        reconstruction handle differently and separately).
+        """
+        self.assertTrue(repairer.is_already_clean(inverted_tetra()))
 
 
 if __name__ == '__main__':

@@ -1,91 +1,47 @@
-"""Every pipeline step's on/off switch, in one place.
+"""Config types every uniform pipeline step can read.
 
-See docs/refactor/modules.md's `pipeconfig` entry for why these are
-module-level rather than parameters, and its "uniform step interface"
-section for the step contract every flag here gates.
+See docs/refactor/modules.md's `pipeconfig` entry for the step contract
+this feeds. This module holds only plain config data — no step lists and
+no tool imports, so tool modules (which already import `pipeconfig`, e.g.
+`alphawrap`) never form an import cycle with it. The actual pipeline
+composition — which steps run, in what order, under which condition — lives
+in `repairer.py` (whole-mesh/split/part stages) and `processor.py` (initial
+decimation, repair, judge), where it is visible as ordinary code, not as
+booleans here.
+
+The boolean ENABLE_SPLIT_SHELLS/ENABLE_SPLIT_SEAMS/ENABLE_ALPHA_WRAP flags
+this module used to hold were removed 2026-09-2x as part of the uniform-step
+refactor (docs/refactor/TODO.md's "Uniform-step refactor" section): a step
+now runs because it is present in the sequence that composes it, and does
+not run because it is absent — no separate switch anywhere. This continues
+the same reasoning as the ENABLE_WELD/CLEAN_FILTERS/etc. removal on
+2026-09-23 — user: "since we control what need to be executed in the
+repairer, we do not need the Boolean flags what enable/disable steps."
 """
 
 from __future__ import annotations
 
-#: 1/7. Split faces at T-junctions. Adds faces, moves and deletes nothing.
-ENABLE_WELD = True
+from dataclasses import dataclass
 
-#: 2/8. Drop zero-area faces.
-ENABLE_CLEAN_NULL_FACES = True
 
-#: 2/9. Weld vertices within 0.1% of the bbox diagonal. **Measured harmful**:
-#: on Amidara base it merges one vertex and creates two non-manifold edges in
-#: a mesh that had none, and removing it changes the final result by nothing.
-ENABLE_CLEAN_MERGE_CLOSE = True
+@dataclass(frozen=True)
+class StepConfig:
+    """The per-call context a uniform step may read.
 
-#: 2/10. Remove faces duplicated after the merge.
-ENABLE_CLEAN_DUPLICATE_FACES = True
+    Every mesh step has the signature `(mesh, config: StepConfig | None =
+    None) -> (ok, mesh, detail)`. Most steps ignore `config` entirely;
+    decimation reads `faceCount`, alpha wrap reads `whole_model_diag`. Kept
+    to exactly these two fields "for now" (docs/refactor/TODO.md) — add a
+    field here only when a step actually needs it, not speculatively.
 
-#: 2/11. Drop vertices no face references.
-ENABLE_CLEAN_UNREFERENCED = True
+    faceCount         target face count for a decimation step; 0 means "no
+                      target for this call" (matches `decimator.decimate`'s
+                      own zero-disables convention).
+    whole_model_diag  the whole mesh's bounding-box diagonal, computed once
+                      per `repair()` call after initial decimation and
+                      before splitting, then carried unchanged into every
+                      part's own `StepConfig` — see `repairer._repair_sequence`.
+    """
 
-#: 3a/12. Separate edge-connected components so PyMeshFix cannot discard all
-#: but the largest. Disabling this sends a multi-shell mesh in whole.
-ENABLE_SPLIT_SHELLS = True
-
-#: 3a/13. Separate regions whose winding contradicts itself. Off by default:
-#: when True, `repairer.repair` does call `splitter.by_seams` on each shell
-#: part. Enabling it is an experiment, not a default, because repairing the
-#: resulting open regions independently is measured as destructive on real
-#: models — see archive/docs-refactor-2026-09-22/mandy-volume-loss.md's
-#: unconditional-seam-splitting finding.
-ENABLE_SPLIT_SEAMS = False
-
-#: 3b/14. Orient each part outward. **Measured harmful**: takes Amidara base
-#: from 922 winding-seam edges to 7,659.
-ENABLE_ORIENT = True
-
-#: 3b/14a. Repair each part in Blender before PyMeshFix runs on it. Owner
-#: decision, 2026-09-21: `blender.step_blender_repair` (then still wrapped
-#: as `repairer.blender_part`, since removed as redundant) existed only as
-#: an explicit wholesale replacement for PyMeshFix
-#: (`repair(tool=blender.step_blender_repair)`) and was never reachable in
-#: the default sequence — this switch puts it there, before PyMeshFix, so
-#: it stops being unused. This fulfilled the *order* half of a target
-#: recorded in the (since removed, 2026-09-22, no longer relevant)
-#: libs/review/CODE_REVIEW.md ("Blender must appear in the final per-part
-#: route"); the defect-based selector half — routing a part to one tool,
-#: the other, or both based on what it actually needs — was never built,
-#: and this whole per-part sequence (orient/Blender/PyMeshFix) was unwired
-#: 2026-09-22 in favor of alpha wrapping regardless. Not a claim that
-#: Blender specifically fixes non-manifold geometry: an earlier version of
-#: this comment made that claim and the owner retracted it —
-#: archive/docs-refactor-2026-09-22/pipeline.md's own measurement record
-#: says the opposite (Blender better on holes/fins, PyMeshFix better on
-#: non-manifold geometry and winding seams).
-ENABLE_BLENDER_PART = True
-
-#: 3b/15. Run PyMeshFix on each part, after Blender. Disabling this passes
-#: the part through untouched by PyMeshFix specifically (Blender's own step
-#: still runs if its own flag allows) — the control for measuring what
-#: PyMeshFix costs on top of whatever came before it.
-
-# each step should have it own flag! No master switch!
-ENABLE_PART_TOOL = True
-
-#: 15a. Close boundary loops before cleaning. `nbe=0` means *every* boundary
-#: regardless of size, and `refine=True` is what emits "Refinement stage
-#: failed to converge" on meshes that had no boundaries to begin with.
-ENABLE_FILL_BOUNDARIES = True
-
-#: 15b. `clean()` — remove self-intersecting and degenerate geometry.
-#: **This is the destructive call**: it deletes 36,342 faces from a
-#: watertight Amidara base, 99.6% of that loss being self-intersection
-#: removal cascading through retriangulation.
-#: See archive/docs-refactor-2026-09-22/amidara-clean-destroys.md.
-
-# each step should have it own flag! No master switch!
-ENABLE_CLEAN = True
-
-#: Default repair: alpha=min(whole diagonal/800, 0.15), offset=min(whole
-#: diagonal/2000, 0.06). Measured and visually confirmed on base, hands_2,
-#: and Torso (2026-09-22): archive/docs-refactor-2026-09-22/discovered-bugs.md,
-#: "Settled diagonal-ratio recipe"; the cap was added afterward so a large
-#: model stays at the finest validated resolution instead of scaling up
-#: unbounded.
-ENABLE_ALPHA_WRAP = True
+    faceCount: int = 0
+    whole_model_diag: float | None = None

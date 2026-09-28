@@ -1,0 +1,42 @@
+# STL Batch Fix
+
+Repair STL models in batches for **FDM printing** while preserving the intended shape. Every refactor, test, and document serves one goal: produce an STL that actually fixes the model for printing. A polished pipeline that silently loses a meaningful part, emits invalid geometry, or reports success without proving the result has failed that goal. `stl_batch_fix.py` is the legacy script being refactored into `libs/`; do not inspect or change it until the refactor is complete. `STL_BATCH_FIX_DESIGN.md` is a potentially stale description of that legacy script. `libs/` is the unfinished refactor and does not yet have a complete batch runner.
+
+## Start here in a new session
+
+1. Read [modules](docs/refactor/modules.md), [orchestration](docs/refactor/orchestration.md), [tests](docs/refactor/tests.md), and [TODO](docs/refactor/TODO.md) — the four live compact references. Older investigation docs (Amidara/Mandy findings, the pre-alpha-wrap pipeline order, the pre-refresh open issues list, `.fixcfg`/CLI interfaces) moved to `archive/docs-refactor-2026-09-22/` on 2026-09-22 once alpha wrapping replaced the tools they were investigating; read them only for historical measurement detail.
+2. Check the relevant `libs/*.py` and `tests/tests/test_*.py` before editing.
+
+For every non-trivial task, Claude Code leads the [Claude–Codex workflow](COLLABORATION.md): Codex independently validates intent before planning, challenges the plan, and reviews the completed change when Claude implements. Agreement advances automatically; user input is reserved for material ambiguity, consequential disagreement or preference, and actions requiring explicit approval.
+
+The [docs index](docs/README.md) routes other questions. Detailed historical notes are archived outside `docs/`. The legacy [design](STL_BATCH_FIX_DESIGN.md) is retained for later and is outside the refactor reading path.
+
+Collaboration keeps one Codex session for interpretation/planning and a separate
+review session that resumes for fixes. Start a new task with
+`tools/reset_codex.sh`. To start both AIs clean, save any needed handoff, run that
+reset after active calls finish, then run `/clear` in Claude Code. See the
+[session and reset instructions](COLLABORATION.md#starting-both-ais-clean).
+
+## Current refactor in one pass
+
+`converter.prepare` classifies and converts inputs; `pool.Pool` provides a worker primitive, but the batch walk is unfinished. For one mesh, `processor.process` decimates, then `repairer.repair` splits edge-connected shells, alpha-wraps each retained part with CGAL using the already-decimated whole mesh's bounding-box diagonal (`alpha=diag/800`, `offset=diag/2000`), and merges the parts. After the existing repair rejection checks pass, `processor` decimates again to the same face budget and validates final geometry, volume retention, and topology before `processor.write` emits an STL or failure marker. Weld, PyMeshLab, Blender, and PyMeshFix tool modules remain available for explicit use but are unwired from the default repair sequence.
+
+The review records cases where that sequence can still lose geometry or misreport success. A successful repair must preserve meaningful components as well as satisfy practical slicer limits. Printability can also depend on scale, orientation, and supports, which the mesh alone may not settle.
+
+## Work and verification
+
+Run every Python test, fixture generator, or ad hoc script that imports this project through `tools/project_python.sh`, which always selects `/mnt/sda2/python/.venv/bin/python` and changes to the repository root. `run.sh` and `install.sh` select that environment automatically.
+
+```bash
+# Full suite
+tools/project_python.sh -m unittest discover -s tests/tests -t . -q -p 'test_*.py'
+
+# One test module
+tools/project_python.sh -m unittest tests.tests.test_welder
+
+# Fixture tools
+tools/project_python.sh tests/tests/make_fixtures.py --check
+tools/project_python.sh tools/make_probe_meshes.py tests/probes
+```
+
+Test modules live under `tests/tests/`; legacy pipeline fixtures remain in `tests/fixtures/`, while refactor regression models live in `tests/probes/`. `tests/tests/make_fixtures.py` regenerates and validates both sets. Direct test files, including `tests/tests/test_pipeline.py`, also require the environment interpreter. That pipeline test exercises the **legacy** script and is not refactor coverage. When changing a refactor step, update its focused test and the relevant compact reference or [open issue](archive/docs-refactor-2026-09-22/open-issues.md). Keep code comments on local contracts and invariants; keep experiments and rationale in docs.

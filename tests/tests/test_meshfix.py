@@ -17,7 +17,7 @@ from unittest import mock
 
 import numpy as np
 
-from libs import meshfix, pipeconfig, scanner
+from libs import meshfix, scanner
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.meshfix import Result, is_available, repair
 
@@ -239,14 +239,6 @@ class TestStep(unittest.TestCase):
         ok, result, detail = meshfix.step_meshfix_repair(mesh(TETRA_VERTS, TETRA_FACES))
         self.assertTrue(ok, detail)
         self.assertIn('pymeshfix', detail)
-
-    def test_disabled_skips_and_leaves_the_mesh_unchanged(self):
-        m = mesh(TETRA_VERTS, TETRA_FACES)
-        with mock.patch.object(pipeconfig, 'ENABLE_PART_TOOL', False):
-            ok, result, detail = meshfix.step_meshfix_repair(m)
-        self.assertTrue(ok)
-        self.assertIs(result, m)
-        self.assertIn('ENABLE_PART_TOOL=False', detail)
 
     def test_a_returned_failure_is_reported_not_raised(self):
         m = mesh(TETRA_VERTS, TETRA_FACES)

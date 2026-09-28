@@ -266,14 +266,24 @@ class TestWriting(unittest.TestCase):
 
         A tool that returns a NaN vertex used to escape `process` entirely,
         through `_count_lost`, before any judgement was made.
+
+        `poison` returns the real uniform step contract's 3-tuple
+        (`ok, mesh, detail`) — an earlier version of this test returned only
+        `(mesh, detail)`, which actually failed by raising inside
+        `_run_step`'s own unpacking rather than by exercising the NaN
+        geometry path this test claims to cover; the outcome happened to
+        still be FAILED, for the wrong reason. Fixed so `poison` genuinely
+        returns successfully with poisoned geometry, and the NaN check
+        downstream in `repairer.repair` is what actually produces FAILED.
         """
-        def poison(part):
+        def poison(part, config=None):
             verts = part.geometry.verts.copy()
             verts[0, 0] = float('nan')
-            return part.with_geometry(
+            return True, part.with_geometry(
                 Geometry(verts, part.geometry.faces)), 'poisoned'
 
-        outcome = processor.process(mesh(), max_faces=0, tool=poison)
+        outcome = processor.process(mesh(), max_faces=0,
+                                    part_steps=(('poison', poison),))
         self.assertIs(outcome.indicator, Indicator.FAILED)
         self.assertEqual(outcome.marker, 'source')
         self.assertFalse(outcome.is_clean)
@@ -296,7 +306,7 @@ class TestWriting(unittest.TestCase):
 
         # Isolate component retention from reconstruction cost and fidelity.
         outcome = processor.process(loaded, max_faces=900_000,
-                                    tool=lambda part: (True, part, 'identity'))
+                                    part_steps=(('identity', lambda part, config=None: (True, part, 'identity')),))
 
         self.assertFalse(outcome.is_clean)
         self.assertIs(outcome.indicator, Indicator.DESTROYED)
@@ -459,91 +469,6 @@ class TestWriting(unittest.TestCase):
                 self.assertEqual(indicators.marker_suffix(indicator), suffix)
 
 
-
-
-class TestFinalDecimation(unittest.TestCase):
-    def repaired(self):
-        return repair_result(volume_in=1/6, volume_out=1/6, faces_out=20)
-
-    def final(self, m):
-        return decimator.Result(m, decimator.Rung.FAST_SIMPLIFICATION, 20,
-                                len(m.geometry.faces))
-
-    def test_existing_rejections_prevent_second_pass(self):
-        for repaired in (repair_result(ok=False), repair_result(volume_out=float('nan')),
-                         repair_result(volume_out=0.4),
-                         repair_result(result_mesh=mesh(TETRA_VERTS, TETRA_FACES[1:]))):
-            with self.subTest(repaired=repaired), \
-                 mock.patch.object(decimator, 'decimate', return_value=decimation()) as decimate, \
-                 mock.patch.object(repairer, 'repair', return_value=repaired):
-                outcome = process(mesh(), 10)
-            self.assertFalse(outcome.is_clean)
-            self.assertEqual(decimate.call_count, 1)
-            self.assertIsNone(outcome.final_decimation)
-
-    def test_both_passes_receive_same_budget_and_keep_evidence(self):
-        for budget in (10, 0, -1):
-            repaired = self.repaired()
-            first, final = decimation(), self.final(mesh())
-            with self.subTest(budget=budget), \
-                 mock.patch.object(decimator, 'decimate', side_effect=[first, final]) as decimate, \
-                 mock.patch.object(repairer, 'repair', return_value=repaired):
-                outcome = process(mesh(), budget)
-            self.assertTrue(outcome.is_clean, outcome.reason)
-            self.assertEqual([c.args[1] for c in decimate.call_args_list], [budget, budget])
-            self.assertIs(decimate.call_args_list[1].args[0], repaired.mesh)
-            self.assertIs(outcome.decimation, first)
-            self.assertIs(outcome.repair, repaired)
-            self.assertIs(outcome.final_decimation, final)
-            self.assertIs(outcome.mesh, final.mesh)
-
-    def test_over_budget_and_failed_final_pass(self):
-        for final in (self.final(mesh()), decimator.Result(mesh(), decimator.Rung.FAILED, 4, 4)):
-            first, repaired = decimation(), self.repaired()
-            with mock.patch.object(decimator, 'decimate', side_effect=[first, final]), \
-                 mock.patch.object(repairer, 'repair', return_value=repaired):
-                outcome = process(mesh(), 3)
-            self.assertIs(outcome.indicator, Indicator.UNDECIMATED)
-            self.assertEqual(outcome.marker, 'source')
-            self.assertIn('final (second-pass)', outcome.reason)
-            self.assertIs(outcome.decimation, first)
-            self.assertIs(outcome.repair, repaired)
-            self.assertIs(outcome.final_decimation, final)
-
-    def test_final_geometry_is_remeasured(self):
-        invalid = np.array(TETRA_VERTS, dtype=np.float32)
-        invalid[0, 0] = np.nan
-        for final_mesh, expected in (
-                (mesh(np.array(TETRA_VERTS)*0.5), Indicator.DESTROYED),
-                (mesh(invalid), Indicator.FAILED),
-                (mesh([[0,0,0], [1,0,0], [2,0,0], [3,0,0]]), Indicator.FAILED),
-                (mesh(TETRA_VERTS, TETRA_FACES + [[0,1,2]]), Indicator.UNREPAIRED),
-                (mesh(TETRA_VERTS, TETRA_FACES[1:]), Indicator.OPEN_EDGES)):
-            with self.subTest(expected=expected):
-                final = self.final(final_mesh)
-                outcome = processor._decide(mesh(), decimation(), self.repaired(), final)
-                self.assertIs(outcome.indicator, expected, outcome.reason)
-                self.assertIs(outcome.final_decimation, final)
-
-    def test_final_cannot_conceal_repair_destruction(self):
-        outcome = processor._decide(mesh(), decimation(),
-                                    repair_result(volume_out=0.4), self.final(mesh()))
-        self.assertIs(outcome.indicator, Indicator.DESTROYED)
-        self.assertIn('repair destroyed', outcome.reason)
-
-    def test_both_write_paths_use_final_geometry(self):
-        for faces in (TETRA_FACES, TETRA_FACES + [[0,1,2]]):
-            final = self.final(mesh(np.array(TETRA_VERTS) + 10, faces))
-            outcome = processor._decide(mesh(), decimation(), self.repaired(), final)
-            with tempfile.TemporaryDirectory() as directory, \
-                 mock.patch.object(mesh_io_module, 'write') as writer:
-                write(outcome, '/unused/source.stl', os.path.join(directory, 'out.stl'))
-            np.testing.assert_array_equal(writer.call_args.args[0].geometry.verts,
-                                          final.mesh.geometry.verts)
-            np.testing.assert_array_equal(writer.call_args.args[0].geometry.faces,
-                                          final.mesh.geometry.faces)
-            if outcome.is_clean:
-                self.assertIn('4 faces', outcome.reason)
 
 
 if __name__ == '__main__':

@@ -16,6 +16,7 @@ import numpy as np
 import libs.alphawrap as alphawrap
 from libs.alphawrap import is_available, wrap
 from libs.mesh_io import Geometry, Kind, Mesh
+from libs.pipeconfig import StepConfig
 from libs.scanner import scan
 
 
@@ -197,19 +198,17 @@ class TestWrap(unittest.TestCase):
 
 
 class TestStep(unittest.TestCase):
-    def test_disabled_skips_before_parameters_or_cgal(self):
-        with mock.patch.object(alphawrap.pipeconfig, 'ENABLE_ALPHA_WRAP', False), \
-             mock.patch.object(alphawrap, 'wrap') as wrapped:
-            ok, result, detail = alphawrap.step_alpha_wrap(_unloaded())
-        self.assertTrue(ok)
-        self.assertIn('skipped', detail)
-        wrapped.assert_not_called()
+    # test_disabled_skips_before_parameters_or_cgal removed: it tested the
+    # pipeconfig.ENABLE_ALPHA_WRAP flag, which was removed in the
+    # uniform-step refactor (docs/refactor/TODO.md) -- there is no on/off
+    # flag any more, so this premise no longer applies.
 
     def test_invalid_diagonals_fail_without_raising(self):
         m = _mesh(*_sphere(0))
         for diagonal in (None, 0, -1, math.nan, math.inf, 'invalid'):
             with self.subTest(diagonal=diagonal):
-                ok, result, detail = alphawrap.step_alpha_wrap(m, whole_diagonal=diagonal)
+                config = None if diagonal is None else StepConfig(whole_model_diag=diagonal)
+                ok, result, detail = alphawrap.step_alpha_wrap(m, config)
                 self.assertFalse(ok)
                 self.assertIs(result, m)
                 self.assertTrue(detail)
@@ -217,7 +216,7 @@ class TestStep(unittest.TestCase):
     def test_missing_cgal_is_a_step_failure(self):
         m = _mesh(*_sphere(0))
         with mock.patch.object(alphawrap, '_CGAL', False):
-            ok, result, detail = alphawrap.step_alpha_wrap(m, whole_diagonal=10)
+            ok, result, detail = alphawrap.step_alpha_wrap(m, StepConfig(whole_model_diag=10))
         self.assertFalse(ok)
         self.assertIs(result, m)
         self.assertIn('cgal', detail)
@@ -225,10 +224,10 @@ class TestStep(unittest.TestCase):
     def test_recipe_and_exception_contract(self):
         m = _mesh(*_sphere(0))
         with mock.patch.object(alphawrap, 'wrap', return_value=m) as wrapped:
-            self.assertTrue(alphawrap.step_alpha_wrap(m, whole_diagonal=80)[0])
+            self.assertTrue(alphawrap.step_alpha_wrap(m, StepConfig(whole_model_diag=80))[0])
         wrapped.assert_called_once_with(m, 0.1, 0.04)
         with mock.patch.object(alphawrap, 'wrap', side_effect=RuntimeError('boom')):
-            ok, result, detail = alphawrap.step_alpha_wrap(m, whole_diagonal=80)
+            ok, result, detail = alphawrap.step_alpha_wrap(m, StepConfig(whole_model_diag=80))
         self.assertFalse(ok)
         self.assertIs(result, m)
         self.assertIn('boom', detail)

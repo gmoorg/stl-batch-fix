@@ -2,6 +2,14 @@
 
 Start with [README.md](README.md) and follow only the compact documentation needed.
 
+Read only task-relevant sections linked from README; do not preload every
+reference or recursively read `archive/`, `design/`, or historical handoffs.
+
+Review the user's proposals honestly and independently, not with automatic
+agreement. Understand the whole proposal and its purpose, then explain any
+evidence-backed concerns and alternatives. Follow the shared
+[honest-review rule](COLLABORATION.md#honest-review-of-user-proposals).
+
 Claude Code is the lead orchestrator for every non-trivial task under [COLLABORATION.md](COLLABORATION.md). When invoked through `tools/ask_codex.sh`, remain read-only and independently validate the labeled phase:
 
 - `INTERPRETATION`: check the original prompt and repository before judging Claude's understanding.

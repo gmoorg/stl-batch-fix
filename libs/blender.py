@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from . import mesh_io, pipeconfig
+from . import mesh_io
 from .mesh_io import Mesh
 
 
@@ -242,7 +242,7 @@ def repair(source: str, destination: str,
 STEP_TIMEOUT = 600
 
 
-def step_blender_repair(mesh: Mesh) -> tuple[bool, Mesh, str]:
+def step_blender_repair(mesh: Mesh, config: object | None = None) -> tuple[bool, Mesh, str]:
     """`pipeconfig`'s uniform step contract, wrapping `repair()`.
 
     Takes only a mesh — `timeout` is `STEP_TIMEOUT`, not a parameter, so
@@ -256,8 +256,6 @@ def step_blender_repair(mesh: Mesh) -> tuple[bool, Mesh, str]:
     in this step (launch failure, PLY I/O, unloaded geometry), caught as a
     whole rather than only around the `repair()` call.
     """
-    if not pipeconfig.ENABLE_BLENDER_PART:
-        return True, mesh, 'skipped (ENABLE_BLENDER_PART=False)'
     try:
         faces_in = len(mesh.geometry.faces)
         with tempfile.TemporaryDirectory(prefix='blender-step-') as folder:

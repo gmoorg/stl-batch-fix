@@ -5,7 +5,7 @@ from unittest import mock
 
 import numpy as np
 
-from libs import meshlab, pipeconfig, scanner
+from libs import meshlab, scanner
 from libs.mesh_io import Geometry, Kind, Mesh
 
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
@@ -16,7 +16,11 @@ needs_meshlab = unittest.skipUnless(
 
 #: The four CLEAN filters as one combined `apply_filters()` call — a
 #: test-local reference sequence for comparing against the four separate
-#: `step_clean_*` calls. Order matches `repairer.WHOLE_MESH_STEPS`.
+#: `step_clean_*` calls. `repairer.WHOLE_MESH_STEPS` is empty by default in
+#: the uniform-step refactor (docs/refactor/TODO.md) — these filters are not
+#: wired into it; this tuple exists only to give
+#: `test_running_the_four_steps_separately_matches_one_combined_call` a
+#: reference order to check the four separate calls against.
 CLEAN_FILTERS_COMBINED: tuple[tuple[str, dict], ...] = (
     ('meshing_remove_null_faces', {}),
     ('meshing_merge_close_vertices', {'threshold': 0.1}),
@@ -82,30 +86,6 @@ class TestCleanAndOrientSteps(unittest.TestCase):
     test_float_noise_is_not_a_loss` for the single-round-trip baseline this
     compounds).
     """
-
-    def test_each_clean_step_runs_its_own_flag(self):
-        for step_fn, flag_name in (
-            (meshlab.step_clean_null_faces, 'ENABLE_CLEAN_NULL_FACES'),
-            (meshlab.step_clean_merge_close, 'ENABLE_CLEAN_MERGE_CLOSE'),
-            (meshlab.step_clean_duplicate_faces,
-             'ENABLE_CLEAN_DUPLICATE_FACES'),
-            (meshlab.step_clean_unreferenced, 'ENABLE_CLEAN_UNREFERENCED'),
-        ):
-            with self.subTest(flag=flag_name):
-                m = tetra()
-                with mock.patch.object(pipeconfig, flag_name, False):
-                    ok, result, detail = step_fn(m)
-                self.assertTrue(ok)
-                self.assertIs(result, m)
-                self.assertIn(f'{flag_name}=False', detail)
-
-    def test_orient_runs_its_own_flag(self):
-        m = tetra()
-        with mock.patch.object(pipeconfig, 'ENABLE_ORIENT', False):
-            ok, result, detail = meshlab.step_orient(m)
-        self.assertTrue(ok)
-        self.assertIs(result, m)
-        self.assertIn('orient skipped', detail)
 
     def test_a_filter_exception_is_reported_not_raised(self):
         m = tetra()

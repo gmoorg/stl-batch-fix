@@ -5,71 +5,44 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
-from functools import partial
 
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import alphawrap, pipeconfig, scanner, splitter
+from . import alphawrap, decimator, execstep, meshfix, pipeconfig, scanner, splitter, steplog
+from .execstep import Entry, Step, StepResult, collection_entry, mesh_entry
 from .mesh_io import Mesh, require_geometry
-
-# Should we move it in to pipe config? 
-# Ideally, each step should have it own ID in another enumerator, and the repair should receive tuple[Step, ID] array in constructor and populate WHOLE_MESH_STEPS, PART_MESH_STEPS and SPLIT_STEP from it. 
-# This would allow us to move steps around for testing. Default order should be in the pipeconfig.
-# Also, this would remove the requirement to provide a custom "tool" lambda into repair
-class Step(Enum):
-    """Which step a `StepResult` is reporting."""
-
-    PREP = 'prep'
-    SPLIT = 'split'
-    PART = 'part'
-    MERGE = 'merge'
+from .steplog import StepLogger
 
 #: The whole-mesh steps `repair` runs, in order, before the split — this
-#: tuple, read top to bottom, IS the order of operation. Each function is a
-#: uniform `(mesh) -> (ok, mesh, detail)` step owned by the module that
-#: knows its mechanics; `repairer` only sequences them.
-WHOLE_MESH_STEPS: tuple[tuple[str, Callable[[Mesh], tuple[bool, Mesh, str]]], ...] = ()
+#: tuple, read top to bottom, IS the order of operation. Empty by default;
+#: add an `execstep.mesh_entry(name, step_fn)` here to run something before
+#: the split. Execution, recording, and stop-on-failure are `execstep`'s
+#: job — this module only says what runs, in what order.
+WHOLE_MESH_STEPS: tuple[Entry, ...] = ()
 
-#: The per-part steps `_repair_part` runs, in order — visible the same way
-#: `WHOLE_MESH_STEPS` is, rather than an anonymous tuple inline in the
-#: function body. Tests that need to substitute one of these must patch
-#: `repairer.PART_MESH_STEPS` itself (e.g. with `mock.patch.object`), not
-#: the origin module's attribute: this tuple captures the function objects
-#: once, at import time, so patching `alphawrap.step_alpha_wrap` after
-#: import does not change what an already-built tuple holds.
-PART_MESH_STEPS: tuple[tuple[str, Callable[[Mesh], tuple[bool, Mesh, str]]], ...] = (
-    ('step_alpha_wrap', alphawrap.step_alpha_wrap),
+#: The per-part steps `repair` runs by default for each split part, in
+#: order — the SAME visible-tuple pattern as `WHOLE_MESH_STEPS`. A caller
+#: supplying its own `part_steps=` to `repair()` replaces this ENTIRELY:
+#: nothing from here is appended to a custom sequence, and an empty custom
+#: sequence (`part_steps=()`) runs nothing at all. Decimation and
+#: conditional MeshFix used to be force-appended after any custom sequence
+#: (`_decimate_to_target_and_fix`, removed in the uniform-step refactor);
+#: they are now ordinary entries here, like any other step a caller can
+#: keep, drop, or reorder — settled by the user, not inferred: "final
+#: decimate and meshfix after should be treat as any other stand alone
+#: step what we could add or remove from list of steps."
+DEFAULT_PART_STEPS: tuple[Entry, ...] = (
+    mesh_entry('alpha_wrap', alphawrap.step_alpha_wrap),
+    mesh_entry('decimate', decimator.make_step()),
+    mesh_entry('meshfix', execstep.ConditionStep(
+        scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)),
 )
 
 #: Allow float re-rounding when counting retained vertices. This absolute
 #: threshold is a known scale risk; see
 #: archive/docs-refactor-2026-09-22/open-issues.md.
 LOST_VERTEX_TOLERANCE = 1e-4
-
-
-@dataclass(frozen=True)
-class StepResult:
-    """Measurements recorded after one repair step.
-
-    `scan` and `volume` describe the resulting mesh; both are None for a split
-    that produces several parts. Every executed step is recorded, including a
-    no-op, so a caller can attribute changes instead of inferring from face count.
-    """
-
-    step: Step
-    faces_in: int
-    faces_out: int
-    detail: str
-    second_elapsed: float
-    scan: scanner.Scan | None = None
-    volume: float | None = None
-    orphans: int = 0
-
-    @property
-    def changed(self) -> bool:
-        return self.faces_in != self.faces_out
 
 
 @dataclass(frozen=True)
@@ -132,112 +105,92 @@ def _count_lost(before: np.ndarray, after: np.ndarray,
     return int((distance > tolerance).sum())
 
 
-def _record_step(steps_list: list[StepResult], step: Step, was: int,
-                 now: int, detail: str, since: float,
-                 result: Mesh | None = None) -> None:
-    """Record one step, scanning `result` when there is a mesh to scan.
-
-    The one place a `StepResult` is built — `_run_step`, SPLIT, and MERGE
-    all call this, so there is exactly one implementation of "scan the
-    result and append a `StepResult`", not one per call site. `result` is
-    `None` for the split, which produces several meshes rather than one —
-    each part is then scanned by its own `Step.PART` entry.
+def _split_stage(min_shell_faces: int) -> tuple[Entry, ...]:
+    """The split stage as an explicit, ordered tuple of collection entries —
+    shell split, then (if present) seam split. This function's body is the
+    ONLY place that composes the split stage: reading it top to bottom shows
+    exactly which collection steps run and in what order, and a caller's own
+    `min_shell_faces` changes only the shell entry's floor, never the set or
+    order of entries present. Enabling seam splitting later means adding one
+    more `collection_entry(...)` line here, in order — not touching a flag
+    (docs/refactor/TODO.md's "Uniform-step refactor" section: "do not enable
+    seam splitting... during this refactor").
     """
-    scan = volume = None
-    orphans = 0
-    if result is not None and result.geometry is not None:
-        scan = scanner.scan(result)
-        volume = scanner.volume(result)
-        orphans = (len(result.geometry.verts)
-                   - len(np.unique(result.geometry.faces)))
-    steps_list.append(StepResult(step, was, now, detail,
-                                 time.monotonic() - since,
-                                 scan, volume, int(orphans)))
+    return (
+        collection_entry('split_shells',
+                         splitter.make_shell_split_step(min_faces=min_shell_faces)),
+        # seam split intentionally absent — see docstring above.
+    )
 
 
-@dataclass(frozen=True)
-class _StepOutcome:
-    """What one uniform step call plus its recording produced.
+def is_already_clean(mesh: Mesh) -> bool:
+    """True when `mesh` has no non-manifold edges, no open edges, and
+    consistent winding — the three checks together, not `Scan.is_clean`
+    alone.
 
-    `mesh` is always the step's own result, regardless of whether recording
-    it afterward succeeded — matching what `repair` did before this was
-    extracted: the mesh was reassigned on the line that called the step,
-    before anything that could raise while describing the result. If
-    recording raises, `record_error` carries it and the caller re-raises it
-    itself, after first assigning `mesh = outcome.mesh` — so a scan failure
-    still reaches the outer exception handler with the advanced mesh, not
-    the one from before this step ran.
+    Stateless: takes only the mesh, reads nothing from `pipeconfig` or any
+    other module-level state, so whether/how this gates `repair()` is a
+    single call site's decision, not something spread across flags.
+
+    `Scan.is_clean` (`open_edges == 0 and non_manifold == 0`) is NOT
+    sufficient by itself — a mesh can score `is_clean` while having
+    inverted normals: Amidara's real `base.stl` has 1,506 of them and 922
+    winding-seam edges while reading as fully `is_clean` (measured
+    2026-09-21, archive/docs-refactor-2026-09-22/open-issues.md). Adding
+    `winding_seams(mesh) == 0` closes that gap. `scanner.winding_seams`'s
+    own known limitation — it only examines edges shared by exactly two
+    faces, so it cannot see winding on a non-manifold edge — does not apply
+    here: `non_manifold == 0` is already one of this function's own
+    conditions, and a mesh that satisfies it by definition has no edge
+    shared by three or more faces, so there is nothing left for that
+    limitation to miss.
+
+    Self-intersections are deliberately NOT checked: they do not by
+    themselves fail a print (see the spike this function was written for,
+    docs/refactor/TODO.md's "Algorithm questions" section) and alpha-wrap
+    exists specifically to make them go away — a mesh whose only defect is
+    self-intersection is exactly the case this gate is meant to skip
+    repairing, not exclude.
     """
-
-    ok: bool
-    mesh: Mesh
-    detail: str
-    record_error: Exception | None = None
-
-
-def _named_detail(name: str | None, detail: str) -> str:
-    """`"{name}: {detail}"`, or bare `detail` when there is no name to
-    attach — shared by `_run_step` (one named step) and `_repair_part`
-    (several named sub-steps folded into one composite detail string), so
-    the two do not format the same "which step said what" text two
-    different ways.
-    """
-    return detail if name is None else f"{name}: {detail}"
+    scan = scanner.scan(mesh)
+    if not scan.is_clean:
+        return False
+    seam_edges, _ = scanner.winding_seams(mesh)
+    return seam_edges == 0
 
 
-def _run_step(step: Step,
-             name: str | None,
-             step_fn: Callable[[Mesh], tuple[bool, Mesh, str]],
-             mesh: Mesh,
-             steps_list: list[StepResult],
-             detail_prefix: str = '') -> _StepOutcome:
-    """Call one uniform step and record it. See `_StepOutcome` for why a
-    failure while recording does not lose the step's own result.
-    """
-    mark = time.monotonic()
-    was = len(mesh.geometry.faces)
-    ok, mesh, detail = step_fn(mesh)
-    full_detail = detail_prefix + _named_detail(name, detail)
-
-    try:
-        now = len(mesh.geometry.faces)
-        _record_step(steps_list,
-                     step,
-                     was,
-                     now,
-                     full_detail,
-                     mark,
-                     mesh)
-    except Exception as exc:
-        return _StepOutcome(ok, mesh, full_detail, record_error=exc)
-
-    return _StepOutcome(ok, mesh, full_detail)
-
-
-def _repair_part(part: Mesh, steps=None) -> tuple[bool, Mesh, str]:
-    """Run the supplied sequence, or read PART_MESH_STEPS at call time.
-
-    Stop on failure and accumulate detail; repair records one PART result.
-    """
-    if steps is None:
-        steps = PART_MESH_STEPS
-    notes = []
-    for step_name, step_fn in steps:
-        ok, part, detail = step_fn(part)
-        notes.append(_named_detail(step_name, detail))
-        if not ok:
-            return False, part, ', '.join(notes)
-    return True, part, ', '.join(notes)
-
-# why we allow overriden repair tools but not prep steps?
 def repair(mesh: Mesh,
            min_shell_faces: int = splitter.MIN_SHELL_FACES,
-           tool: Callable[[Mesh], tuple[bool, Mesh, str]] | None = None,
+           part_steps: tuple[tuple[str, Callable[..., tuple[bool, Mesh, str]]], ...] | None = None,
+           step_logger: StepLogger = steplog.null_logger,
+           source_name: str = '',
            ) -> Result:
     """Split, wrap each part, and merge; no file is written.
 
-    A non-None tool replaces the default sequence and bypasses diagonal
-    calculation and binding. A failed step stops the run with its evidence.
+    `part_steps`, when supplied, REPLACES `DEFAULT_PART_STEPS` for this call
+    entirely — taken exactly as given, in order, with nothing appended or
+    removed. An empty `part_steps=()` runs no per-part steps at all. Each
+    entry is `(name, step_fn)` with `step_fn` accepting `(mesh, config)`,
+    the same shape `DEFAULT_PART_STEPS` itself uses — not an opaque
+    callable, so a multi-step sequence still logs against a real name
+    instead of a generic fallback.
+
+    Decimation and conditional MeshFix are NOT auto-appended after a custom
+    `part_steps` — they were, via the now-removed
+    `_decimate_to_target_and_fix`, before the uniform-step refactor; a
+    caller that wants them lists them itself, the same as any other step
+    (settled by the user, not inferred — see `DEFAULT_PART_STEPS`'s
+    docstring). `whole_model_diag`, though, IS still computed and bound
+    automatically into every part's `StepConfig` regardless of whether
+    `part_steps` is the default or a caller's own — a caller does not need
+    to compute or pass it itself just because it wants a different set of
+    part steps than the default.
+
+    `step_logger`, when supplied, is called before and after each step —
+    including SPLIT/MERGE, which sit outside the plain per-mesh step
+    contract — so an incremental record survives even a crash partway
+    through. `source_name` identifies which file's steps these are, for a
+    caller sharing one log across several files/processes.
     """
     require_geometry(mesh)
 
@@ -248,60 +201,68 @@ def repair(mesh: Mesh,
     # shells cancel into a denominator near zero (A02).  The per-step `volume`
     # recorded below stays signed — it describes one result and is where an
     # inside-out mesh shows up.
-    volume_in = scanner.component_volume(mesh)
+    with steplog.logged_step(step_logger, source_name, 'scan_volume_in',
+                             f'{faces_in} faces') as end:
+        volume_in = scanner.component_volume(mesh)
+        end(f'{volume_in}')
     before = mesh.geometry.verts
     steps: list[StepResult] = []
     destination = mesh.destination
 
     try:
-        if tool is None:
-            verts = mesh.geometry.verts.astype(np.float64)
-            whole_diagonal = float(np.linalg.norm(np.ptp(verts, axis=0)))
-            bound_steps = tuple(
-                (name, partial(fn, whole_diagonal=whole_diagonal)
-                 if fn is alphawrap.step_alpha_wrap else fn)
-                for name, fn in PART_MESH_STEPS)
-            tool = partial(_repair_part, steps=bound_steps)
+        # `whole_model_diag` is computed once, here, after any whole-mesh
+        # steps and before the split, then carried unchanged into every
+        # part's own `StepConfig` below — regardless of whether the default
+        # `DEFAULT_PART_STEPS` or a caller's own `part_steps` runs, so a
+        # caller does not need to compute or rebind it itself just because
+        # it wants a different set of part steps than the default.
+        resolved_part_entries = (
+            tuple(execstep.as_entry(entry) for entry in part_steps)
+            if part_steps is not None else DEFAULT_PART_STEPS)
 
         # Whole-mesh sequence is empty by default.
-        for step_name, step_fn in WHOLE_MESH_STEPS:
-            outcome = _run_step(Step.PREP, step_name, step_fn, mesh, steps)
-            mesh = outcome.mesh
-            if outcome.record_error is not None:
-                raise outcome.record_error
-            if not outcome.ok:
-                return _failed(mesh, f"{Step.PREP.value}: {step_name} - {outcome.detail}",
-                               tuple(steps), faces_in, volume_in,
-                               time.monotonic() - started)
+        whole_config = pipeconfig.StepConfig()
+        whole_outcome = execstep.run_sequence(
+            WHOLE_MESH_STEPS, mesh, whole_config, steps,
+            step_logger=step_logger, source_name=source_name, step=Step.PREP)
+        mesh = whole_outcome.mesh
+        if whole_outcome.record_error is not None:
+            raise whole_outcome.record_error
+        if not whole_outcome.ok:
+            return _failed(mesh, whole_outcome.detail, tuple(steps),
+                           faces_in, volume_in, time.monotonic() - started)
 
+        whole_model_diag = scanner.diagonal(mesh)
 
-        #  Should splitter's steps be moved into splitter and have a ([mesh ...] )  -> ok, [mesh ...], outcome signature or something like that?  
-
-        # Split, repair each retained part, then merge.
-        mark = time.monotonic()
-        was = len(mesh.geometry.faces)
-        if pipeconfig.ENABLE_SPLIT_SHELLS:
-            parts = splitter.by_shells(mesh, min_faces=min_shell_faces)
-            how = f"{len(parts)} shell part(s)"
-            # No reporting?
-        else:
-            parts = (mesh,)
-            how = 'shell split skipped (ENABLE_SPLIT_SHELLS=False)'
-        if pipeconfig.ENABLE_SPLIT_SEAMS:
-            # Every region, including debris: `by_seams` does not filter, and
-            # judging a region is the caller's job.
-            parts = tuple(r for part in parts for r in splitter.by_seams(part))
-            how += f" -> {len(parts)} region(s) after seams"
-            # No reporting?
-        kept = sum(len(p.geometry.faces) for p in parts)
-
-        _record_step(steps, Step.SPLIT, was, kept,
-                     f"{how}, {kept} of {was} faces kept", mark)
+        # Split, repair each retained part, then merge. The split stage is
+        # one or more collection entries, run in the order `_split_stage`
+        # composes them — see its docstring for why shell split is always
+        # present and seam split is not.
+        split_config = pipeconfig.StepConfig(whole_model_diag=whole_model_diag)
+        parts = (mesh,)
+        for entry in _split_stage(min_shell_faces):
+            ok, parts, detail = execstep.run_collection_step(
+                Step.SPLIT, entry.name, entry.fn, parts, steps,
+                config=split_config, step_logger=step_logger, source_name=source_name)
+            if not ok:
+                return _failed(mesh, f"{entry.name}: {detail}", tuple(steps),
+                               faces_in, volume_in, time.monotonic() - started)
 
         repaired = []
         for index, part in enumerate(parts):
+            # Captured BEFORE the part sequence runs (alpha-wrap inflates
+            # face count) — the shell's own size immediately after
+            # splitting is a size it is already known to have held cleanly,
+            # and is what a decimate entry in the sequence targets via
+            # `StepConfig.faceCount`.
+            target_faces = len(part.geometry.faces)
+            part_config = pipeconfig.StepConfig(
+                faceCount=target_faces, whole_model_diag=whole_model_diag)
 
-            outcome = _run_step(Step.PART, None, tool, part, steps, detail_prefix=f"part {index}: ")
+            outcome = execstep.run_sequence(
+                resolved_part_entries, part, part_config, steps,
+                step_logger=step_logger, source_name=source_name,
+                step=Step.PART)
 
             repaired.append(outcome.mesh)
             if outcome.record_error is not None:
@@ -318,11 +279,12 @@ def repair(mesh: Mesh,
                                faces_in, volume_in,
                                time.monotonic() - started)
 
-        mark = time.monotonic()
-        was = sum(len(p.geometry.faces) for p in repaired)
-        mesh = splitter.merge(repaired, destination=destination)
-        _record_step(steps, Step.MERGE, was, len(mesh.geometry.faces),
-                     f"{len(repaired)} part(s) merged", mark, mesh)
+        merge_outcome = execstep.run_merge_step(
+            splitter.merge, repaired, destination, steps,
+            step_logger=step_logger, source_name=source_name)
+        mesh = merge_outcome.mesh
+        if merge_outcome.record_error is not None:
+            raise merge_outcome.record_error
 
         # A tool can hand back geometry that is not measurable — PyMeshFix,
         # PyMeshLab and Blender all return arrays this module did not build.

@@ -112,6 +112,20 @@ def scan(mesh: Mesh) -> Scan:
                 degenerate=degenerate)
 
 
+def has_defects(scan: Scan) -> bool:
+    """True when `scan` found any open or non-manifold edge.
+
+    The general scan-result predicate for "does this need fixing" — owned
+    here rather than as an inline lambda at a pipeline call site, so a
+    `ConditionStep` gating a repair tool on topology reads
+    `scanner.has_defects` instead of restating `not scan.is_clean`
+    wherever it is needed. Equivalent to `not scan.is_clean`, spelled as its
+    own name because "does this need fixing" is the question a caller is
+    actually asking, not "is this clean".
+    """
+    return not scan.is_clean
+
+
 def open_loops(mesh: Mesh) -> tuple[Loop, ...]:
     """Return open-edge boundary components, largest diameter first.
 

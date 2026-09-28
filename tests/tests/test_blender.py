@@ -20,7 +20,7 @@ from unittest import mock
 
 import numpy as np
 
-from libs import blender, pipeconfig
+from libs import blender
 from libs.blender import (
     CONVERT_SCRIPT, Result, Runner, convert, is_available,
 )
@@ -427,16 +427,8 @@ class TestStep(unittest.TestCase):
     """`step(mesh) -> (ok, mesh, detail)`, the pipeline's uniform entry
     point for this module. `repair()` itself is mocked — real Blender
     process handling is `TestNormalRun`/`TestTimeout`'s job; this is about
-    `step`'s own contract: flag check, PLY round trip, failure conversion.
+    `step`'s own contract: PLY round trip, failure conversion.
     """
-
-    def test_disabled_skips_and_leaves_the_mesh_unchanged(self):
-        m = tetra()
-        with mock.patch.object(pipeconfig, 'ENABLE_BLENDER_PART', False):
-            ok, result, detail = blender.step_blender_repair(m)
-        self.assertTrue(ok)
-        self.assertIs(result, m)
-        self.assertIn('ENABLE_BLENDER_PART=False', detail)
 
     def test_a_returned_failure_is_reported_not_raised(self):
         m = tetra()
