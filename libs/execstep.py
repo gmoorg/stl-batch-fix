@@ -153,6 +153,7 @@ class StepResult:
     scan: object | None = None
     volume: float | None = None
     orphans: int = 0
+    part: str = '-'
 
     @property
     def changed(self) -> bool:
@@ -190,7 +191,7 @@ def _record_step(steps_list: list[StepResult], step: Step, was: int,
                  now: int, detail: str, since: float,
                  result: Mesh | None = None,
                  step_logger: StepLogger = steplog.null_logger,
-                 source_name: str = '') -> None:
+                 source_name: str = '', part: str = '-') -> None:
     """Record one step, scanning `result` when there is a mesh to scan.
 
     The one place a `StepResult` is built — mesh steps, collection steps,
@@ -211,7 +212,8 @@ def _record_step(steps_list: list[StepResult], step: Step, was: int,
     orphans = 0
     if result is not None and result.geometry is not None:
         with steplog.logged_step(step_logger, source_name, 'scan',
-                                 f'{len(result.geometry.faces)} faces') as end:
+                                 f'{len(result.geometry.faces)} faces',
+                                 part=part) as end:
             scan = scanner.scan(result)
             volume = scanner.volume(result)
             orphans = (len(result.geometry.verts)
@@ -219,7 +221,7 @@ def _record_step(steps_list: list[StepResult], step: Step, was: int,
             end(f'nm={scan.non_manifold}, open={scan.open_edges}')
     steps_list.append(StepResult(step, was, now, detail,
                                  time.monotonic() - since,
-                                 scan, volume, int(orphans)))
+                                 scan, volume, int(orphans), part))
 
 
 def run_step(step: Step,
@@ -231,7 +233,8 @@ def run_step(step: Step,
             detail_prefix: str = '',
             step_logger: StepLogger = steplog.null_logger,
             source_name: str = '',
-            log_step_name: str | None = None) -> _StepOutcome:
+            log_step_name: str | None = None,
+            part: str = '-') -> _StepOutcome:
     """Call one uniform mesh step and record it. See `_StepOutcome` for why
     a failure while recording does not lose the step's own result.
 
@@ -253,7 +256,7 @@ def run_step(step: Step,
         name if name is not None else step.value)
     mark = time.monotonic()
     was = len(mesh.geometry.faces)
-    step_logger(source_name, 'start', log_step, None, f'{was} faces in')
+    step_logger(source_name, 'start', log_step, part, None, f'{was} faces in')
     ok, mesh, detail = step_fn(mesh, config)
     full_detail = detail_prefix + _named_detail(name, detail)
 
@@ -269,12 +272,12 @@ def run_step(step: Step,
     try:
         now = len(mesh.geometry.faces)
         _record_step(steps_list, step, was, now, full_detail, mark, mesh,
-                     step_logger=step_logger, source_name=source_name)
+                     step_logger=step_logger, source_name=source_name, part=part)
     except Exception as exc:
         record_error = exc
         log_detail = f'{log_detail} (recording raised {type(exc).__name__})'
 
-    step_logger(source_name, 'end', log_step, time.monotonic() - mark, log_detail)
+    step_logger(source_name, 'end', log_step, part, time.monotonic() - mark, log_detail)
     if record_error is not None:
         return _StepOutcome(ok, mesh, full_detail, record_error=record_error)
     return _StepOutcome(ok, mesh, full_detail)
@@ -287,7 +290,8 @@ def run_collection_step(step: Step,
                         steps_list: list[StepResult],
                         config: "StepConfig | None" = None,
                         step_logger: StepLogger = steplog.null_logger,
-                        source_name: str = '') -> tuple[bool, tuple[Mesh, ...], str]:
+                        source_name: str = '',
+                        part: str = '-') -> tuple[bool, tuple[Mesh, ...], str]:
     """Call one collection step (N meshes in, M meshes out) and record it.
 
     Records ONE aggregate `StepResult` — total input faces vs. total output
@@ -299,12 +303,12 @@ def run_collection_step(step: Step,
     log_step = name if name is not None else step.value
     mark = time.monotonic()
     was = sum(len(p.geometry.faces) for p in parts)
-    step_logger(source_name, 'start', log_step, None, f'{was} faces in')
+    step_logger(source_name, 'start', log_step, part, None, f'{was} faces in')
     ok, result_parts, detail = step_fn(parts, config)
     kept = sum(len(p.geometry.faces) for p in result_parts)
     _record_step(steps_list, step, was, kept, detail, mark,
-                step_logger=step_logger, source_name=source_name)
-    step_logger(source_name, 'end', log_step, time.monotonic() - mark, detail)
+                step_logger=step_logger, source_name=source_name, part=part)
+    step_logger(source_name, 'end', log_step, part, time.monotonic() - mark, detail)
     return ok, result_parts, detail
 
 
@@ -324,7 +328,8 @@ def run_sequence(entries: tuple[Entry, ...],
                  step_logger: StepLogger = steplog.null_logger,
                  source_name: str = '',
                  step: Step = Step.PREP,
-                 log_step_name: str | None = None) -> _StepOutcome:
+                 log_step_name: str | None = None,
+                 part: str = '-') -> _StepOutcome:
     """Run a homogeneous sequence of MESH-kind entries in order, stopping at
     the first failure.
 
@@ -349,7 +354,8 @@ def run_sequence(entries: tuple[Entry, ...],
     for entry in entries:
         outcome = run_step(step, entry.name, entry.fn, mesh, steps_list,
                            config=config, step_logger=step_logger,
-                           source_name=source_name, log_step_name=log_step_name)
+                           source_name=source_name, log_step_name=log_step_name,
+                           part=part)
         mesh = outcome.mesh
         if outcome.record_error is not None:
             return outcome
@@ -363,7 +369,8 @@ def run_merge_step(merge_fn: Callable[..., Mesh],
                    destination: str | None,
                    steps_list: list[StepResult],
                    step_logger: StepLogger = steplog.null_logger,
-                   source_name: str = '') -> _StepOutcome:
+                   source_name: str = '',
+                   part: str = '-') -> _StepOutcome:
     """Merge parts into one mesh and record it, through the same recording
     primitive every other stage uses.
 
@@ -378,17 +385,17 @@ def run_merge_step(merge_fn: Callable[..., Mesh],
     mark = time.monotonic()
     was = sum(len(p.geometry.faces) for p in parts)
     log_step = Step.MERGE.value
-    step_logger(source_name, 'start', log_step, None, f'{len(parts)} part(s)')
+    step_logger(source_name, 'start', log_step, part, None, f'{len(parts)} part(s)')
     mesh = merge_fn(parts, destination=destination)
     detail = f"{len(parts)} part(s) merged"
     record_error = None
     try:
         _record_step(steps_list, Step.MERGE, was, len(mesh.geometry.faces),
                      detail, mark, mesh, step_logger=step_logger,
-                     source_name=source_name)
+                     source_name=source_name, part=part)
     except Exception as exc:
         record_error = exc
-    step_logger(source_name, 'end', log_step, time.monotonic() - mark,
+    step_logger(source_name, 'end', log_step, part, time.monotonic() - mark,
                f'{detail}, {len(mesh.geometry.faces)} faces out')
     if record_error is not None:
         return _StepOutcome(True, mesh, detail, record_error=record_error)

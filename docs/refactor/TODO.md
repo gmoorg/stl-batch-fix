@@ -4,22 +4,6 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
 [pipeline](orchestration.md). Historical review evidence and test results are
 [archived](../../archive/README.md). Remove completed tasks; update the owning reference.
 
-## Logging and documentation
-
-- [ ] Add a code comment explaining the best-effort post-wrap face target.
-  Count differences alone must not reject a model; do not add strict enforcement.
-- [ ] Use a unique source path in shared step logs so equal basenames in different
-  folders remain distinguishable; keep fields safe for tab-delimited output.
-- [ ] Include part identity on every per-part event, including nested scans and
-  start/end pairs. A dedicated `part` column (`1/N`, `-` for whole model) is a
-  proposed schema, not yet finalized. Verify interleaved multi-file/multi-part logs.
-- [ ] Clarify CLI help and `process` docstring: `--max-faces 0` disables only
-  initial decimation; post-alpha-wrap reduction still runs.
-- [ ] Record explicit total elapsed time per file; do not sum overlapping nested timers.
-- [ ] Add timing coverage for scanner calls that remain invisible in step logs.
-- [ ] Persist progress and final summaries alongside incremental step events
-  through a shared reporting mechanism; existing step-file logging already works.
-
 ## Runner and concurrency
 
 - [ ] Measure alpha-wrap peak memory and replace the unvalidated factor 3.

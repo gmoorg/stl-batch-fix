@@ -161,6 +161,22 @@ class TestTheDecision(unittest.TestCase):
                 self.assertIsNotNone(outcome.decimation)
 
 
+class TestNoFaceCountRejectionGate(unittest.TestCase):
+    """Logging spec: a count difference between target and actual post-wrap
+    output must never by itself cause `_judge` to reject the mesh. Grepped
+    first for an existing equivalent — none found; this is the only one."""
+
+    def decide(self, **kwargs):
+        return processor._decide(mesh(), decimation(), repair_result(**kwargs))
+
+    def test_faces_out_wildly_different_from_faces_in_is_still_clean(self):
+        # faces_in=4 (via repair_result's default), faces_out=4000 — a huge
+        # mismatch that would trip a face-count gate if one existed. Volume
+        # and topology are otherwise clean, so PROCESS must still result.
+        outcome = self.decide(faces_out=4000)
+        self.assertIs(outcome.indicator, Indicator.PROCESS)
+
+
 class TestDecimationFailure(unittest.TestCase):
 
     def test_undecimated_is_its_own_outcome(self):

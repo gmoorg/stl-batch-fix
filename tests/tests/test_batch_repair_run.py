@@ -26,6 +26,7 @@ from tools import batch_repair
 class _Args:
     input = '/in'
     output = '/out'
+    log_file = None
     max_faces = 0
     workers = 2
     per_file_timeout = 5.0
@@ -53,11 +54,14 @@ class TestRunSigint(unittest.TestCase):
             def start(self):
                 raise KeyboardInterrupt
 
+        class Args(_Args):
+            output = str(self.root / 'out')
+
         with mock.patch.object(converter, 'prepare',
                                side_effect=lambda *a, **k: (a[2](mesh), converter.Summary())[1]), \
              mock.patch.object(batch_repair, 'Pool', FakePool):
             with mock.patch('sys.stdout') as fake_stdout:
-                code = batch_repair._run(_Args())
+                code = batch_repair._run(Args())
         self.assertEqual(code, 1)
         printed = ''.join(c.args[0] for c in fake_stdout.write.call_args_list
                           if c.args and isinstance(c.args[0], str))

@@ -326,6 +326,37 @@ class TestSequence(unittest.TestCase):
             self.assertEqual(later.faces_in, earlier.faces_out)
 
 
+class TestPartIdentity(unittest.TestCase):
+    """`StepResult.part` — logging spec section 3."""
+
+    def test_two_part_sequence_gets_1_of_2_and_2_of_2(self):
+        result = repair(two_tetrahedra(), min_shell_faces=0,
+                        part_steps=(('recorder', Recorder()),))
+        part_values = [s.part for s in result.steps if s.step is Step.PART]
+        self.assertEqual(sorted(part_values), ['1/2', '2/2'])
+
+    def test_split_and_merge_use_dash(self):
+        result = repair(two_tetrahedra(), min_shell_faces=0,
+                        part_steps=(('recorder', Recorder()),))
+        non_part = [s for s in result.steps if s.step is not Step.PART]
+        self.assertTrue(non_part)
+        for s in non_part:
+            self.assertEqual(s.part, '-')
+
+    def test_scan_diagonal_and_scan_volume_out_logged_with_dash_part(self):
+        events = []
+
+        def logger(source_name, event, step, part, duration, detail):
+            events.append((step, part))
+
+        repair(tetra(), min_shell_faces=0, part_steps=(('recorder', Recorder()),),
+              step_logger=logger, source_name='/x.stl')
+        steps_seen = {step: part for step, part in events
+                     if step in ('scan_diagonal', 'scan_volume_out')}
+        self.assertEqual(steps_seen.get('scan_diagonal'), '-')
+        self.assertEqual(steps_seen.get('scan_volume_out'), '-')
+
+
 class TestFailure(unittest.TestCase):
     """A failure returns the input unchanged, never a partial result."""
 

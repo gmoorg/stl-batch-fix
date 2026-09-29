@@ -124,7 +124,12 @@ class TestBatchRepairCLI(unittest.TestCase):
         for fragment in ('intake_failure=1', 'conversion_failed=0',
                          'total=1, jobs=1', str(path)):
             self.assertIn(fragment, text)
-        self.assertFalse(self.output.exists())
+        # `--output` now always exists after `_run` starts: `progress.log`
+        # is written there before intake even begins (spec 5d), so a run
+        # with zero dispatched jobs still creates the directory. Nothing
+        # published is still true — the directory holds only progress.log.
+        self.assertEqual(sorted(p.name for p in self.output.iterdir()),
+                         ['progress.log'])
 
     def test_conversion_failure_and_invalid_success(self):
         (self.source / 'body.obj').write_text('v 0 0 0\n')
@@ -142,7 +147,11 @@ class TestBatchRepairCLI(unittest.TestCase):
                 self.assertIn(f'converted={int(ok)}', text)
                 self.assertIn('total=1, jobs=1', text)
                 (self.source / 'stl-exported/body.stl').unlink()
-        self.assertFalse(self.output.exists())
+        # See test_invalid_binary_is_intake_failure's comment: `--output`
+        # now always exists once `_run` starts (progress.log precedes
+        # intake), even though nothing was ever published.
+        self.assertEqual(sorted(p.name for p in self.output.iterdir()),
+                         ['progress.log'])
 
     def test_companion_copy_failure(self):
         (self.source / 'notes.txt').write_text('notes')

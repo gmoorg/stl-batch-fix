@@ -32,6 +32,12 @@ WHOLE_MESH_STEPS: tuple[Entry, ...] = ()
 #: keep, drop, or reorder — settled by the user, not inferred: "final
 #: decimate and meshfix after should be treat as any other stand alone
 #: step what we could add or remove from list of steps."
+#: Post-wrap decimation targets each part's own pre-wrap face count on a
+#: best-effort basis; a count difference between target and actual output
+#: must never by itself cause `processor._judge` to reject the mesh.
+#: `_judge`'s actual gates are volume ratio, non-manifold, open edges, and
+#: enclosed volume — no face-count check exists today, so this comment
+#: states a fact already true in code.
 DEFAULT_PART_STEPS: tuple[Entry, ...] = (
     mesh_entry('alpha_wrap', alphawrap.step_alpha_wrap),
     mesh_entry('decimate', decimator.make_step()),
@@ -232,7 +238,9 @@ def repair(mesh: Mesh,
             return _failed(mesh, whole_outcome.detail, tuple(steps),
                            faces_in, volume_in, time.monotonic() - started)
 
-        whole_model_diag = scanner.diagonal(mesh)
+        with steplog.timed_info(step_logger, source_name, 'scan_diagonal') as report:
+            whole_model_diag = scanner.diagonal(mesh)
+            report(f'{whole_model_diag}')
 
         # Split, repair each retained part, then merge. The split stage is
         # one or more collection entries, run in the order `_split_stage`
@@ -258,11 +266,12 @@ def repair(mesh: Mesh,
             target_faces = len(part.geometry.faces)
             part_config = pipeconfig.StepConfig(
                 faceCount=target_faces, whole_model_diag=whole_model_diag)
+            part_id = f'{index + 1}/{len(parts)}'
 
             outcome = execstep.run_sequence(
                 resolved_part_entries, part, part_config, steps,
                 step_logger=step_logger, source_name=source_name,
-                step=Step.PART)
+                step=Step.PART, part=part_id)
 
             repaired.append(outcome.mesh)
             if outcome.record_error is not None:
@@ -299,9 +308,12 @@ def repair(mesh: Mesh,
         # Inside the guard: these are measurements of tool output, and a
         # measurement that fails is a failed repair, not an exception for the
         # caller to discover.
+        with steplog.timed_info(step_logger, source_name, 'scan_volume_out') as report:
+            volume_out = scanner.component_volume(mesh)
+            report(f'{volume_out}')
         result = Result(mesh, True, None, tuple(steps), faces_in,
                         len(mesh.geometry.faces), volume_in,
-                        scanner.component_volume(mesh), len(parts),
+                        volume_out, len(parts),
                         time.monotonic() - started,
                         lost_vertices=_count_lost(before, mesh.geometry.verts))
 

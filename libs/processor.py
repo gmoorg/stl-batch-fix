@@ -65,6 +65,14 @@ def _decide(source: Mesh,
     regardless of which check inside `_judge` produced the outcome — the
     'end' message carries the resulting indicator, since that verdict is
     otherwise invisible outside the final summary line.
+
+    `_judge`'s own `scanner.scan`/`scanner.component_volume` calls (and,
+    separately, `execstep.ConditionStep`'s own condition-check cost) stay
+    inside their one enclosing timed window rather than getting their own
+    nested start/end pair — an accepted granularity: both are cheap,
+    already-covered sub-checks of a step whose own window already brackets
+    them, and breaking them out separately would multiply logging noise
+    for no diagnostic gain.
     """
     with steplog.logged_step(step_logger, source_name, 'judge') as end:
         outcome = _judge(source, decimated, repaired)
@@ -214,7 +222,10 @@ def process(mesh: Mesh, max_faces: int,
     Splitting those apart keeps every judgement testable without a filesystem,
     and means a caller can inspect an `Outcome` before committing to it.
 
-    `max_faces <= 0` disables decimation, matching `decimator.decimate`.
+    `max_faces <= 0` disables only the INITIAL whole-mesh decimation pass,
+    matching `decimator.decimate`. Per-part post-wrap decimation
+    (`repairer.DEFAULT_PART_STEPS`) still runs by default regardless of
+    `max_faces`, unless a caller's own `part_steps` omits it.
 
     Raises `ValueError` if the mesh is not loaded — a programming error at the
     call site.
