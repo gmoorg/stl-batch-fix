@@ -9,43 +9,66 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
 - [ ] Measure alpha-wrap peak memory and replace the unvalidated factor 3.
   The 890 bytes/triangle estimate covers decimation, not reconstruction.
 
-## Geometry and configuration
+## Logging
 
-- [ ] Validate preservation of meaningful small components and detail through
-  initial decimation; global retained volume alone is insufficient.
-- [ ] Evaluate the `is_already_clean` gate on real candidates using the opt-in
-  `skip_clean = true` config option: confirm Amidara base fails and verify gated output
-  slices/prints. Consistent winding can still be globally inverted or
-  self-intersecting. Keep the flag off by default pending this work.
-- [ ] Measure how often post-decimation MeshFix is required across a real corpus.
-- [ ] Investigate reversed/non-monotone T-junctions and far bent paths;
-  establish evidence before introducing a distance bound.
-- [ ] Replace absolute geometry tolerances where scale tests justify it.
-- [ ] Decide whether seam recovery and `open_loops_are_printable` are safe
-  defaults; independent seam-region repair has caused real model loss.
-- [ ] Move step tuning values into `pipeconfig`: MeshFix clean/fill parameters,
-  lost-vertex tolerance, shell floor, welder rounds/chain limits, retained-volume
-  threshold, and Blender timeouts. Keep format constants in their owning modules.
+- [ ] Write every captured error to the log. PyMeshFix's stderr is captured
+  but only scanned for `WARNING-`; on failure the text is dropped and never
+  reaches `batch.log`. Blender's captured stderr needs the same check. A child
+  that crashes (segfault, abort, OOM kill) loses its own stderr entirely,
+  because `_spawn_child` sends it to `DEVNULL`; keep it in a per-file file the
+  parent appends to the log when the child dies without a result.
+
+## Tests
+
+Target: end-to-end coverage — real `batch_repair.py` runs over a few fixtures
+that each combine many defects — replacing per-tool unit tests of geometry.
+
+- [ ] Build the end-to-end fixture set: a few models whose defects together
+  cover open edges, non-manifold edges, inconsistent and globally inverted
+  winding, oppositely wound shells, self-intersection, tiny debris shells, and
+  a meaningful small part that must survive. Each test checks the published
+  output and indicator, not only `open=0`/`nm=0`. Runtime: about 50 s per model
+  through alpha-wrap regardless of shape — a 6,080-face sphere took 52 s, a
+  1,232-face real foot 46 s (2026-10-02), because alpha scales with the model's
+  own size and output is ~0.7–0.9M faces either way. Synthetic shapes are
+  therefore not faster; keep the set small and run it with several workers.
+- [ ] Keep the runner robustness tests, which use fake child scripts because
+  real models cannot fail on demand: child crash, timeout, Ctrl+C (cleanup and
+  second Ctrl+C), half-written output, recovery after a crash, and each file
+  reported exactly once.
+- [ ] Keep the config validation tests (`test_runconfig`, CLI config cases).
+  They prove that a mistake in `batch_repair.toml` stops the run before any
+  file is written, with a message naming the key: misspelled or unknown key,
+  missing `input`/`output`/`max_faces`, wrong type (`workers = "4"`,
+  `skip_clean = 1`), out-of-range value (negative, zero timeout, fraction
+  above 1, `inf`), malformed TOML, unreadable file, NUL in a path, and that
+  `batch_repair.example.toml` still lists every option with the code's
+  default. They take milliseconds and need no fixtures.
+- [ ] Then remove unit tests the end-to-end set covers, and all tests of tools
+  absent from the default pipeline (welder, seam split, MeshLab filters,
+  Blender repair, `open_loops_are_printable`, legacy `test_pipeline.py`).
+  Justify each removal by the remaining coverage; never bless known geometry
+  loss to make a test pass.
+- [ ] Split the suite into fast tests (robustness, config) and the slow
+  end-to-end set so the fast part can run on every change; update the test
+  guide.
+
+## Deferred (not critical now)
+
+- [ ] Low priority: check that initial decimation keeps meaningful detail.
+  Detail too small to survive decimation is usually too small to print, so
+  this matters only for thin but long features — antennae, sword blades,
+  fingers, cables — which can be printable yet lose their tips or break into
+  pieces when the face budget is tight. Total retained volume cannot show
+  this: a lost antenna is a tiny share of the volume.
+- [ ] Evaluate the `is_already_clean` gate on real models (`skip_clean = true`):
+  confirm Amidara base fails it and that gated output slices and prints. It
+  may not be used at all; keep it off by default.
+- [ ] How often MeshFix is needed after decimation: read it from `batch.log`
+  after a run over the full collection (the `meshfix` step records whether it
+  ran).
+- [ ] Move step tuning values into `pipeconfig` (MeshFix clean/fill parameters,
+  lost-vertex tolerance, shell floor, retained-volume threshold, Blender
+  timeouts); decide then whether any belong in `batch_repair.toml`.
 - [ ] Consider moving step ordering into `pipeconfig`, per-step IDs, and explicit
-  split/merge entries (lower priority). Do not restore removed ENABLE switches.
-
-## Test-suite cleanup and gaps
-
-- [ ] Separate legacy/historical-tool suites from current default-pipeline coverage;
-  preserve useful tool regressions and make each suite's scope explicit.
-- [ ] Audit frozen-dataclass checks, exact tuple assertions, and overlapping tests.
-  Justify removals by remaining behavior coverage, not a target test count.
-- [ ] Rename or relocate misleading checks such as `test_clean_keeps_all_four_filters`:
-  its helper calls four wrappers itself; it does not prove pipeline composition.
-- [ ] Consolidate executor tests for order, transformed-output forwarding,
-  conditional skip/run, configuration delivery, and stopping on failure.
-  Keep tool-specific behavior tests with the tool.
-- [ ] Preserve meaningful cancellation, crash recovery, atomic publication,
-  exactly-once reporting, malformed-input, and geometry-preservation coverage.
-- [ ] Extend model-loss fixture checks into pipeline-outcome checks where expected
-  behavior is established; never bless known geometry loss to make tests pass.
-- [ ] Add missing reversed-junction and far-bent-path regression coverage.
-- [ ] Compare proposed exception/interrupted-write tests with existing converter,
-  CLI, publication, and pool coverage before adding duplicates.
-- [ ] Update the test guide and run affected suites after cleanup; document the
-  remaining protection for each removed or consolidated test.
+  split/merge entries. Do not restore removed ENABLE switches.
