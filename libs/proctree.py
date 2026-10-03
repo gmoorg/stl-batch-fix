@@ -8,7 +8,7 @@ import subprocess
 import time
 
 
-def _live_group_members(pgid: int) -> tuple[int, int]:
+def live_group_members(pgid: int) -> tuple[int, int]:
     """`(live, uncertain)` process counts sharing `pgid`, from `/proc`.
 
     A zombie (state `Z`) does not count as live — it cannot write to
@@ -92,11 +92,11 @@ def terminate_and_confirm(proc: subprocess.Popen, deadline: float
         return False, detail
 
     while time.monotonic() < deadline_at:
-        live, uncertain = _live_group_members(proc.pid)
+        live, uncertain = live_group_members(proc.pid)
         if live == 0 and uncertain == 0:
             return True, None
         time.sleep(0.02)
-    live, uncertain = _live_group_members(proc.pid)
+    live, uncertain = live_group_members(proc.pid)
     if live == 0 and uncertain == 0:
         return True, None
     detail = f'{live} live + {uncertain} unparseable group member(s) after {deadline}s'

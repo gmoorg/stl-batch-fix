@@ -207,6 +207,45 @@ class TestDecimationFailure(unittest.TestCase):
         self.assertIsNone(outcome.repair)
 
 
+class TestCleanGates(unittest.TestCase):
+    """`process(..., skip_clean=)` threads the opt-in gate to
+    `repairer.repair`; a gated mesh is still judged normally."""
+
+    def test_flags_reach_repair_and_default_off(self):
+        seen = []
+        real_repair = repairer.repair
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs['skip_clean'])
+            return real_repair(*args, **kwargs)
+
+        with mock.patch.object(repairer, 'repair', spy):
+            process(mesh(), 0, part_steps=())
+            process(mesh(), 0, part_steps=(), skip_clean=True)
+        self.assertEqual(seen, [False, True])
+
+    def test_model_gate_with_max_faces_zero_publishes_the_clean_mesh(self):
+        outcome = process(mesh(), 0, skip_clean=True)
+        self.assertIs(outcome.indicator, Indicator.PROCESS, outcome.reason)
+        self.assertIsNotNone(outcome.decimation)
+        self.assertEqual([s for s in outcome.repair.steps
+                          if s.step in (repairer.Step.SPLIT, repairer.Step.PART,
+                                        repairer.Step.MERGE)], [])
+        self.assertEqual(len(outcome.mesh.geometry.faces), 4)
+
+    def test_model_gate_still_rejects_a_zero_volume_mesh(self):
+        """A07's collinear fixture passes `is_already_clean` (closed, consistent
+        winding) yet encloses nothing. Real measurements make `volume_kept`
+        NaN, so the judge rejects it as FAILED before the enclosed check."""
+        collinear = mesh([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]])
+        self.assertTrue(repairer.is_already_clean(collinear),
+                        "fixture no longer passes the gate")
+        outcome = process(collinear, 0, skip_clean=True)
+        self.assertIs(outcome.indicator, Indicator.FAILED)
+        self.assertEqual(outcome.marker, 'source')
+        self.assertIsNone(outcome.mesh)
+
+
 class TestWriting(unittest.TestCase):
 
     def setUp(self):

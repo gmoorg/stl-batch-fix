@@ -23,8 +23,10 @@ from pathlib import Path
 from libs import childresult, mesh_io
 from libs.indicators import Indicator
 from libs.mesh_io import Kind, Mesh
-from tools import batch_repair
-from tools.batch_repair import _Runner
+from dataclasses import replace
+import batch_repair
+from libs.runconfig import RunConfig
+from batch_repair import _Runner
 
 FAKE_CHILD = textwrap.dedent('''
     import argparse, json, os, sys, time
@@ -34,6 +36,7 @@ FAKE_CHILD = textwrap.dedent('''
     parser.add_argument('--destination', required=True)
     parser.add_argument('--max-faces', required=True)
     parser.add_argument('--result-file', required=True)
+    parser.add_argument('--managed-child', action='store_true')
     args = parser.parse_args()
 
     name = os.path.basename(args.one_file)
@@ -78,17 +81,9 @@ class _PoolTestCase(unittest.TestCase):
                    Kind.BINARY_STL, triangles, True)
 
     def make_args(self, **overrides):
-        class Args:
-            pass
-        a = Args()
-        a.max_faces = 0
-        a.workers = 4
-        a.per_file_timeout = 5.0
-        a.reap_deadline = 5.0
-        a.memory_budget_bytes = 10 ** 15
-        for key, value in overrides.items():
-            setattr(a, key, value)
-        return a
+        return replace(RunConfig(input='/in', output='/out', max_faces=0, workers=4,
+                                 per_file_timeout=5.0, reap_deadline=5.0,
+                                 memory_budget_bytes=10 ** 15), **overrides)
 
     def make_runner(self, meshes, **arg_overrides):
         args = self.make_args(**arg_overrides)
@@ -161,6 +156,7 @@ class TestBasicDispatch(_PoolTestCase):
             parser.add_argument('--destination', required=True)
             parser.add_argument('--max-faces', required=True)
             parser.add_argument('--result-file', required=True)
+            parser.add_argument('--managed-child', action='store_true')
             args = parser.parse_args()
             os.makedirs(os.path.dirname(args.destination), exist_ok=True)
             with open(args.destination, 'wb') as f:
@@ -204,6 +200,7 @@ class TestBasicDispatch(_PoolTestCase):
             parser.add_argument('--destination', required=True)
             parser.add_argument('--max-faces', required=True)
             parser.add_argument('--result-file', required=True)
+            parser.add_argument('--managed-child', action='store_true')
             args = parser.parse_args()
             os.makedirs(os.path.dirname(args.destination), exist_ok=True)
             with open(args.destination, 'wb') as f:
@@ -320,6 +317,7 @@ class TestCancellation(_PoolTestCase):
             "p.add_argument('--destination', required=True)\n"
             "p.add_argument('--max-faces', required=True)\n"
             "p.add_argument('--result-file', required=True)\n"
+            "p.add_argument('--managed-child', action='store_true')\n"
             'args = p.parse_args()\n'
             f'markers = {{"hang_a.stl": {str(marker_a)!r}, "hang_b.stl": {str(marker_b)!r}}}\n'
             'open(markers[os.path.basename(args.one_file)], "w").close()\n'
@@ -328,8 +326,8 @@ class TestCancellation(_PoolTestCase):
         helper = self.root / 'sigint_helper.py'
         helper.write_text(
             'import sys, os\n'
-            f'sys.path.insert(0, {str(Path(batch_repair.__file__).resolve().parents[1])!r})\n'
-            'from tools import batch_repair\n'
+            f'sys.path.insert(0, {str(Path(batch_repair.__file__).resolve().parents[0])!r})\n'
+            'import batch_repair\n'
             'from libs import converter\n'
             'from libs.mesh_io import Kind, Mesh\n'
             '\n'
@@ -340,14 +338,8 @@ class TestCancellation(_PoolTestCase):
             'meshes = [Mesh(os.path.join(INPUT_DIR, n), os.path.join(OUTPUT_DIR, n),\n'
             '               Kind.BINARY_STL, 10, True) for n in ("hang_a.stl", "hang_b.stl")]\n'
             '\n'
-            'class Args:\n'
-            '    input = INPUT_DIR\n'
-            '    output = OUTPUT_DIR\n'
-            '    max_faces = 0\n'
-            '    workers = 2\n'
-            '    per_file_timeout = 5.0\n'
-            '    reap_deadline = 5.0\n'
-            '    memory_budget_bytes = 10 ** 15\n'
+            'from libs.runconfig import RunConfig\n'
+            'config = RunConfig(input=INPUT_DIR, output=OUTPUT_DIR, max_faces=0, workers=2, per_file_timeout=5.0, reap_deadline=5.0, memory_budget_bytes=10 ** 15)\n'
             '\n'
             'def fake_prepare(source, destination, emit, **kwargs):\n'
             '    for m in meshes:\n'
@@ -357,11 +349,11 @@ class TestCancellation(_PoolTestCase):
             'converter.prepare = fake_prepare\n'
             '\n'
             'orig_spawn = batch_repair._spawn_child\n'
-            'def fake_spawn(python, script, mesh, max_faces, result_file, log_file=None):\n'
-            '    return orig_spawn(sys.executable, FAKE_CHILD, mesh, max_faces, result_file, log_file)\n'
+            'def fake_spawn(python, script, mesh, max_faces, result_file, log_file=None, **kw):\n'
+            '    return orig_spawn(sys.executable, FAKE_CHILD, mesh, max_faces, result_file, log_file, **kw)\n'
             'batch_repair._spawn_child = fake_spawn\n'
             '\n'
-            'code = batch_repair._run(Args())\n'
+            'code = batch_repair._run(config)\n'
             'print(f"EXIT_CODE={code}")\n'
         )
         proc = subprocess.Popen([sys.executable, str(helper)],

@@ -215,7 +215,10 @@ def _decimate_logged(mesh: Mesh, max_faces: int, step_name: str,
 def process(mesh: Mesh, max_faces: int,
             part_steps=None,
             step_logger: steplog.StepLogger = steplog.null_logger,
-            source_name: str = '') -> Outcome:
+            source_name: str = '',
+            nested_process_group: bool = False,
+            *,
+            skip_clean: bool = False) -> Outcome:
     """Decimate, repair and judge one loaded mesh.  Nothing is written.
 
     Returns the decision and the mesh it applies to; `write` puts it on disk.
@@ -229,6 +232,11 @@ def process(mesh: Mesh, max_faces: int,
 
     Raises `ValueError` if the mesh is not loaded — a programming error at the
     call site.
+
+    `nested_process_group` is threaded straight into `repairer.repair(...)` —
+    a caller-known fact about whether this call runs inside an enclosing
+    `proctree`-managed process group. See
+    `pipeconfig.StepConfig.nested_process_group`.
 
     `step_logger`, when supplied, is called before and after the initial
     whole-mesh decimation pass — previously invisible to any log, since
@@ -250,6 +258,11 @@ def process(mesh: Mesh, max_faces: int,
     record, the same as it already is for the rest of the pipeline;
     `Outcome.decimation` carries the rich `decimator.Result` that callers
     actually consume.
+
+    `skip_clean` is passed straight to `repairer.repair` (opt-in
+    `is_already_clean` gate; see its docstring).
+    The initial decimation always runs, so the model gate inspects the
+    decimated mesh, and a gated mesh is still judged here like any other.
     """
     mesh_io.require_geometry(mesh)
     decimated = _decimate_logged(mesh, max_faces, 'decimate', step_logger, source_name)
@@ -262,7 +275,9 @@ def process(mesh: Mesh, max_faces: int,
                        decimation=decimated)
 
     repaired = repairer.repair(decimated.mesh, part_steps=part_steps,
-                               step_logger=step_logger, source_name=source_name)
+                               step_logger=step_logger, source_name=source_name,
+                               nested_process_group=nested_process_group,
+                               skip_clean=skip_clean)
     return _decide(mesh, decimated, repaired,
                    step_logger=step_logger, source_name=source_name)
 

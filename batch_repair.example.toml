@@ -1,0 +1,100 @@
+# STL batch repair configuration
+# ===============================
+#
+# batch_repair.py takes no command-line arguments. It reads every option from
+# `batch_repair.toml` in the same folder as the script. To start:
+#
+#     cp batch_repair.example.toml batch_repair.toml
+#     # edit batch_repair.toml
+#     tools/project_python.sh batch_repair.py
+#
+# `batch_repair.toml` is git-ignored, so your paths stay local. This example
+# is the documentation: every option is listed with its default.
+#
+# The whole file is checked before anything is written. A misspelled or
+# unknown key, a missing required key, a wrong type (e.g. `workers = "4"` or
+# `skip_clean = 1`) or an out-of-range value stops the run with a message
+# naming the key. Nothing silently falls back to a default.
+#
+# Relative paths resolve against THIS file's folder, not the folder you run
+# the script from.
+
+
+# --- Folders (required) ------------------------------------------------------
+
+# Source folder. Every STL/OBJ beneath it, in all subfolders, is processed;
+# subfolder structure is kept in the output.
+input = "/path/to/input"
+
+# Destination folder. Created if absent. Must not be inside `input`, and
+# `input` must not be inside it.
+# A file that already has an output (repaired file or marker) is skipped on
+# the next run, so an interrupted batch can be resumed by running again.
+output = "/path/to/output"
+
+
+# --- Geometry (required) -----------------------------------------------------
+
+# Face budget for the INITIAL whole-model decimation, before any repair.
+# A model above this many triangles is reduced to it; 0 disables that pass.
+# Keep it below your slicer's limit (Bambu Studio re-decimates large meshes
+# itself, and that reintroduces the defects this tool removes).
+# This does NOT turn off the per-part decimation after alpha-wrap: each part
+# is always brought back to its own pre-wrap size. Face targets are
+# best-effort, never a reason to reject a model.
+max_faces = 900000
+
+
+# --- Repair ------------------------------------------------------------------
+
+# Skip repair for geometry that is already clean: no non-manifold edges, no
+# open edges and consistent winding (repairer.is_already_clean).
+#   * A clean model (checked after the initial decimation) skips split,
+#     alpha-wrap, part steps and merge; it is still judged and written.
+#   * Otherwise each clean split part is merged as is, and only the defective
+#     parts are repaired.
+# NOT YET VALIDATED on real models. A model that is consistently wound but
+# inside-out, or self-intersecting, passes the check and is not repaired.
+# Default: false
+skip_clean = false
+
+
+# --- Logging -----------------------------------------------------------------
+
+# Step log: one line before and after every step of every file.
+# "" means <output>/batch.log. A relative path resolves against this file's
+# folder. Run progress (progress.log) is always written beside it.
+# Default: ""
+log_file = ""
+
+
+# --- Concurrency and limits --------------------------------------------------
+
+# Number of files repaired in parallel, each in its own child process.
+# 0 means automatic: min(4, CPU count).
+# Default: 0
+workers = 0
+
+# Seconds one file may take before its child process is killed and the file
+# gets a `.timeout` marker (a full copy of the source, printable as a fallback).
+# Must be a finite positive number.
+# Default: 3600.0
+per_file_timeout = 3600.0
+
+# Seconds to wait for a killed child (and anything it started, e.g. Blender)
+# to be confirmed gone. Must be a finite positive number.
+# Default: 10.0
+reap_deadline = 10.0
+
+# Memory admission: a file is started only while the estimated memory of all
+# running files fits the budget. Large models therefore run fewer at a time.
+#
+# Share of the memory available when the run starts, between 0 and 1.
+# Used only when memory_budget_bytes is 0. Checked even when unused.
+# Default: 0.7
+memory_budget_fraction = 0.7
+
+# Explicit budget in bytes; overrides the fraction. 0 means derive it from
+# memory_budget_fraction. Example: 17179869184 is 16 GiB.
+# Default: 0
+memory_budget_bytes = 0

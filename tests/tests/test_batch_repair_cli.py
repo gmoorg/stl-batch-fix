@@ -1,7 +1,14 @@
-"""CLI argument validation, dependency checks, and the top-level main() boundary."""
+"""Config-file validation, dependency checks, the top-level main() boundary,
+and the internal per-file child script."""
 
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import io
+import json
+import os
+import signal
+import stat
+import threading
+import time
 from pathlib import Path
 import subprocess
 import sys
@@ -9,8 +16,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-from libs import converter
-from tools import batch_repair
+from libs import blender, converter
+import batch_repair
+import batch_repair_child
+from libs.runconfig import RunConfig
 
 
 class TestBatchRepairCLI(unittest.TestCase):
@@ -28,16 +37,19 @@ class TestBatchRepairCLI(unittest.TestCase):
             self.checks[name] = self.stack.enter_context(
                 mock.patch.object(module, 'is_available', return_value=True))
 
-    def invoke(self, source=None, output=None, budget='0', extra=()):
+    def invoke(self, source=None, output=None, max_faces='0', extra=None, argv=()):
+        """Write a TOML config (values are raw TOML literals), point
+        `CONFIG_PATH` at it, and call `main` with `argv` (normally none)."""
+        lines = [f'input = {json.dumps(str(source or self.source))}',
+                 f'output = {json.dumps(str(output or self.output))}',
+                 f'max_faces = {max_faces}']
+        lines += [f'{key} = {value}' for key, value in (extra or {}).items()]
+        config = self.root / 'batch_repair.toml'
+        config.write_text('\n'.join(lines) + '\n')
         stdout, stderr = io.StringIO(), io.StringIO()
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            try:
-                code = batch_repair.main([
-                    '--input', str(source or self.source),
-                    '--output', str(output or self.output),
-                    '--max-faces', budget, *extra])
-            except SystemExit as error:
-                code = error.code
+        with redirect_stdout(stdout), redirect_stderr(stderr), \
+             mock.patch.object(batch_repair, 'CONFIG_PATH', str(config)):
+            code = batch_repair.main(list(argv))
         return code, stdout.getvalue() + stderr.getvalue()
 
     def test_configuration_rejected_before_intake(self):
@@ -50,49 +62,63 @@ class TestBatchRepairCLI(unittest.TestCase):
             (self.source, self.root, '0', 'overlap'),
             (self.source, self.source, '0', 'overlap'),
             (self.source, alias / 'out', '0', 'overlap'),
-            (self.root / 'missing', self.output, '0', '--input'),
-            (regular_file, self.output, '0', '--input'),
-            (self.source, regular_file, '0', '--output'),
-            (self.source, self.output, '-1', '--max-faces'),
-            (self.source, self.output, 'abc', '--max-faces'),
-            (self.source, self.output, '1.5', '--max-faces'),
-            (self.root / 'missing', regular_file, 'bad', '--input'),
+            (self.root / 'missing', self.output, '0', 'input must exist'),
+            (regular_file, self.output, '0', 'input must exist'),
+            (self.source, regular_file, '0', 'output must be a directory'),
+            (self.source, self.output, '-1', 'max_faces'),
+            (self.source, self.output, '"abc"', 'max_faces'),
+            (self.source, self.output, '1.5', 'max_faces'),
+            (self.source, self.output, 'true', 'max_faces'),
+            (self.root / 'missing', regular_file, '"bad"', 'max_faces'),
         ]
         with mock.patch.object(converter, 'prepare') as prepare:
-            for source, output, budget, message in cases:
-                with self.subTest(source=source, output=output, budget=budget):
-                    code, text = self.invoke(source, output, budget)
+            for source, output, max_faces, message in cases:
+                with self.subTest(source=source, output=output, max_faces=max_faces):
+                    code, text = self.invoke(source, output, max_faces)
                     self.assertEqual(code, 2, text)
                     self.assertIn(message, text)
             prepare.assert_not_called()
 
-    def test_workers_must_be_positive(self):
-        code, text = self.invoke(extra=['--workers', '0'])
-        self.assertEqual(code, 2, text)
-        self.assertIn('--workers', text)
+    def test_any_argument_is_rejected_before_anything_is_written(self):
+        with mock.patch.object(converter, 'prepare') as prepare:
+            for argv in (['--help'], ['--input', str(self.source)], ['x']):
+                with self.subTest(argv=argv):
+                    code, text = self.invoke(argv=argv)
+                    self.assertEqual(code, 2, text)
+                    self.assertIn('takes no arguments', text)
+            prepare.assert_not_called()
+        self.assertFalse(self.output.exists())
 
-    def test_per_file_timeout_must_be_finite_positive(self):
-        for value in ('-1', '0', 'inf'):
-            with self.subTest(value=value):
-                code, text = self.invoke(extra=['--per-file-timeout', value])
+    def test_missing_config_names_the_example(self):
+        with mock.patch.object(batch_repair, 'CONFIG_PATH', str(self.root / 'absent.toml')), \
+             redirect_stderr(io.StringIO()) as stderr:
+            code = batch_repair.main([])
+        self.assertEqual(code, 2)
+        self.assertIn('batch_repair.example.toml', stderr.getvalue())
+        self.assertFalse(self.output.exists())
+
+    def test_bad_config_value_writes_nothing(self):
+        for extra in ({'workers': '-1'}, {'wrokers': '2'}, {'skip_clean': '1'},
+                      {'log_file': '"a\\u0000b"'}, {'reap_deadline': str(10 ** 400)},
+                      {'per_file_timeout': 'inf'}, {'memory_budget_fraction': '1.5'}):
+            with self.subTest(extra=extra):
+                code, text = self.invoke(extra=extra)
                 self.assertEqual(code, 2, text)
-                self.assertIn('--per-file-timeout', text)
+                self.assertIn(next(iter(extra)), text)
+                self.assertFalse(self.output.exists())
 
-    def test_reap_deadline_must_be_finite_positive(self):
-        code, text = self.invoke(extra=['--reap-deadline', '-1'])
-        self.assertEqual(code, 2, text)
-        self.assertIn('--reap-deadline', text)
-
-    def test_memory_budget_fraction_must_be_in_range(self):
-        for value in ('0', '1.5', '-0.1'):
-            with self.subTest(value=value):
-                code, text = self.invoke(extra=['--memory-budget-fraction', value])
-                self.assertEqual(code, 2, text)
-                self.assertIn('--memory-budget-fraction', text)
+    def test_malformed_toml_is_a_clean_error(self):
+        config = self.root / 'batch_repair.toml'
+        config.write_text('input = "unterminated\n')
+        with mock.patch.object(batch_repair, 'CONFIG_PATH', str(config)), \
+             redirect_stderr(io.StringIO()) as stderr:
+            code = batch_repair.main([])
+        self.assertEqual(code, 2)
+        self.assertIn('not valid TOML', stderr.getvalue())
 
     def test_memory_budget_bytes_overrides_fraction(self):
         with mock.patch.object(converter, 'prepare', return_value=converter.Summary()):
-            code, text = self.invoke(extra=['--memory-budget-bytes', '1000'])
+            code, text = self.invoke(extra={'memory_budget_bytes': '1000'})
         self.assertEqual(code, 0, text)
 
     def test_each_missing_dependency(self):
@@ -135,7 +161,7 @@ class TestBatchRepairCLI(unittest.TestCase):
         (self.source / 'body.obj').write_text('v 0 0 0\n')
         for ok in (False, True):
             with self.subTest(ok=ok):
-                def convert(source, export):
+                def convert(source, export, **kwargs):
                     Path(export).parent.mkdir(parents=True, exist_ok=True)
                     Path(export).write_bytes(b'invalid')
                     return ok, export
@@ -174,26 +200,280 @@ class TestBatchRepairCLI(unittest.TestCase):
         self.assertNotIn('Run complete.', text)
 
     def test_keyboard_interrupt_at_intake_boundary(self):
+        """`_run` now catches `KeyboardInterrupt` from `converter.prepare`
+        itself (spec section 4d) — `cancel()`s the shared intake `Runner`,
+        waits for it to go idle, and returns 1 directly, WITHOUT reaching
+        `_preflight`/dispatch. `main()`'s own outer `except KeyboardInterrupt`
+        (for an interrupt anywhere else) is a separate, still-present path,
+        exercised by `test_direct_script_help_and_required_arguments`-style
+        subprocess tests rather than here.
+        """
         with mock.patch.object(converter, 'prepare', side_effect=KeyboardInterrupt):
             code, text = self.invoke()
         self.assertEqual(code, 1, text)
-        self.assertIn('interrupted/incomplete', text)
+        self.assertIn('Intake interrupted', text)
+        self.assertIn('cleanup confirmed', text)
         self.assertNotIn('Run complete.', text)
+        self.assertNotIn('Intake done:', text,
+                         "an interrupted intake must not reach dispatch")
 
-    def test_direct_script_help_and_required_arguments(self):
+    def test_direct_script_rejects_arguments(self):
+        # Never run the real script WITHOUT arguments here: it would read the
+        # user's own batch_repair.toml and start a real batch.
         script = Path(batch_repair.__file__).resolve()
-        for argv, expected in ((['--help'], 0), ([], 2)):
-            result = subprocess.run([sys.executable, str(script), *argv],
-                                    cwd=self.root, capture_output=True, text=True)
-            self.assertEqual(result.returncode, expected, result.stderr)
+        result = subprocess.run([sys.executable, str(script), '--help'],
+                                cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('takes no arguments', result.stderr)
 
-    def test_one_file_requires_destination_and_result_file(self):
-        script = Path(batch_repair.__file__).resolve()
+    def test_child_requires_destination_and_result_file(self):
+        script = Path(batch_repair_child.__file__).resolve()
         result = subprocess.run(
             [sys.executable, str(script), '--one-file', 'x.stl', '--max-faces', '0'],
             cwd=self.root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn('--destination', result.stderr)
+
+    def test_spawn_child_argv_includes_managed_child_flag(self):
+        """`_spawn_child` (the ONLY code that knows the child will live
+        inside a proctree-owned group) must always add `--managed-child`."""
+        from libs.mesh_io import Kind, Mesh
+        mesh = Mesh(str(self.source / 'a.stl'), str(self.output / 'a.stl'),
+                   Kind.BINARY_STL, 4, True)
+        captured = {}
+        real_popen = subprocess.Popen
+
+        def spy(argv, **kwargs):
+            captured['argv'] = argv
+            return real_popen([sys.executable, '-c', 'pass'])
+
+        with mock.patch('subprocess.Popen', spy):
+            proc = batch_repair._spawn_child(
+                sys.executable, str(Path(batch_repair.__file__)), mesh, 0, '/tmp/result.json')
+            proc.wait()
+        self.assertIn('--managed-child', captured['argv'])
+
+    def test_managed_child_flag_present_reaches_processor_as_true(self):
+        """`batch_repair_child.run_one_file` invoked with `--managed-child` present (simulating
+        a `_spawn_child`-launched batch child) confirms `nested_process_group=True`
+        reaches `processor.process`."""
+        from libs import mesh_io, processor
+        from libs.mesh_io import Geometry, Kind, Mesh
+        import numpy as np
+
+        source = self.source / 'body.stl'
+        geometry = Geometry(
+            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32),
+            np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64))
+        mesh_io.write(Mesh(str(source), str(source), Kind.BINARY_STL, 4, True, geometry=geometry))
+        dest = self.output / 'out.stl'
+
+        class FakeArgs:
+            pass
+
+        captured = {}
+
+        def fake_process(mesh, max_faces, **kwargs):
+            captured['nested_process_group'] = kwargs.get('nested_process_group')
+            from libs.indicators import Indicator
+            return processor.Outcome(
+                Indicator.PROCESS, mesh_io.load(mesh_io.probe(str(source), str(dest))),
+                None, 'clean')
+
+        for flag_present, expected in ((True, True), (False, False)):
+            with self.subTest(flag_present=flag_present):
+                args = FakeArgs()
+                args.one_file = str(source)
+                args.destination = str(dest)
+                args.max_faces = 0
+                args.log_file = None
+                fd_result, result_path = tempfile.mkstemp()
+                import os
+                os.close(fd_result)
+                args.result_file = result_path
+                args.managed_child = flag_present
+                args.skip_clean = False
+                with mock.patch.object(processor, 'process', fake_process):
+                    batch_repair_child.run_one_file(args)
+                os.unlink(result_path)
+                self.assertEqual(captured['nested_process_group'], expected)
+
+
+class TestCleanGateFlags(unittest.TestCase):
+    """`skip_clean`: forwarded to the child argv, and through the child's
+    `run_one_file` to `processor.process`."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def _tetra_file(self):
+        from libs import mesh_io
+        from libs.mesh_io import Geometry, Kind, Mesh
+        import numpy as np
+        source = self.root / 'body.stl'
+        geometry = Geometry(
+            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32),
+            np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64))
+        mesh_io.write(Mesh(str(source), str(source), Kind.BINARY_STL, 4, True, geometry=geometry))
+        return source
+
+    def _spawn_argv(self, **flags):
+        from libs.mesh_io import Kind, Mesh
+        mesh = Mesh(str(self.root / 'a.stl'), str(self.root / 'out' / 'a.stl'),
+                   Kind.BINARY_STL, 4, True)
+        captured = {}
+        real_popen = subprocess.Popen
+
+        def spy(argv, **kwargs):
+            captured['argv'] = argv
+            return real_popen([sys.executable, '-c', 'pass'])
+
+        with mock.patch('subprocess.Popen', spy):
+            batch_repair._spawn_child(sys.executable, 'script.py', mesh, 0,
+                                      '/tmp/result.json', **flags).wait()
+        return captured['argv']
+
+    def test_spawn_child_adds_gate_flag_only_when_set(self):
+        self.assertNotIn('--skip-clean', self._spawn_argv())
+        self.assertIn('--skip-clean', self._spawn_argv(skip_clean=True))
+
+    def test_run_one_file_forwards_gate_flag_to_process(self):
+        from libs import processor
+        source = self._tetra_file()
+        captured = []
+        real_process = processor.process
+
+        def spy(mesh, max_faces, **kwargs):
+            captured.append(kwargs['skip_clean'])
+            return real_process(mesh, max_faces, **kwargs)
+
+        class FakeArgs:
+            pass
+
+        for flag in (False, True):
+            args = FakeArgs()
+            args.one_file = str(source)
+            args.destination = str(self.root / 'out' / f'{flag}.stl')
+            args.max_faces = 0
+            args.log_file = None
+            args.result_file = str(self.root / 'result.json')
+            args.managed_child = False
+            args.skip_clean = flag
+            with mock.patch.object(processor, 'process', spy):
+                batch_repair_child.run_one_file(args)
+        self.assertEqual(captured, [False, True])
+
+    def test_real_child_script_with_gate_logs_and_publishes(self):
+        """Real child script and argparse: the flags parse, `--managed-child`
+        is accepted, and the gate's verdict lands in the step log."""
+        source = self._tetra_file()
+        dest = self.root / 'out' / 'body.stl'
+        log = self.root / 'steps.log'
+        script = Path(batch_repair_child.__file__).resolve()
+        result = subprocess.run(
+            [sys.executable, str(script), '--one-file', str(source),
+             '--destination', str(dest), '--max-faces', '0',
+             '--result-file', str(self.root / 'result.json'),
+             '--managed-child', '--log-file', str(log), '--skip-clean'],
+            cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = log.read_text()
+        self.assertIn('clean_gate', text)
+        self.assertIn('clean: steps skipped', text)
+        self.assertTrue(dest.exists())
+
+
+class TestInterruptedIntakeIntegration(unittest.TestCase):
+    """A real, slow Blender-stand-in conversion, genuinely interrupted by a
+    real `SIGINT`-delivered `KeyboardInterrupt` during `converter.prepare` —
+    confirms `_run` returns early, nonzero, without reaching dispatch, and
+    that the in-flight Blender-stand-in process is actually killed (checked
+    via `/proc`, not a mock assertion).
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / 'input'
+        self.source.mkdir()
+        self.output = self.root / 'output'
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        for name, module in batch_repair.DEPENDENCIES:
+            self.stack.enter_context(
+                mock.patch.object(module, 'is_available', return_value=True))
+
+    def _slow_blender_stand_in(self, pidfile: str) -> str:
+        fd, path = tempfile.mkstemp(suffix='.sh')
+        with os.fdopen(fd, 'w') as f:
+            f.write(
+                "#!/bin/sh\n"
+                f"echo $$ > {pidfile}\n"
+                "exec sleep 300\n"
+            )
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return path
+
+    def test_keyboard_interrupt_during_real_slow_conversion_kills_it_and_stops_early(self):
+        (self.source / 'body.obj').write_text('v 0 0 0\n')
+        pidfile = str(self.root / 'blender.pid')
+        exe = self._slow_blender_stand_in(pidfile)
+
+        config = RunConfig(input=str(self.source), output=str(self.output),
+                           max_faces=0, workers=1, per_file_timeout=30.0,
+                           reap_deadline=5.0, memory_budget_bytes=10 ** 15)
+
+        # `_run` constructs its own `intake_runner = blender.Runner()`
+        # internally (spec section 4d) with no way to inject our stand-in
+        # executable from outside — and `blender.convert(..., runner=...)`
+        # ignores its own `executable` argument entirely once a `runner` is
+        # supplied (the runner's OWN `.executable`, fixed at construction,
+        # is what is actually used). So the stand-in has to be installed by
+        # patching `Runner.__init__` to force it, while preserving
+        # everything else about the constructor (in particular
+        # `own_process_group`, which stays at its real default here — this
+        # test is proving real top-level intake behavior, not the nested
+        # containment case).
+        orig_init = blender.Runner.__init__
+
+        def patched_init(self, executable='blender', own_process_group=True):
+            orig_init(self, exe, own_process_group)
+
+        def deliver_interrupt_once_running():
+            deadline = time.monotonic() + 10.0
+            while not os.path.exists(pidfile) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(os.path.exists(pidfile),
+                            "the slow Blender stand-in never started")
+            # A real SIGINT into THIS process's main thread — signal
+            # delivery to the main thread is what actually raises
+            # KeyboardInterrupt inside `converter.prepare`'s own
+            # `Pool.start()`/`.join()`, matching how Ctrl+C really arrives.
+            os.kill(os.getpid(), signal.SIGINT)
+
+        interrupter = threading.Thread(target=deliver_interrupt_once_running, daemon=True)
+
+        with mock.patch.object(blender.Runner, '__init__', patched_init):
+            interrupter.start()
+            try:
+                code = batch_repair._run(config)
+            finally:
+                interrupter.join(timeout=15)
+
+        self.assertEqual(code, 1)
+        with open(pidfile) as f:
+            blender_pid = int(f.read().strip())
+        # Real evidence: the Blender-stand-in process is actually gone.
+        deadline = time.monotonic() + 10.0
+        while os.path.exists(f'/proc/{blender_pid}') and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(os.path.exists(f'/proc/{blender_pid}'),
+                         "the in-flight Blender stand-in survived the "
+                         "interrupted intake")
 
 
 if __name__ == '__main__':

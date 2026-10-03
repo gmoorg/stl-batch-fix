@@ -1,7 +1,7 @@
 # STL Batch Fix
 
 Repair STL batches for FDM printing while preserving meaningful geometry.
-Current implementation: `libs/` and `tools/batch_repair.py`. The legacy
+Current implementation: `libs/` and `batch_repair.py`. The legacy
 `stl_batch_fix.py` and its TUI are outside the refactor; do not use their
 repair logic as authority or modify them until the refactor is complete.
 
@@ -24,18 +24,25 @@ Current code establishes implemented behavior; TODO records future decisions.
 `install.sh` installs dependencies; it and `run.sh` select the project environment.
 Use `tools/project_python.sh` for every project Python command (including probes).
 It selects `/mnt/sda2/python/.venv/bin/python` and sets the repository directory.
-The current batch runner is invoked explicitly:
+The batch runner takes no command-line arguments. Every option lives in
+`batch_repair.toml` beside the script (git-ignored). Copy the documented
+example once, edit it, then run:
 
 ```bash
-tools/project_python.sh tools/batch_repair.py --input /path/to/input --output /path/to/output --max-faces 100000 --workers 4
+cp batch_repair.example.toml batch_repair.toml   # first time only; then edit it
+tools/project_python.sh batch_repair.py
 tools/project_python.sh -m unittest tests.tests.test_processor
 tools/project_python.sh -m unittest discover -s tests/tests -t . -q -p 'test_*.py'
 ```
 
-Input/output directories must not overlap. `--max-faces 0` disables only the
-initial decimation; post-wrap per-part reduction still runs. Face targets are
-best-effort. Steps append to `<output>/batch.log` by default (`--log-file`
+[batch_repair.example.toml](batch_repair.example.toml) documents every option.
+A bad or unknown key stops the run before anything is written. Input/output
+directories must not overlap. `max_faces = 0` disables only the initial
+decimation; post-wrap per-part reduction still runs. Face targets are
+best-effort. Steps append to `<output>/batch.log` by default (`log_file`
 overrides it). Run summary/progress also goes to the terminal.
+`skip_clean = true` (opt-in, not yet validated) skips repair for an
+already-clean decimated model, or otherwise for its individual clean parts.
 
 The batch runner exists and has real smoke coverage. Open review items and
 structural changes remain in TODO. A passing topology scan does not prove

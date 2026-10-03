@@ -20,18 +20,20 @@ from unittest import mock
 from libs import converter
 from libs.indicators import Indicator
 from libs.mesh_io import Kind, Mesh
-from tools import batch_repair
+from dataclasses import replace
+import batch_repair
+from libs.runconfig import RunConfig
 
 
-class _Args:
-    input = '/in'
-    output = '/out'
-    log_file = None
-    max_faces = 0
-    workers = 2
-    per_file_timeout = 5.0
-    reap_deadline = 5.0
-    memory_budget_bytes = 10 ** 15
+_BASE_CONFIG = RunConfig(
+    input='/in',
+    output='/out',
+    log_file='',
+    max_faces=0,
+    workers=2,
+    per_file_timeout=5.0,
+    reap_deadline=5.0,
+    memory_budget_bytes=10 ** 15)
 
 
 class TestRunSigint(unittest.TestCase):
@@ -54,14 +56,14 @@ class TestRunSigint(unittest.TestCase):
             def start(self):
                 raise KeyboardInterrupt
 
-        class Args(_Args):
-            output = str(self.root / 'out')
+        config = replace(_BASE_CONFIG,
+                         output=str(self.root / 'out'))
 
         with mock.patch.object(converter, 'prepare',
                                side_effect=lambda *a, **k: (a[2](mesh), converter.Summary())[1]), \
              mock.patch.object(batch_repair, 'Pool', FakePool):
             with mock.patch('sys.stdout') as fake_stdout:
-                code = batch_repair._run(Args())
+                code = batch_repair._run(config)
         self.assertEqual(code, 1)
         printed = ''.join(c.args[0] for c in fake_stdout.write.call_args_list
                           if c.args and isinstance(c.args[0], str))
@@ -90,6 +92,7 @@ class TestRunSigint(unittest.TestCase):
             "p.add_argument('--destination', required=True)\n"
             "p.add_argument('--max-faces', required=True)\n"
             "p.add_argument('--result-file', required=True)\n"
+            "p.add_argument('--managed-child', action='store_true')\n"
             'args = p.parse_args()\n'
             f'open({str(child_running_marker)!r}, "w").close()\n'   # proves the child is really running
             'time.sleep(600)\n'   # never finishes on its own — must be killed
@@ -104,8 +107,8 @@ class TestRunSigint(unittest.TestCase):
         helper = self.root / 'repeat_sigint_helper.py'
         helper.write_text(
             'import signal, sys, os\n'
-            f'sys.path.insert(0, {str(Path(batch_repair.__file__).resolve().parents[1])!r})\n'
-            'from tools import batch_repair\n'
+            f'sys.path.insert(0, {str(Path(batch_repair.__file__).resolve().parents[0])!r})\n'
+            'import batch_repair\n'
             'from libs import converter\n'
             'from libs.mesh_io import Kind, Mesh\n'
             '\n'
@@ -117,14 +120,8 @@ class TestRunSigint(unittest.TestCase):
             'mesh = Mesh(os.path.join(INPUT_DIR, "a.stl"), os.path.join(OUTPUT_DIR, "a.stl"),\n'
             '            Kind.BINARY_STL, 10, True)\n'
             '\n'
-            'class Args:\n'
-            '    input = INPUT_DIR\n'
-            '    output = OUTPUT_DIR\n'
-            '    max_faces = 0\n'
-            '    workers = 1\n'
-            '    per_file_timeout = 30.0\n'
-            '    reap_deadline = 5.0\n'
-            '    memory_budget_bytes = 10 ** 15\n'
+            'from libs.runconfig import RunConfig\n'
+            'config = RunConfig(input=INPUT_DIR, output=OUTPUT_DIR, max_faces=0, workers=1, per_file_timeout=30.0, reap_deadline=5.0, memory_budget_bytes=10 ** 15)\n'
             '\n'
             'def fake_prepare(source, destination, emit, **kwargs):\n'
             '    emit(mesh)\n'
@@ -133,8 +130,8 @@ class TestRunSigint(unittest.TestCase):
             'converter.prepare = fake_prepare\n'
             '\n'
             'orig_spawn = batch_repair._spawn_child\n'
-            'def fake_spawn(python, script, m, max_faces, result_file, log_file=None):\n'
-            '    return orig_spawn(sys.executable, FAKE_CHILD, m, max_faces, result_file, log_file)\n'
+            'def fake_spawn(python, script, m, max_faces, result_file, log_file=None, **kw):\n'
+            '    return orig_spawn(sys.executable, FAKE_CHILD, m, max_faces, result_file, log_file, **kw)\n'
             'batch_repair._spawn_child = fake_spawn\n'
             '\n'
             'real_signal = signal.signal\n'
@@ -144,7 +141,7 @@ class TestRunSigint(unittest.TestCase):
             '    return real_signal(signum, handler)\n'
             'signal.signal = observing_signal\n'
             '\n'
-            'code = batch_repair._run(Args())\n'
+            'code = batch_repair._run(config)\n'
             'print(f"EXIT_CODE={code}")\n'
         )
         proc = subprocess.Popen([sys.executable, str(helper)],
@@ -203,22 +200,21 @@ class TestRunSigint(unittest.TestCase):
             "p.add_argument('--destination', required=True)\n"
             "p.add_argument('--max-faces', required=True)\n"
             "p.add_argument('--result-file', required=True)\n"
+            "p.add_argument('--managed-child', action='store_true')\n"
             'args = p.parse_args()\n'
             'os.makedirs(os.path.dirname(args.destination), exist_ok=True)\n'
             "with open(args.destination, 'wb') as f:\n"
             "    f.write(b'real published output')\n"
             'os._exit(137)\n'   # dies before writing --result-file
         )
-        args = _Args()
-        args.input = str(self.root)
-        args.output = str(self.root / 'out')
+        args = replace(_BASE_CONFIG, input=str(self.root), output=str(self.root / 'out'))
 
         real_spawn_child = batch_repair._spawn_child
         with mock.patch.object(converter, 'prepare',
                                side_effect=lambda *a, **k: (a[2](mesh), converter.Summary())[1]), \
              mock.patch.object(batch_repair, '_spawn_child',
-                               side_effect=lambda python, s, m, mf, rf, lf=None:
-                                   real_spawn_child(sys.executable, str(script), m, mf, rf, lf)):
+                               side_effect=lambda python, s, m, mf, rf, lf=None, **kw:
+                                   real_spawn_child(sys.executable, str(script), m, mf, rf, lf, **kw)):
             captured = []
             with mock.patch('builtins.print', side_effect=lambda *a, **k: captured.append(' '.join(map(str, a)))):
                 code = batch_repair._run(args)
@@ -228,6 +224,40 @@ class TestRunSigint(unittest.TestCase):
         self.assertIn(str(mesh.path), printed)
         self.assertIn('recovered after child crashed', printed)
 
+
+class TestCleanGateDispatch(unittest.TestCase):
+    """The parent's `_Runner` passes `args.skip_clean` to `_spawn_child`."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_runner_forwards_gate_flag_to_spawn_child(self):
+        mesh = Mesh(str(self.root / 'a.stl'), str(self.root / 'out' / 'a.stl'),
+                    Kind.BINARY_STL, 10, True)
+        Path(mesh.path).write_bytes(b'source')
+        root = self.root
+
+        for flag in (False, True):
+            config = replace(_BASE_CONFIG,
+                             output=str(root / 'out'),
+                             skip_clean=flag)
+
+            captured = []
+
+            def refuse(*a, **kw):
+                captured.append(kw)
+                raise OSError('not launched in this test')
+
+            with mock.patch.object(converter, 'prepare',
+                                   side_effect=lambda *a, **k: (a[2](mesh), converter.Summary())[1]), \
+                 mock.patch.object(batch_repair, '_spawn_child', side_effect=refuse), \
+                 mock.patch('builtins.print'):
+                batch_repair._run(config)
+            with self.subTest(flag=flag):
+                self.assertEqual(len(captured), 1)
+                self.assertEqual(captured[0].get('skip_clean'), flag)
 
 if __name__ == '__main__':
     unittest.main()

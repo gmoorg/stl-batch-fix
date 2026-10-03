@@ -859,8 +859,8 @@ class TestIsAlreadyClean(unittest.TestCase):
     """`is_already_clean(mesh) -> bool` — the skip-gate spike's own check,
     stateless and independent of `pipeconfig`/any other module state (see
     docs/refactor/TODO.md's "Algorithm questions" section for the spike this
-    was written for). Not wired into `repair`/`process` yet — this only
-    tests the function itself.
+    was written for). This tests the function itself; its opt-in call sites
+    in `repair` are covered by `TestCleanGates`.
     """
 
     def test_a_consistently_wound_watertight_mesh_is_clean(self):
@@ -904,6 +904,162 @@ class TestIsAlreadyClean(unittest.TestCase):
         reconstruction handle differently and separately).
         """
         self.assertTrue(repairer.is_already_clean(inverted_tetra()))
+
+
+def clean_and_open_shells():
+    """A clean tetrahedron plus a disjoint open one (one face missing).
+
+    Both are under `MIN_SHELL_FACES`, so callers pass `min_shell_faces=0` to
+    keep both shells through the split.
+    """
+    verts = TETRA_VERTS + [[10, 10, 10], [11, 10, 10],
+                           [10, 11, 10], [10, 10, 11]]
+    faces = TETRA_FACES + [[4, 6, 5], [4, 5, 7], [4, 7, 6]]
+    return mesh(verts, faces)
+
+
+class TestCleanGates(unittest.TestCase):
+    """`repair(..., skip_clean=)` — the opt-in `is_already_clean` call sites:
+    the whole model first, then each retained part. Off by default."""
+
+    def _run(self, m, **flags):
+        events = []
+
+        def logger(source_name, event, step, part, duration, detail):
+            events.append((step, part, detail))
+
+        recorder = Recorder()
+        result = repair(m, min_shell_faces=0, part_steps=(('recorder', recorder),),
+                        step_logger=logger, source_name='/x.stl', **flags)
+        gate = [(part, detail) for step, part, detail in events if step == 'clean_gate']
+        return result, recorder, gate
+
+    def test_gate_is_off_by_default(self):
+        result, recorder, gate = self._run(clean_and_open_shells())
+        self.assertTrue(result.ok, result.problem)
+        self.assertEqual(len(recorder.seen), 2)
+        self.assertEqual(gate, [])
+
+    def test_a_clean_model_skips_split_parts_and_merge(self):
+        source = tetra()
+        result, recorder, gate = self._run(source, skip_clean=True)
+        self.assertTrue(result.ok, result.problem)
+        self.assertEqual(recorder.seen, [])
+        self.assertEqual([s for s in result.steps
+                          if s.step in (Step.SPLIT, Step.PART, Step.MERGE)], [])
+        self.assertIs(result.mesh, source)
+        self.assertEqual(result.parts, 1)
+        self.assertEqual(result.faces_out, 4)
+        self.assertEqual(result.lost_vertices, 0)
+        # Measured, not copied: the same mesh measures the same both times.
+        self.assertGreater(result.volume_out, 0.0)
+        self.assertAlmostEqual(result.volume_kept, 1.0)
+        self.assertEqual(gate, [('-', 'clean: steps skipped')])
+
+    def test_an_unclean_model_falls_through_to_the_part_gate(self):
+        """Model gate says not clean; then only the open part runs its
+        sequence and the clean part is merged unchanged."""
+        result, recorder, gate = self._run(clean_and_open_shells(), skip_clean=True)
+        self.assertTrue(result.ok, result.problem)
+        self.assertEqual(len(recorder.seen), 1)
+        self.assertEqual(len(recorder.seen[0].geometry.faces), 3)
+        self.assertEqual(len([s for s in result.steps if s.step is Step.MERGE]), 1)
+        self.assertEqual(result.faces_out, 7)
+        self.assertEqual(gate, [('-', 'not clean'),
+                                ('1/2', 'clean: steps skipped'),
+                                ('2/2', 'not clean')])
+
+    def test_inconsistent_winding_is_repaired(self):
+        faces = [list(f) for f in TETRA_FACES]
+        faces[3] = [faces[3][0], faces[3][2], faces[3][1]]
+        result, recorder, gate = self._run(mesh(TETRA_VERTS, faces), skip_clean=True)
+        self.assertEqual(len(recorder.seen), 1)
+        self.assertEqual(gate, [('-', 'not clean'), ('1/1', 'not clean')])
+
+    def test_model_skip_keeps_the_non_finite_guard(self):
+        bad = mesh([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, np.nan]], TETRA_FACES)
+        with mock.patch.object(repairer, 'is_already_clean', return_value=True):
+            result, recorder, _ = self._run(bad, skip_clean=True)
+        self.assertFalse(result.ok)
+        self.assertIn('NaN or infinite', result.problem)
+        self.assertEqual(recorder.seen, [])
+
+
+class TestNestedProcessGroupWiring(unittest.TestCase):
+    """Proves `repairer.repair(..., nested_process_group=True)` — the REAL
+    entry point, not a bypass — actually reaches `blender.step_blender_repair`
+    through `StepConfig`, deciding whether the Blender invocation it launches
+    gets its own process session.
+    """
+
+    def _stand_in(self, body: str) -> str:
+        import os
+        import stat
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix='.sh')
+        with os.fdopen(fd, 'w') as f:
+            f.write("#!/bin/sh\n" + body)
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+        self.addCleanup(lambda: os.unlink(path) if os.path.exists(path) else None)
+        return path
+
+    def _run_with_blender_step(self, nested_process_group):
+        import os
+        import tempfile
+        from libs import blender, mesh_io
+
+        # A stand-in that copies a pre-built valid PLY to Blender's own
+        # `--dst` argument (parsed out of the rendered script file, `$3`,
+        # since the script assigns `dst = '<path>'` — matching the shape
+        # `blender.REPAIR_SCRIPT.format` always produces): `repair()`
+        # requires the destination file to exist to accept the run.
+        source_ply = os.path.join(tempfile.mkdtemp(prefix='repairer-nested-test-'),
+                                  'canned.ply')
+        mesh_io.write_ply(mesh(TETRA_VERTS, TETRA_FACES), source_ply)
+        exe = self._stand_in(
+            "dst=$(sed -n \"s/^dst = '\\(.*\\)'$/\\1/p\" \"$3\")\n"
+            f"cp {source_ply} \"$dst\"\n"
+            "echo BLENDER_OK\n"
+            "exit 0\n"
+        )
+        captured = {}
+        real_popen = __import__('subprocess').Popen
+
+        def spy(*args, **kwargs):
+            captured['start_new_session'] = kwargs.get('start_new_session')
+            return real_popen(*args, **kwargs)
+
+        m = mesh(TETRA_VERTS, TETRA_FACES)
+        # `step_blender_repair` constructs its own `Runner` internally with
+        # no way to inject the stand-in executable — patch `Runner.__init__`
+        # to force our stand-in while preserving the constructor's own
+        # `own_process_group` argument, which is exactly the thing under
+        # test (it is `step_blender_repair`'s own decision, driven by
+        # `config.nested_process_group`, and must reach here unmodified).
+        orig_init = blender.Runner.__init__
+
+        def patched_init(self, executable='blender', own_process_group=True):
+            orig_init(self, exe, own_process_group)
+
+        with mock.patch('subprocess.Popen', spy), \
+             mock.patch.object(blender.Runner, '__init__', patched_init):
+            result = repair(
+                m, part_steps=(('blender_repair', blender.step_blender_repair),),
+                nested_process_group=nested_process_group)
+        self.assertTrue(result.ok, result.problem)
+        return captured['start_new_session']
+
+    def test_nested_true_does_not_take_its_own_session(self):
+        started_own_session = self._run_with_blender_step(nested_process_group=True)
+        self.assertFalse(started_own_session,
+                         "nested_process_group=True must reach Runner as "
+                         "own_process_group=False")
+
+    def test_nested_false_default_takes_its_own_session(self):
+        started_own_session = self._run_with_blender_step(nested_process_group=False)
+        self.assertTrue(started_own_session,
+                        "nested_process_group=False (the default) must "
+                        "reach Runner as own_process_group=True")
 
 
 if __name__ == '__main__':

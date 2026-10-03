@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Batch runner: per-file isolation via a worker-thread pool driving isolated
-`--one-file` child processes.
+`batch_repair_child.py` processes.
+
+Takes no command-line arguments. Every option is read from
+`batch_repair.toml` beside this script (documented in
+`batch_repair.example.toml`; loaded by `libs.runconfig`).
 
 See docs/refactor/orchestration.md for the current pipeline.
 Each worker thread owns one child's `Popen`;
@@ -11,8 +15,8 @@ is the shared, lock-guarded bookkeeping a `KeyboardInterrupt` in the main
 thread needs to find and kill every live child.
 """
 
-import argparse
 import datetime
+import functools
 import json
 import os
 import signal
@@ -26,14 +30,16 @@ from collections import Counter, deque
 from dataclasses import fields
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
 from libs import alphawrap, blender, childresult, converter, decimator      # noqa: E402
-from libs import meshfix, meshlab, mesh_io, processor, publication, runstate, steplog  # noqa: E402
+from libs import meshfix, meshlab, mesh_io, processor, publication, runconfig, runstate, steplog  # noqa: E402
 from libs.childresult import ChildResult                                  # noqa: E402
 from libs.indicators import Indicator                                     # noqa: E402
 from libs.mesh_io import Mesh                                             # noqa: E402
 from libs.pool import Pool                                                # noqa: E402
 from libs.proctree import terminate_and_confirm                           # noqa: E402
+from libs.runconfig import ConfigError, RunConfig                         # noqa: E402
 from libs.runstate import RunState                                        # noqa: E402
 
 
@@ -45,9 +51,12 @@ DEPENDENCIES = (
     ('PyMeshLab', meshlab),
 )
 
-REAP_DEADLINE_DEFAULT = 10.0
-PER_FILE_TIMEOUT_DEFAULT = 3600.0
-MEMORY_BUDGET_FRACTION_DEFAULT = 0.7
+#: The run configuration: always beside the script, never chosen per run.
+CONFIG_PATH = os.path.join(SCRIPT_DIR, 'batch_repair.toml')
+#: The documented template a user copies to `CONFIG_PATH`.
+EXAMPLE_CONFIG_PATH = os.path.join(SCRIPT_DIR, 'batch_repair.example.toml')
+#: The per-file child the parent spawns; see its module docstring.
+CHILD_SCRIPT = os.path.join(SCRIPT_DIR, 'batch_repair_child.py')
 
 
 class ProgressReporter:
@@ -257,12 +266,21 @@ def _log_line(message: str) -> None:
 
 
 # ============================================================================
-# --one-file child mode
+# Per-file body, run inside batch_repair_child.py
 # ============================================================================
 
 def _process_one_file(source_path: str, destination: str, max_faces: int,
-                       step_logger: steplog.StepLogger = steplog.null_logger) -> ChildResult:
-    """The exact per-file body the old serial loop ran, now for one file only."""
+                       step_logger: steplog.StepLogger = steplog.null_logger,
+                       nested_process_group: bool = False,
+                       *,
+                       skip_clean: bool = False) -> ChildResult:
+    """The exact per-file body the old serial loop ran, now for one file only.
+
+    `nested_process_group` is threaded straight into `processor.process(...)` —
+    see `batch_repair_child.run_one_file`'s docstring for where it comes from.
+    `skip_clean` comes from the opt-in `--skip-clean` flag; see
+    `repairer.repair`.
+    """
     stage = 'intake'
     category = 'intake_failure'
     reason = 'invalid intake mesh'
@@ -270,7 +288,7 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
     written_path = None
     steps: tuple[str, ...] = ()
     # Absolute, not basename: `converter._walk`/`os.walk(root)` does not
-    # normalize `root`, and standalone `--one-file` also accepts a relative
+    # normalize `root`, and a direct child invocation may pass a relative
     # path — a basename alone would make two same-named files in different
     # subfolders indistinguishable in a shared step log.
     source_name = os.path.abspath(source_path)
@@ -287,7 +305,9 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                 stage = 'process'
                 category = 'process_failure'
                 outcome = processor.process(loaded, max_faces,
-                                           step_logger=step_logger, source_name=source_name)
+                                           step_logger=step_logger, source_name=source_name,
+                                           nested_process_group=nested_process_group,
+                                           skip_clean=skip_clean)
                 if outcome.repair is not None:
                     steps = tuple(f'{s.step.name}: {s.detail}' for s in outcome.repair.steps)
                 stage = 'write'
@@ -306,23 +326,6 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
             reason = f'{type(exc).__name__}: {exc}'
     return ChildResult(path=source_path, category=category, indicator=indicator,
                        stage=stage, reason=reason, written_path=written_path, steps=steps)
-
-
-def _run_one_file(args) -> int:
-    """`--one-file` entry point. Writes exactly one `ChildResult` to `--result-file`.
-
-    Exit code carries no meaning the parent trusts — it never gates whether
-    a result is believed, only whether a result *file* is present, valid,
-    and matches this job's own source path (see `libs.childresult`).  A
-    child that dies before writing (OOM-killed, segfault inside CGAL,
-    SIGKILL from the parent) simply never produces the file, which is
-    itself the signal the parent's crash/reconciliation path acts on.
-    """
-    step_logger = (steplog.open_step_log(args.log_file) if args.log_file
-                  else steplog.null_logger)
-    result = _process_one_file(args.one_file, args.destination, args.max_faces, step_logger)
-    childresult.write(args.result_file, result)
-    return 0
 
 
 # ============================================================================
@@ -365,11 +368,16 @@ def _preflight(emitted: list[Mesh]) -> tuple[list[Mesh], list[tuple[Mesh, str]]]
 
 
 def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
-                  result_file: str, log_file: str | None = None) -> subprocess.Popen:
+                  result_file: str, log_file: str | None = None,
+                  *,
+                  skip_clean: bool = False) -> subprocess.Popen:
     argv = [python, script, '--one-file', mesh.path, '--destination', mesh.destination,
-           '--max-faces', str(max_faces), '--result-file', result_file]
+           '--max-faces', str(max_faces), '--result-file', result_file,
+           '--managed-child']
     if log_file:
         argv += ['--log-file', log_file]
+    if skip_clean:
+        argv.append('--skip-clean')
     return subprocess.Popen(
         argv, start_new_session=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -444,9 +452,10 @@ class _Runner:
     made the control flow harder to follow during design, not easier.
     """
 
-    def __init__(self, args, python: str, script: str, baselines: dict[str, frozenset[str]],
+    def __init__(self, config: RunConfig, python: str, script: str,
+                 baselines: dict[str, frozenset[str]],
                  reporter: "ProgressReporter | None" = None):
-        self.args = args
+        self.config = config
         self.python = python
         self.script = script
         self.baselines = baselines
@@ -456,7 +465,7 @@ class _Runner:
         self._results_lock = threading.Lock()
         self.total_jobs = 0        # set by _run once the queue is built
         # `None` here (rather than a reporter constructed by `_Runner`
-        # itself) matches every existing test's direct `_Runner(args,
+        # itself) matches every existing test's direct `_Runner(config,
         # python, script, baselines)` call, which predates progress.log and
         # supplies no reporter — those tests keep working with progress
         # logging simply disabled. `_run` always passes a real one.
@@ -512,14 +521,14 @@ class _Runner:
                        * runstate.ALPHA_WRAP_SAFETY_FACTOR_UNVALIDATED)
         token = None
         try:
-            token, refusal, override = self.run_state.start(estimate, self.args.memory_budget_bytes)
+            token, refusal, override = self.run_state.start(estimate, self.config.memory_budget_bytes)
             if token is None:
                 return None
             self.queue.popleft()
             if override:
                 try:
                     _log_line(f'admitting {mesh.path} alone: estimated {estimate}B '
-                             f'exceeds budget {self.args.memory_budget_bytes}B')
+                             f'exceeds budget {self.config.memory_budget_bytes}B')
                 except Exception:
                     pass          # a logging failure must not strand an already-granted reservation
             return (token, mesh)
@@ -558,7 +567,7 @@ class _Runner:
             proc = self.run_state.proc_for(token)
             if proc is not None:
                 try:
-                    confirmed, term_detail = terminate_and_confirm(proc, self.args.reap_deadline)
+                    confirmed, term_detail = terminate_and_confirm(proc, self.config.reap_deadline)
                 except Exception as cleanup_exc:      # noqa: BLE001
                     term_detail = f'cleanup raised: {cleanup_exc}'
             if confirmed:
@@ -589,15 +598,16 @@ class _Runner:
         os.close(fd)
         try:
             try:
-                proc = _spawn_child(self.python, self.script, mesh, self.args.max_faces,
-                                   result_file, getattr(self.args, 'log_file', None))
+                proc = _spawn_child(self.python, self.script, mesh, self.config.max_faces,
+                                   result_file, self.config.log_file or None,
+                                   skip_clean=self.config.skip_clean)
             except Exception as exc:
                 self.run_state.mark_launch_failed(token)
                 self._complete(token, _build_launch_failure_result(mesh, exc))
                 return
 
             if not self.run_state.spawned(token, proc):
-                confirmed, detail = terminate_and_confirm(proc, self.args.reap_deadline)
+                confirmed, detail = terminate_and_confirm(proc, self.config.reap_deadline)
                 if not confirmed:
                     self.run_state.mark_stuck(token, detail)
                     return
@@ -608,13 +618,13 @@ class _Runner:
             self._log(f'[start] {mesh.path}')
             cause = 'exited'
             try:
-                proc.communicate(timeout=self.args.per_file_timeout)
+                proc.communicate(timeout=self.config.per_file_timeout)
             except subprocess.TimeoutExpired:
                 cause = 'timed_out'
             except Exception:
                 cause = 'wait_error'
 
-            confirmed, detail = terminate_and_confirm(proc, self.args.reap_deadline)
+            confirmed, detail = terminate_and_confirm(proc, self.config.reap_deadline)
             if not confirmed:
                 self.run_state.mark_stuck(token, detail)
                 return
@@ -659,43 +669,102 @@ def _emit_indicator(indicator) -> Indicator | None:
     return Indicator[indicator]
 
 
-def _progress_log_path(args) -> str:
-    """`<output>/progress.log` by default; alongside `--log-file` when that
-    was customized to a different directory (spec 5d's Location note).
-
-    `getattr` rather than `args.log_file` directly: several existing unit
-    tests build a bare `Args`-like object for `_run` without a `log_file`
-    attribute at all (this tool's `--one-file` mode and `_run`'s own
-    signature never required one before progress.log existed).
-    """
-    log_file = getattr(args, 'log_file', None)
-    log_dir = os.path.dirname(log_file) if log_file else args.output
-    return os.path.join(log_dir or args.output, 'progress.log')
+def _progress_log_path(config: RunConfig) -> str:
+    """`progress.log` beside the step log — `<output>/progress.log` by
+    default, or beside a customized `log_file` (spec 5d's Location note)."""
+    log_dir = os.path.dirname(config.log_file) if config.log_file else config.output
+    return os.path.join(log_dir or config.output, 'progress.log')
 
 
-def _run(args) -> int:
+def _run(config: RunConfig) -> int:
     emitted: list[Mesh] = []
     run_id = str(uuid.uuid4())
 
     # Constructed BEFORE `converter.prepare` runs — i.e. before intake
     # starts — so intake-stage messages and the intake-exception
     # early-return path below can use it too (spec 5d).
-    reporter = ProgressReporter(_progress_log_path(args), run_id)
+    reporter = ProgressReporter(_progress_log_path(config), run_id)
     reporter.write({'kind': 'run_start', 'run_id': run_id,
-                    'output': args.output, 'max_faces': args.max_faces})
+                    'output': config.output, 'max_faces': config.max_faces})
 
     def collect(mesh: Mesh) -> None:
         emitted.append(mesh)
 
-    scanning_message = f'Scanning {args.input} ...'
+    scanning_message = f'Scanning {config.input} ...'
     _log_line(scanning_message)
     reporter.write({'kind': 'progress', 'message': scanning_message})
+    # `intake_runner` is shared across every conversion `converter.prepare`
+    # drives during this call — `own_process_group=True` by default: intake
+    # is definitionally top-level, never nested inside another
+    # `proctree`-managed group. Sharing one `Runner` (rather than the
+    # per-call default `blender.convert` would otherwise construct) is what
+    # lets a single `cancel()` reach every conversion in flight, including
+    # ones launched after this call started but before it returns.
+    intake_runner = blender.Runner()
     try:
         summary = converter.prepare(
-            args.input, args.output, collect,
+            config.input, config.output, collect,
             copy_extensions={'.png', '.jpg', '.jpeg', '.gif', '.txt'},
-            convert=blender.convert, workers=1,
+            convert=functools.partial(blender.convert, runner=intake_runner),
+            workers=1,
         )
+    except KeyboardInterrupt:
+        # Reuses the EXISTING pattern the main dispatch loop below already
+        # applies around its own `Pool(...).start()` call, applied here to
+        # `converter.prepare`'s internal `Pool.start()`. `Pool.start()`'s own
+        # docstring: `KeyboardInterrupt` (main-thread-only signal delivery)
+        # propagates out of `converter.prepare` uncaught, deliberately.
+        intake_runner.cancel()
+        idle = intake_runner.wait_for_idle(60.0)   # same 60s constant the
+                                                    # dispatch loop's own
+                                                    # post-cancel wait uses
+        if not idle:
+            intake_runner.reap_unresolved(10.0)
+            idle = intake_runner.wait_for_idle(0.0)
+        message = (f'Intake interrupted; Blender cleanup '
+                  f"{'confirmed' if idle else 'NOT confirmed within budget'}.")
+        _log_line(message)
+        reporter.write({'kind': 'progress', 'message': message})
+        # `collect` (this closure) may still be invoked by the daemon worker
+        # thread AFTER this function returns via the early return below —
+        # CONFIRMED HARMLESS: `collect`/`emit_one` only touch the local
+        # `emitted` list, never `ProgressReporter`/any finalized-reporting
+        # write (those only happen in this function's OWN code, after
+        # `converter.prepare` returns) — so a late callback call cannot race
+        # any reporting write. `Pool`'s own philosophy ("killing mid-work is
+        # safe... next run redoes it") already covers the abandoned pending
+        # item itself; no attempt is made here to join the daemon worker
+        # thread (no API exists to do so without changing `Pool`, out of
+        # scope).
+        reporter.finalize({'kind': 'final', 'incomplete': True,
+                           'intake_interrupted': True, 'cleanup_confirmed': idle})
+        return 1   # early return — NEVER reaches _preflight/dispatch: an
+                   # interrupted intake must not proceed to repair dispatch.
+    except blender.BlenderCleanupUnconfirmed as error:
+        # A conversion's own cleanup came back unconfirmed even without a
+        # KeyboardInterrupt. `converter.prepare`'s own internal
+        # `try/except Exception` around `convert_one` already converts this
+        # (like any other raised exception) into the standard
+        # `_conversion_failure` path FOR THAT ONE FILE — so this outer catch
+        # cannot actually be reached from inside the pool-driven conversion
+        # phase; it exists only for defense (e.g. a future call site that
+        # invokes `blender.convert` directly, outside `convert_one`'s guard)
+        # and to stop further intake launches via `cancel()`, not to
+        # duplicate a failure `converter.prepare` already recorded.
+        intake_runner.cancel()
+        idle = intake_runner.wait_for_idle(60.0)
+        if not idle:
+            intake_runner.reap_unresolved(10.0)
+            idle = intake_runner.wait_for_idle(0.0)
+        message = (f'Run incomplete: intake raised '
+                  f'{type(error).__name__}: {error}; Blender cleanup '
+                  f"{'confirmed' if idle else 'NOT confirmed within budget'}.")
+        _log_line(message)
+        reporter.write({'kind': 'progress', 'message': message})
+        reporter.finalize({'kind': 'final',
+                           'intake_exception': f'{type(error).__name__}: {error}',
+                           'incomplete': True, 'cleanup_confirmed': idle})
+        return 1
     except Exception as error:
         message = f'Run incomplete: intake raised {type(error).__name__}: {error}'
         _log_line(message)
@@ -718,17 +787,16 @@ def _run(args) -> int:
                         'indicator': None, 'reason': reason, 'recovered': False})
 
     python = sys.executable
-    script = os.path.abspath(__file__)
-    runner = _Runner(args, python, script, baselines, reporter=reporter)
+    runner = _Runner(config, python, CHILD_SCRIPT, baselines, reporter=reporter)
     runner.total_jobs = len(dispatchable)
     runner.queue.extend(dispatchable)
     _log_line(f'Intake done: {len(dispatchable)} job(s) to process '
-             f'({len(rejected)} rejected at intake), {args.workers} worker(s).')
+             f'({len(rejected)} rejected at intake), {config.workers} worker(s).')
 
     old_handler = signal.getsignal(signal.SIGINT)
     interrupted = False
     try:
-        Pool(args.workers, runner.selector, runner.handler).start()
+        Pool(config.workers, runner.selector, runner.handler).start()
     except KeyboardInterrupt:
         interrupted = True
         signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -817,86 +885,29 @@ def _run(args) -> int:
     return int(incomplete or bool(diagnostics) or summary.copy_failed > 0)
 
 
-def _main(argv):
-    parser = argparse.ArgumentParser(description=__doc__)
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument('--input', metavar='DIR')
-    mode.add_argument('--one-file', metavar='SRC')
+def _fail(message: str) -> int:
+    print(f'batch_repair: error: {message}', file=sys.stderr)
+    return 2
 
-    parser.add_argument('--output', metavar='DIR')
-    parser.add_argument('--destination', metavar='DST')
-    parser.add_argument('--result-file', metavar='PATH')
-    parser.add_argument('--log-file', metavar='PATH',
-                        help='append before/after-each-step lines here; '
-                             'defaults to <output>/batch.log for --input mode')
-    parser.add_argument('--max-faces', required=True, metavar='N',
-                        help='non-negative integer face budget for the INITIAL '
-                             'whole-mesh decimation pass only; 0 disables that '
-                             'pass. Per-part post-wrap decimation always runs '
-                             'by default regardless of this value.')
-    parser.add_argument('--workers', type=int, default=None, metavar='N')
-    parser.add_argument('--per-file-timeout', type=float, default=PER_FILE_TIMEOUT_DEFAULT, metavar='SECONDS')
-    parser.add_argument('--reap-deadline', type=float, default=REAP_DEADLINE_DEFAULT, metavar='SECONDS')
-    parser.add_argument('--memory-budget-fraction', type=float,
-                        default=MEMORY_BUDGET_FRACTION_DEFAULT, metavar='FRACTION')
-    parser.add_argument('--memory-budget-bytes', type=int, default=None, metavar='BYTES')
-    args = parser.parse_args(argv)
 
+def _check_environment(config: RunConfig) -> str | None:
+    """What the filesystem and installed tools must satisfy before `_run`.
+
+    Returns a message for the first problem, or None. Runs before any
+    output or log file is created.
+    """
+    if not os.path.isdir(config.input):
+        return f'input must exist and be a directory: {config.input}'
+    if os.path.isfile(config.output):
+        return f'output must be a directory, not an existing file: {config.output}'
     try:
-        args.max_faces = int(args.max_faces)
-        if args.max_faces < 0:
-            raise ValueError
-    except ValueError:
-        parser.error('--max-faces must be a non-negative integer')
-
-    if args.one_file is not None:
-        if args.destination is None or args.result_file is None:
-            parser.error('--one-file requires --destination and --result-file')
-        return _run_one_file(args)
-
-    if args.output is None:
-        parser.error('--input requires --output')
-    if not os.path.isdir(args.input):
-        parser.error('--input must exist and be a directory')
-    if os.path.isfile(args.output):
-        parser.error('--output must be a directory, not an existing file')
-    try:
-        source = Path(args.input).resolve()
-        destination = Path(args.output).resolve()
+        source = Path(config.input).resolve()
+        destination = Path(config.output).resolve()
     except (OSError, RuntimeError) as error:
-        parser.error(f'cannot resolve input/output paths: {error}')
+        return f'cannot resolve input/output paths: {error}'
     if (source == destination or source in destination.parents
             or destination in source.parents):
-        parser.error('--input and --output must not overlap in either direction')
-
-    if args.log_file is None:
-        args.log_file = os.path.join(args.output, 'batch.log')
-
-    if args.workers is None:
-        args.workers = min(4, os.cpu_count() or 1)
-    if args.workers < 1:
-        parser.error('--workers must be a positive integer')
-    if not (args.per_file_timeout > 0 and args.per_file_timeout == args.per_file_timeout
-            and args.per_file_timeout != float('inf')):
-        parser.error('--per-file-timeout must be a finite positive number')
-    if not (args.reap_deadline > 0 and args.reap_deadline == args.reap_deadline
-            and args.reap_deadline != float('inf')):
-        parser.error('--reap-deadline must be a finite positive number')
-
-    if args.memory_budget_bytes is not None:
-        if args.memory_budget_bytes <= 0:
-            parser.error('--memory-budget-bytes must be a positive integer')
-    else:
-        if not (0 < args.memory_budget_fraction <= 1
-                and args.memory_budget_fraction == args.memory_budget_fraction):
-            parser.error('--memory-budget-fraction must be a finite number in (0, 1]')
-        try:
-            page_size = os.sysconf('SC_PAGE_SIZE')
-            avail_pages = os.sysconf('SC_AVPHYS_PAGES')
-            args.memory_budget_bytes = int(page_size * avail_pages * args.memory_budget_fraction)
-        except (ValueError, OSError, AttributeError):
-            parser.error('cannot determine available memory on this platform; '
-                        'pass --memory-budget-bytes explicitly')
+        return 'input and output must not overlap in either direction'
 
     missing = []
     for name, module in DEPENDENCIES:
@@ -908,12 +919,34 @@ def _main(argv):
             if not available:
                 missing.append(name)
     if missing:
-        parser.error('missing required dependencies: ' + ', '.join(missing))
-    return _run(args)
+        return 'missing required dependencies: ' + ', '.join(missing)
+    return None
+
+
+def _main(argv) -> int:
+    if argv:
+        return _fail(f'batch_repair.py takes no arguments (got: {" ".join(argv)}); '
+                     f'set options in {CONFIG_PATH}')
+    if not os.path.exists(CONFIG_PATH):
+        return _fail(f'config file not found: {CONFIG_PATH}\n'
+                     f'Copy {EXAMPLE_CONFIG_PATH} to it and edit the copy.')
+    try:
+        config = runconfig.resolve(runconfig.load(CONFIG_PATH))
+    except ConfigError as error:
+        return _fail(f'{CONFIG_PATH}: {error}')
+    problem = _check_environment(config)
+    if problem is not None:
+        return _fail(f'{CONFIG_PATH}: {problem}')
+    return _run(config)
 
 
 def main(argv=None):
-    """CLI boundary: interruption never reports a completed run."""
+    """CLI boundary: interruption never reports a completed run.
+
+    `argv=None` means the real command line; a test passes a list.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
     try:
         return _main(argv)
     except KeyboardInterrupt:

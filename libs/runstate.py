@@ -40,7 +40,7 @@ class RunState:
     reason about more than a bare worker-count ceiling.
 
     See docs/refactor/orchestration.md for the current batch lifecycle;
-    tools/batch_repair.py owns the callers of these transitions.
+    batch_repair.py owns the callers of these transitions.
     """
 
     _ALLOWED_BEFORE_COMPLETE = frozenset({'reaped', 'publishing', 'launch_failed'})

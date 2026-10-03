@@ -8,24 +8,15 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
 
 - [ ] Measure alpha-wrap peak memory and replace the unvalidated factor 3.
   The 890 bytes/triangle estimate covers decimation, not reconstruction.
-- [ ] Define shared run/event/reporting contracts for the refactor runner.
-- [ ] Connect a future refactor TUI to the shared runner without duplicating
-  scheduling. The existing TUI still drives legacy code.
-- [ ] Audit descendant cleanup in direct Blender use and conversion intake;
-  batch repair groups already use `proctree`.
-- [ ] Isolate or serialize native output capture for direct concurrent MeshFix
-  calls; default batch repairs already run in separate processes.
-- [ ] Address same-stem OBJ/STL conversion collisions when warranted
-  (owner-accepted low priority). Runner destination preflight already exists.
 
 ## Geometry and configuration
 
 - [ ] Validate preservation of meaningful small components and detail through
   initial decimation; global retained volume alone is insufficient.
-- [ ] Evaluate the existing `is_already_clean` gate on real candidates before
-  wiring it in: NM=0, open=0, winding seams=0; confirm Amidara base fails and
-  verify candidate slicing/printing. Consistent winding can still be globally
-  inverted or self-intersecting. Leave the gate disabled pending this work.
+- [ ] Evaluate the `is_already_clean` gate on real candidates using the opt-in
+  `skip_clean = true` config option: confirm Amidara base fails and verify gated output
+  slices/prints. Consistent winding can still be globally inverted or
+  self-intersecting. Keep the flag off by default pending this work.
 - [ ] Measure how often post-decimation MeshFix is required across a real corpus.
 - [ ] Investigate reversed/non-monotone T-junctions and far bent paths;
   establish evidence before introducing a distance bound.

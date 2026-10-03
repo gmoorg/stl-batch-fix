@@ -41,7 +41,21 @@ class StepConfig:
                       per `repair()` call after initial decimation and
                       before splitting, then carried unchanged into every
                       part's own `StepConfig` — see `repairer._repair_sequence`.
+    nested_process_group  read by `blender.step_blender_repair` to decide
+                      whether the Blender invocation it launches should get
+                      its own process session. `False` (the default) means
+                      "not nested — safe, this Blender invocation should own
+                      its own process group", matching `blender.Runner`'s own
+                      safe-by-default. `True` means this step is known to run
+                      nested inside another, enclosing `proctree`-managed
+                      process group (e.g. a batch worker), so the Blender it
+                      launches must NOT get its own session — otherwise the
+                      enclosing worker's own group-kill would no longer reach
+                      it. Threaded in from `repairer.repair`/`processor.process`,
+                      ultimately from `batch_repair.py`'s explicit
+                      `--managed-child` marker.
     """
 
     faceCount: int = 0
     whole_model_diag: float | None = None
+    nested_process_group: bool = False

@@ -1,4 +1,4 @@
-"""Tests for tools.batch_repair's progress.log: ProgressReporter's crash-safe
+"""Tests for batch_repair's progress.log: ProgressReporter's crash-safe
 recovery pass, run/progress/job/final record kinds, elapsed_seconds, and
 concurrency/failure behavior — logging spec section 5c/5d/5e.
 """
@@ -19,8 +19,9 @@ from unittest import mock
 
 from libs import converter, steplog
 from libs.mesh_io import Kind, Mesh
-from tools import batch_repair
-from tools.batch_repair import ProgressReporter, _Runner
+import batch_repair
+from libs.runconfig import RunConfig
+from batch_repair import ProgressReporter, _Runner
 
 
 _TETRA = (
@@ -65,26 +66,15 @@ def _read_records(path):
     return records
 
 
-class _Args:
-    input = '/in'
-    output = '/out'
-    log_file = None
-    max_faces = 0
-    workers = 2
-    per_file_timeout = 5.0
-    reap_deadline = 5.0
-    memory_budget_bytes = 10 ** 15
-
-
-class TestMaxFacesHelp(unittest.TestCase):
-    def test_help_mentions_initial_pass_only(self):
-        with mock.patch('sys.stdout') as out:
-            with self.assertRaises(SystemExit):
-                batch_repair.main(['--help'])
-        printed = ''.join(c.args[0] for c in out.write.call_args_list
-                          if c.args and isinstance(c.args[0], str))
-        self.assertIn('INITIAL', printed)
-        self.assertIn('Per-part', printed)
+_BASE_CONFIG = RunConfig(
+    input='/in',
+    output='/out',
+    log_file='',
+    max_faces=0,
+    workers=2,
+    per_file_timeout=5.0,
+    reap_deadline=5.0,
+    memory_budget_bytes=10 ** 15)
 
 
 class TestSourceIdentity(unittest.TestCase):
@@ -94,7 +84,8 @@ class TestSourceIdentity(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def _fake_process(self, mesh, max_faces, part_steps=None, step_logger=None,
-                      source_name=''):
+                      source_name='', nested_process_group=False, *,
+                      skip_clean=False):
         # A trivial stand-in for `processor.process` that still drives the
         # step_logger once, so these tests exercise the real
         # `source_name`/`step_logger` plumbing in `_process_one_file`
@@ -302,6 +293,7 @@ class TestReportingWriteFailure(unittest.TestCase):
             parser.add_argument('--destination', required=True)
             parser.add_argument('--max-faces', required=True)
             parser.add_argument('--result-file', required=True)
+            parser.add_argument('--managed-child', action='store_true')
             args = parser.parse_args()
             result = {'path': args.one_file, 'category': 'published', 'indicator': 'PROCESS',
                      'stage': 'process', 'reason': 'ok', 'written_path': args.destination}
@@ -316,13 +308,15 @@ class TestReportingWriteFailure(unittest.TestCase):
                    Kind.BINARY_STL, 10, True)
 
     def make_args(self):
-        class Args:
-            max_faces = 0
-            workers = 1
-            per_file_timeout = 5.0
-            reap_deadline = 5.0
-            memory_budget_bytes = 10 ** 15
-        return Args()
+        config = RunConfig(
+            input='/in',
+            output='/out',
+            max_faces=0,
+            workers=1,
+            per_file_timeout=5.0,
+            reap_deadline=5.0,
+            memory_budget_bytes=10 ** 15)
+        return config
 
     def test_write_failure_leaves_job_unresolved_no_duplicate_report(self):
         mesh = self.mesh('a.stl')
@@ -387,6 +381,7 @@ class TestSigkillRetention(unittest.TestCase):
             parser.add_argument('--destination', required=True)
             parser.add_argument('--max-faces', required=True)
             parser.add_argument('--result-file', required=True)
+            parser.add_argument('--managed-child', action='store_true')
             args = parser.parse_args()
             name = os.path.basename(args.one_file)
             if name.startswith('slow_'):
@@ -402,8 +397,8 @@ class TestSigkillRetention(unittest.TestCase):
         helper = root / 'sigkill_helper.py'
         helper.write_text(
             'import sys, os\n'
-            f'sys.path.insert(0, {str(Path(batch_repair.__file__).resolve().parents[1])!r})\n'
-            'from tools import batch_repair\n'
+            f'sys.path.insert(0, {str(Path(batch_repair.__file__).resolve().parents[0])!r})\n'
+            'import batch_repair\n'
             'from libs import converter\n'
             'from libs.mesh_io import Kind, Mesh\n'
             '\n'
@@ -419,15 +414,8 @@ class TestSigkillRetention(unittest.TestCase):
             '               Kind.BINARY_STL, 10, True)\n'
             '          for n in ("a.stl", "b.stl", "slow_c.stl")]\n'
             '\n'
-            'class Args:\n'
-            '    input = INPUT_DIR\n'
-            '    output = OUTPUT_DIR\n'
-            '    log_file = None\n'
-            '    max_faces = 0\n'
-            '    workers = 1\n'
-            '    per_file_timeout = 300.0\n'
-            '    reap_deadline = 5.0\n'
-            '    memory_budget_bytes = 10 ** 15\n'
+            'from libs.runconfig import RunConfig\n'
+            'config = RunConfig(input=INPUT_DIR, output=OUTPUT_DIR, log_file="", max_faces=0, workers=1, per_file_timeout=300.0, reap_deadline=5.0, memory_budget_bytes=10 ** 15)\n'
             '\n'
             'def fake_prepare(source, destination, emit, **kwargs):\n'
             '    for m in meshes:\n'
@@ -436,8 +424,8 @@ class TestSigkillRetention(unittest.TestCase):
             'converter.prepare = fake_prepare\n'
             '\n'
             'orig_spawn = batch_repair._spawn_child\n'
-            'def fake_spawn(python, script, mesh, max_faces, result_file, log_file=None):\n'
-            '    return orig_spawn(sys.executable, FAKE_CHILD, mesh, max_faces, result_file, log_file)\n'
+            'def fake_spawn(python, script, mesh, max_faces, result_file, log_file=None, **kw):\n'
+            '    return orig_spawn(sys.executable, FAKE_CHILD, mesh, max_faces, result_file, log_file, **kw)\n'
             'batch_repair._spawn_child = fake_spawn\n'
             '\n'
             'orig_report = batch_repair._Runner._report\n'
@@ -453,7 +441,7 @@ class TestSigkillRetention(unittest.TestCase):
             '            f.write("ready")\n'
             'batch_repair._Runner._report = counting_report\n'
             '\n'
-            'batch_repair._run(Args())\n'
+            'batch_repair._run(config)\n'
         )
         proc = subprocess.Popen([sys.executable, str(helper)],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -497,6 +485,7 @@ class TestRealRunProgressLog(unittest.TestCase):
             parser.add_argument('--destination', required=True)
             parser.add_argument('--max-faces', required=True)
             parser.add_argument('--result-file', required=True)
+            parser.add_argument('--managed-child', action='store_true')
             args = parser.parse_args()
             result = {'path': args.one_file, 'category': 'published', 'indicator': 'PROCESS',
                      'stage': 'process', 'reason': 'fake ok', 'written_path': args.destination}
@@ -516,15 +505,15 @@ class TestRealRunProgressLog(unittest.TestCase):
         (self.root / 'in').mkdir(parents=True, exist_ok=True)
         Path(good_mesh.path).write_bytes(b'source')
 
-        class Args:
-            input = str(self.root / 'in')
-            output = str(self.root / 'out')
-            log_file = None
-            max_faces = 0
-            workers = 1
-            per_file_timeout = 5.0
-            reap_deadline = 5.0
-            memory_budget_bytes = 10 ** 15
+        config = RunConfig(
+            input=str(self.root / 'in'),
+            output=str(self.root / 'out'),
+            log_file='',
+            max_faces=0,
+            workers=1,
+            per_file_timeout=5.0,
+            reap_deadline=5.0,
+            memory_budget_bytes=10 ** 15)
 
         real_spawn = batch_repair._spawn_child
         with mock.patch.object(
@@ -533,12 +522,12 @@ class TestRealRunProgressLog(unittest.TestCase):
                                              converter.Summary())[1]), \
              mock.patch.object(
                 batch_repair, '_spawn_child',
-                side_effect=lambda python, s, m, mf, rf, lf=None:
-                    real_spawn(sys.executable, str(self.script), m, mf, rf, lf)):
+                side_effect=lambda python, s, m, mf, rf, lf=None, **kw:
+                    real_spawn(sys.executable, str(self.script), m, mf, rf, lf, **kw)):
             with mock.patch('builtins.print'):
-                code = batch_repair._run(Args())
+                code = batch_repair._run(config)
 
-        progress_path = Path(Args.output) / 'progress.log'
+        progress_path = Path(config.output) / 'progress.log'
         records = _read_records(progress_path)
         self.assertEqual(records[0]['kind'], 'run_start')
 
@@ -569,22 +558,22 @@ class TestRealRunProgressLog(unittest.TestCase):
         self.assertIn('left_in_queue', final)
 
     def test_intake_exception_produces_its_own_final_record(self):
-        class Args:
-            input = str(self.root / 'in')
-            output = str(self.root / 'out')
-            log_file = None
-            max_faces = 0
-            workers = 1
-            per_file_timeout = 5.0
-            reap_deadline = 5.0
-            memory_budget_bytes = 10 ** 15
-        os.makedirs(Args.input, exist_ok=True)
+        config = RunConfig(
+            input=str(self.root / 'in'),
+            output=str(self.root / 'out'),
+            log_file='',
+            max_faces=0,
+            workers=1,
+            per_file_timeout=5.0,
+            reap_deadline=5.0,
+            memory_budget_bytes=10 ** 15)
+        os.makedirs(config.input, exist_ok=True)
 
         with mock.patch.object(converter, 'prepare', side_effect=RuntimeError('boom')):
             with mock.patch('sys.stderr'):
-                code = batch_repair._run(Args())
+                code = batch_repair._run(config)
         self.assertEqual(code, 1)
-        progress_path = Path(Args.output) / 'progress.log'
+        progress_path = Path(config.output) / 'progress.log'
         records = _read_records(progress_path)
         final = [r for r in records if r['kind'] == 'final'][-1]
         self.assertIn('intake_exception', final)
@@ -605,7 +594,7 @@ class TestElapsedSeconds(unittest.TestCase):
     these are the tests that were missing."""
 
     def _runner(self):
-        return _Runner(_Args(), sys.executable, 'unused.py', {})
+        return _Runner(_BASE_CONFIG, sys.executable, 'unused.py', {})
 
     def test_launch_failure_gets_elapsed_seconds(self):
         """Drives the REAL production path — `handler`, not `_run_one`
@@ -644,7 +633,7 @@ class TestElapsedSeconds(unittest.TestCase):
 
         with mock.patch.object(runner, '_run_one', side_effect=RuntimeError('boom')), \
              mock.patch.object(runner.run_state, 'proc_for', return_value=_FakeProc()), \
-             mock.patch('tools.batch_repair.terminate_and_confirm', return_value=(True, 'ok')):
+             mock.patch('batch_repair.terminate_and_confirm', return_value=(True, 'ok')):
             with self.assertRaises(RuntimeError):
                 runner.handler((token, mesh))
         self.assertEqual(len(runner.results), 1)

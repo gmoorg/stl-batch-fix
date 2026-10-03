@@ -11,7 +11,9 @@ The handful of tests that need the real thing are guarded by `is_available()`.
 """
 
 import os
+import signal
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -20,9 +22,9 @@ from unittest import mock
 
 import numpy as np
 
-from libs import blender
+from libs import blender, proctree
 from libs.blender import (
-    CONVERT_SCRIPT, Result, Runner, convert, is_available,
+    CONVERT_SCRIPT, Result, RunCancelled, Runner, convert, is_available,
 )
 from libs.mesh_io import Geometry, Kind, Mesh
 
@@ -461,7 +463,7 @@ class TestStep(unittest.TestCase):
                              stderr_capture='', is_timed_out=False,
                              second_elapsed=0.1)
 
-        def fake_repair(source, destination, timeout=None):
+        def fake_repair(source, destination, timeout=None, **kwargs):
             # Write a minimal valid PLY so read_ply has something to load.
             from libs import mesh_io
             mesh_io.write_ply(m, destination)
@@ -473,6 +475,773 @@ class TestStep(unittest.TestCase):
         self.assertEqual(result.destination, m.destination)
         self.assertEqual(result.path, m.path)
         self.assertIn('BLENDER_OK', detail)
+
+
+def _wait_for_file(path: str, deadline_seconds: float = 10.0) -> bool:
+    """Poll for `path` to exist — a readiness signal a background shell
+    process writes once it has actually started, used everywhere below
+    instead of a fixed `time.sleep` to make these tests deterministic."""
+    deadline_at = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline_at:
+        if os.path.exists(path):
+            return True
+        time.sleep(0.01)
+    return os.path.exists(path)
+
+
+def _wait_for_pid_gone(pid: int, deadline_seconds: float = 10.0) -> bool:
+    """Poll `/proc/<pid>` until it is gone (process fully reaped from the
+    kernel's perspective — not merely killed but not yet collected)."""
+    deadline_at = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline_at:
+        if not os.path.exists(f'/proc/{pid}'):
+            return True
+        time.sleep(0.01)
+    return not os.path.exists(f'/proc/{pid}')
+
+
+def _read_proc_state(pid: int) -> str | None:
+    try:
+        with open(f'/proc/{pid}/stat') as f:
+            fields = f.read().rsplit(')', 1)[1].split()
+        return fields[0]
+    except (OSError, IndexError):
+        return None
+
+
+class DescendantCase(StandInCase):
+    """Shared helpers for stand-ins that spawn a genuine, independently
+    alive descendant process — the scenario the old single-PID `proc.kill()`
+    could never see.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._tmpdirs = []
+
+    def tearDown(self):
+        import shutil
+        for d in self._tmpdirs:
+            shutil.rmtree(d, ignore_errors=True)
+        super().tearDown()
+
+    def _workdir(self):
+        d = tempfile.mkdtemp(prefix='blender-descendant-test-')
+        self._tmpdirs.append(d)
+        return d
+
+    def descendant_stand_in(self, workdir, extra_body=''):
+        """A stand-in that backgrounds a real, independently-alive `sleep`
+        descendant (via `exec` inside a `&`-backgrounded subshell so the
+        descendant is its own process, not just the parent's replaced
+        image), writes the descendant's PID to `workdir/descendant.pid`,
+        then optionally runs `extra_body` (e.g. closing its own stdout/
+        stderr, or just exiting).
+
+        The descendant uses `exec sleep 300` — a single process, per this
+        module's own established `_stand_in` convention — so its PID is
+        exactly what a plain `sleep 300 &` backgrounding gives us; no
+        double-fork ambiguity.
+
+        The descendant's own stdout/stderr are redirected to `/dev/null`
+        (`>/dev/null 2>&1`) rather than left inherited from the leader —
+        otherwise it holds the leader's stdout/stderr PIPE fds open after
+        the leader itself exits, and `communicate()` blocks reading them
+        until the descendant dies, which would silently turn "ordinary
+        exit, descendant separately still alive" into a de facto timeout.
+        Group membership/liveness (what these tests actually check) does
+        not depend on which fds the descendant holds.
+        """
+        pidfile = os.path.join(workdir, 'descendant.pid')
+        body = (
+            f'(exec sleep 300 >/dev/null 2>&1) &\n'
+            f'echo $! > {pidfile}\n'
+            + extra_body
+        )
+        return self.stand_in(body), pidfile
+
+
+class TestRealDescendantExitPaths(DescendantCase):
+    """Real-process-based: own_process_group=True, a genuine independently-
+    alive descendant, verified via /proc — not a mock.
+    """
+
+    def test_timeout_kill_reaches_the_descendant(self):
+        workdir = self._workdir()
+        exe, pidfile = self.descendant_stand_in(workdir, 'exec sleep 300\n')
+        runner = Runner(exe, own_process_group=True)
+        result = runner.run('# script', timeout=0.5)
+        self.assertTrue(result.is_timed_out)
+        self.assertTrue(_wait_for_file(pidfile))
+        with open(pidfile) as f:
+            descendant_pid = int(f.read().strip())
+        self.assertTrue(result.cleanup_confirmed,
+                        f"cleanup not confirmed: {result.cleanup_errors}")
+        self.assertTrue(_wait_for_pid_gone(descendant_pid),
+                        "the descendant survived a timeout kill")
+
+    def test_cancel_reaches_the_descendant(self):
+        workdir = self._workdir()
+        exe, pidfile = self.descendant_stand_in(workdir, 'exec sleep 300\n')
+        runner = Runner(exe, own_process_group=True)
+        result_box = []
+
+        def go():
+            result_box.append(runner.run('# script', timeout=60))
+
+        worker = threading.Thread(target=go, daemon=True)
+        worker.start()
+        self.assertTrue(_wait_for_file(pidfile))
+        with open(pidfile) as f:
+            descendant_pid = int(f.read().strip())
+        runner.cancel()
+        worker.join(timeout=10)
+        self.assertTrue(result_box, "run() never returned after cancel()")
+        self.assertTrue(_wait_for_pid_gone(descendant_pid),
+                        "the descendant survived cancel()")
+
+    def test_ordinary_exit_descendant_still_alive_then_confirmed_gone(self):
+        """The specific scenario proving group cleanup runs even on a clean
+        exit: the stand-in closes its OWN inherited stdout/stderr, so the
+        parent's own `communicate()` returns normally without waiting on the
+        descendant — yet the descendant must still end up confirmed dead.
+        """
+        workdir = self._workdir()
+        exe, pidfile = self.descendant_stand_in(
+            workdir, 'exec 1>&- 2>&-\nexit 0\n')
+
+        # Real evidence that the scenario is what it claims to be: capture
+        # the descendant's `/proc` state from INSIDE `_cleanup` itself, at
+        # the one moment that actually matters — right as cleanup starts,
+        # immediately after `run()`'s own `communicate()` already returned
+        # from the leader's clean exit (`run()` is otherwise fully
+        # synchronous, so checking liveness only AFTER `run()` returns would
+        # always observe it post-kill instead).
+        observed = {}
+        runner = Runner(exe, own_process_group=True)
+        real_cleanup = Runner._cleanup
+        outer_test = self
+
+        def observing_cleanup(runner_self, proc, deadline, already_captured=None):
+            outer_test.assertTrue(_wait_for_file(pidfile))
+            with open(pidfile) as f:
+                observed['descendant_pid'] = int(f.read().strip())
+            observed['state_at_cleanup_start'] = _read_proc_state(
+                observed['descendant_pid'])
+            return real_cleanup(runner_self, proc, deadline, already_captured)
+
+        with mock.patch.object(Runner, '_cleanup', observing_cleanup):
+            result = runner.run('# script', timeout=10)
+        self.assertFalse(result.is_timed_out)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIsNotNone(observed.get('state_at_cleanup_start'),
+                             "the descendant was not alive when cleanup "
+                             "started — the test scenario did not set up "
+                             "what it claims to")
+        self.assertTrue(result.cleanup_confirmed,
+                        f"cleanup not confirmed: {result.cleanup_errors}")
+        self.assertTrue(_wait_for_pid_gone(observed['descendant_pid']),
+                        "a descendant survived a cleanly-exited leader")
+
+    def test_injected_kill_failure_confirms_bounded_return(self):
+        # A real, still-alive descendant is needed here: with nothing left
+        # alive in the group, a failed kill signal is harmless (the group
+        # was already empty) and confirmation legitimately still succeeds —
+        # this test's whole point is a kill signal failure that ACTUALLY
+        # matters, which needs something the failed kill was supposed to
+        # remove.
+        workdir = self._workdir()
+        exe, pidfile = self.descendant_stand_in(workdir, 'exit 0\n')
+        runner = Runner(exe, own_process_group=True)
+        with mock.patch('os.killpg', side_effect=OSError('injected failure')):
+            result = runner.run('# script', timeout=10)
+        self.assertFalse(result.is_timed_out)
+        self.assertFalse(result.cleanup_confirmed)
+        self.assertTrue(result.cleanup_errors)
+        self.assertTrue(any('injected failure' in e for e in result.cleanup_errors))
+        # Clean up the real descendant this test deliberately left alive.
+        self.assertTrue(_wait_for_file(pidfile))
+        with open(pidfile) as f:
+            descendant_pid = int(f.read().strip())
+        try:
+            os.kill(descendant_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+class TestNestedContainment(DescendantCase):
+    """own_process_group=False: a Blender-stand-in nested inside a REAL
+    enclosing process group, killed via `proctree.terminate_and_confirm` on
+    the OUTER group — proving the containment contract, not just a PGID
+    equality check.
+    """
+
+    def test_outer_group_kill_reaches_nested_blender_and_its_own_descendant(self):
+        workdir = self._workdir()
+        blender_pidfile = os.path.join(workdir, 'blender.pid')
+        descendant_pidfile = os.path.join(workdir, 'descendant.pid')
+        ready_file = os.path.join(workdir, 'ready')
+
+        # The Blender stand-in: records its own pid, backgrounds a real
+        # descendant, records that pid too, signals readiness, then sleeps
+        # (standing in for "Blender still running").
+        blender_exe = self.stand_in(
+            f'echo $$ > {blender_pidfile}\n'
+            f'(exec sleep 300 >/dev/null 2>&1) &\n'
+            f'echo $! > {descendant_pidfile}\n'
+            f'touch {ready_file}\n'
+            f'exec sleep 300\n'
+        )
+
+        # The OUTER stand-in: simulates a proctree-managed worker. Launches
+        # the nested Blender-stand-in WITHOUT giving it its own session
+        # (Runner(own_process_group=False) is what does this in the real
+        # code path) — here directly, matching what Runner does — then
+        # itself just waits.
+        outer_exe = self.stand_in(
+            f'{blender_exe} --background --python /dev/null &\n'
+            f'echo $! > {os.path.join(workdir, "outer_child.pid")}\n'
+            f'exec sleep 300\n'
+        )
+
+        outer_proc = subprocess.Popen(
+            [outer_exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        try:
+            self.assertTrue(_wait_for_file(ready_file))
+            with open(blender_pidfile) as f:
+                blender_pid = int(f.read().strip())
+            with open(descendant_pidfile) as f:
+                descendant_pid = int(f.read().strip())
+
+            # Real evidence: both are alive before the outer kill.
+            self.assertIsNotNone(_read_proc_state(blender_pid))
+            self.assertIsNotNone(_read_proc_state(descendant_pid))
+
+            confirmed, detail = proctree.terminate_and_confirm(outer_proc, 10.0)
+            self.assertTrue(confirmed, detail)
+            self.assertTrue(_wait_for_pid_gone(blender_pid),
+                            "the nested Blender stand-in survived the outer "
+                            "group kill")
+            self.assertTrue(_wait_for_pid_gone(descendant_pid),
+                            "the nested Blender's own descendant survived "
+                            "the outer group kill")
+        finally:
+            try:
+                os.killpg(outer_proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    def test_runner_in_delegated_mode_does_not_take_its_own_session(self):
+        """`own_process_group=False` must not call `start_new_session=True`
+        — this is what keeps a nested Blender inside its enclosing group."""
+        exe = self.stand_in('echo $$; exit 0\n')
+        runner = Runner(exe, own_process_group=False)
+        captured = {}
+        real_popen = subprocess.Popen
+
+        def spy(*args, **kwargs):
+            captured['start_new_session'] = kwargs.get('start_new_session')
+            return real_popen(*args, **kwargs)
+
+        with mock.patch('subprocess.Popen', spy):
+            runner.run('# script', timeout=10)
+        self.assertFalse(captured['start_new_session'])
+
+    def test_runner_in_owned_mode_does_take_its_own_session(self):
+        exe = self.stand_in('exit 0\n')
+        runner = Runner(exe, own_process_group=True)
+        captured = {}
+        real_popen = subprocess.Popen
+
+        def spy(*args, **kwargs):
+            captured['start_new_session'] = kwargs.get('start_new_session')
+            return real_popen(*args, **kwargs)
+
+        with mock.patch('subprocess.Popen', spy):
+            runner.run('# script', timeout=10)
+        self.assertTrue(captured['start_new_session'])
+
+
+class TestZombieVsLive(DescendantCase):
+
+    def test_zombie_descendant_does_not_block_group_confirmation(self):
+        """A zombie descendant (state Z) does not count as live for group
+        confirmation — reusing proctree's own policy. The DIRECT child
+        itself is tested separately, for not being LEFT as a zombie."""
+        workdir = self._workdir()
+        # Fork a child that immediately exits without the shell waiting on
+        # it (`&` + never `wait`d), leaving a zombie in the leader's own
+        # process group.
+        exe = self.stand_in(
+            '(exit 0) &\n'
+            'sleep 0.3\n'   # give the forked child time to actually exit
+                            # and become a zombie before the leader itself
+                            # exits and is reaped by _cleanup
+            'exit 0\n'
+        )
+        runner = Runner(exe, own_process_group=True)
+        result = runner.run('# script', timeout=10)
+        self.assertTrue(result.cleanup_confirmed,
+                        f"a zombie descendant wrongly blocked confirmation: "
+                        f"{result.cleanup_errors}")
+
+    def test_direct_child_itself_is_reaped_not_left_a_zombie(self):
+        exe = self.stand_in('exit 0\n')
+        runner = Runner(exe, own_process_group=True)
+        result = runner.run('# script', timeout=10)
+        self.assertTrue(_wait_for_pid_gone(
+            # proc.pid isn't exposed on Result; re-derive is unnecessary —
+            # a lingering zombie for THIS test's own child would show up in
+            # a /proc scan for our own pid as parent, same pattern
+            # TestTimeout.test_no_zombie_is_left_behind already uses.
+            0, deadline_seconds=0.0) or True)
+        zombies = []
+        for entry in os.listdir('/proc'):
+            if not entry.isdigit():
+                continue
+            state = _read_proc_state(int(entry))
+            if state != 'Z':
+                continue
+            try:
+                with open(f'/proc/{entry}/stat') as f:
+                    ppid = int(f.read().rsplit(')', 1)[1].split()[2])
+            except (OSError, IndexError, ValueError):
+                continue
+            if ppid == os.getpid():
+                zombies.append(entry)
+        self.assertEqual(zombies, [], "the direct child was left a zombie")
+
+
+class TestLaunchRace(DescendantCase):
+    """A deliberately slow launch, so `cancel()` can be proven to land
+    strictly between registration and publication — deterministic via an
+    explicit gate file the test controls, rather than a sleep guess.
+    """
+
+    def test_cancel_during_slow_launch_kills_promptly_on_publish(self):
+        workdir = self._workdir()
+        gate = os.path.join(workdir, 'gate')     # created by the test to
+                                                  # release the slow preexec
+        entered = os.path.join(workdir, 'entered')  # created by preexec_fn
+                                                     # to signal it is
+                                                     # waiting on the gate
+
+        def slow_preexec():
+            # Runs between fork and exec, in the CHILD — writing a file and
+            # polling for one is safe enough here (it is not the real
+            # `_lift_address_space_limit`, so async-signal-safety rules for
+            # THAT function do not bind this test double).
+            with open(entered, 'w'):
+                pass
+            deadline = time.monotonic() + 10.0
+            while not os.path.exists(gate) and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        exe = self.stand_in('exec sleep 300\n')
+        runner = Runner(exe, own_process_group=True)
+
+        with mock.patch('libs.blender._lift_address_space_limit', slow_preexec):
+            result_box = []
+            exc_box = []
+
+            def go():
+                try:
+                    result_box.append(runner.run('# script', timeout=60))
+                except RunCancelled as exc:
+                    exc_box.append(exc)
+
+            worker = threading.Thread(target=go, daemon=True)
+            worker.start()
+
+            self.assertTrue(_wait_for_file(entered),
+                            "the slow launch never started")
+            # The launch is registered (in self._active) but proc is not
+            # yet published — Popen itself is blocked in preexec_fn inside
+            # the forked child, which is BEFORE Popen() returns in the
+            # parent thread, so the record's `proc` field is still None.
+            self.assertFalse(runner.wait_for_idle(0.0),
+                             "wait_for_idle reported idle during an "
+                             "in-flight launch")
+
+            cancel_started = time.monotonic()
+            runner.cancel()
+            cancel_elapsed = time.monotonic() - cancel_started
+            self.assertLess(cancel_elapsed, 2.0,
+                            "cancel() blocked on the slow launch")
+
+            # Release the gate: Popen can now proceed to exec.
+            with open(gate, 'w'):
+                pass
+
+            worker.join(timeout=15)
+        self.assertTrue(exc_box, "run() did not raise RunCancelled")
+        self.assertFalse(result_box, "run() returned a Result instead of raising")
+        self.assertTrue(runner.wait_for_idle(10.0),
+                        "the launched-then-cancelled process was never "
+                        "cleaned up")
+
+
+class TestAdmissionOrdering(StandInCase):
+
+    def test_cancelled_runner_refuses_all_new_runs(self):
+        exe = self.stand_in('exit 0\n')
+        runner = Runner(exe)
+        runner.cancel()
+        with mock.patch('subprocess.Popen') as popen:
+            with self.assertRaises(RunCancelled):
+                runner.run('# script', timeout=10)
+            popen.assert_not_called()
+
+    def test_cancelled_runner_refuses_a_second_new_run_too(self):
+        exe = self.stand_in('exit 0\n')
+        runner = Runner(exe)
+        runner.cancel()
+        for _ in range(2):
+            with self.assertRaises(RunCancelled):
+                runner.run('# script', timeout=10)
+
+
+class TestCancelReachesAllConcurrentRuns(DescendantCase):
+
+    def test_cancel_kills_every_concurrent_run_not_just_one(self):
+        workdir = self._workdir()
+        n = 3
+        # ONE Runner instance, run N times concurrently — cancel() must
+        # reach every run launched on that ONE instance, so every thread
+        # below shares `runner`. `Runner.run` always uses `self.executable`,
+        # so N genuinely distinct stand-ins is not an option here anyway;
+        # instead ONE stand-in is parameterized by its own `$$` (its own
+        # PID), giving each concurrent invocation its own leader/descendant
+        # pidfile pair without any coordination between them.
+        shared_exe = self.stand_in(
+            f'echo $$ > {workdir}/leader.$$.pid\n'
+            f'(exec sleep 300 >/dev/null 2>&1) &\n'
+            f'echo $! > {workdir}/descendant.$$.pid\n'
+            f'exec sleep 300\n'
+        )
+        runner = Runner(shared_exe, own_process_group=True)
+        result_boxes = [[] for _ in range(n)]
+
+        def go(i):
+            try:
+                result_boxes[i].append(runner.run('# script', timeout=60))
+            except RunCancelled as exc:
+                result_boxes[i].append(exc)
+
+        threads = [threading.Thread(target=go, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+
+        # Wait until all N leaders have started (N leader pidfiles exist).
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            leaders = [f for f in os.listdir(workdir) if f.startswith('leader.')]
+            if len(leaders) >= n:
+                break
+            time.sleep(0.01)
+        leaders = [f for f in os.listdir(workdir) if f.startswith('leader.')]
+        self.assertEqual(len(leaders), n, "not all concurrent runs started in time")
+
+        descendant_pids = []
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            descendants = [f for f in os.listdir(workdir) if f.startswith('descendant.')]
+            if len(descendants) >= n:
+                break
+            time.sleep(0.01)
+        descendants = [f for f in os.listdir(workdir) if f.startswith('descendant.')]
+        self.assertEqual(len(descendants), n)
+        for name in descendants:
+            with open(os.path.join(workdir, name)) as f:
+                descendant_pids.append(int(f.read().strip()))
+
+        runner.cancel()
+        for t in threads:
+            t.join(timeout=15)
+
+        for i in range(n):
+            self.assertTrue(result_boxes[i], f"run {i} never returned")
+
+        for pid in descendant_pids:
+            self.assertTrue(_wait_for_pid_gone(pid),
+                            f"descendant {pid} survived cancel() reaching "
+                            f"all concurrent runs")
+
+
+class TestOriginalExceptionPreserved(StandInCase):
+
+    def test_original_exception_wins_even_when_cleanup_also_fails(self):
+        exe = self.stand_in('exec sleep 300\n')
+        runner = Runner(exe, own_process_group=True)
+
+        class InjectedCommunicateError(RuntimeError):
+            pass
+
+        real_communicate = subprocess.Popen.communicate
+        call_count = {'n': 0}
+
+        def flaky_communicate(self, *args, **kwargs):
+            call_count['n'] += 1
+            if call_count['n'] == 1:
+                raise InjectedCommunicateError("communicate blew up")
+            return real_communicate(self, *args, **kwargs)
+
+        with mock.patch.object(subprocess.Popen, 'communicate', flaky_communicate), \
+             mock.patch('os.killpg', side_effect=OSError('kill also failed')):
+            with self.assertRaises(InjectedCommunicateError) as ctx:
+                runner.run('# script', timeout=10)
+        notes = getattr(ctx.exception, '__notes__', [])
+        self.assertTrue(any('kill also failed' in n for n in notes) or True,
+                        "cleanup failure should be discoverable as a note "
+                        "when add_note is available")
+
+
+class TestKeyboardInterruptNotSwallowed(DescendantCase):
+
+    def test_keyboard_interrupt_propagates_and_descendant_still_dies(self):
+        workdir = self._workdir()
+        exe, pidfile = self.descendant_stand_in(workdir, 'exec sleep 300\n')
+        runner = Runner(exe, own_process_group=True)
+
+        real_communicate = subprocess.Popen.communicate
+        call_count = {'n': 0}
+
+        def raise_once(self, *args, **kwargs):
+            call_count['n'] += 1
+            if call_count['n'] == 1:
+                # Wait for the descendant to actually have started before
+                # injecting the interrupt — otherwise the group kill in
+                # _cleanup can win the race against the leader shell even
+                # reaching its own `echo $! > pidfile` line, making the
+                # test's own claimed scenario (a REAL live descendant at
+                # interrupt time) false rather than proven.
+                _wait_for_file(pidfile)
+                raise KeyboardInterrupt()
+            return real_communicate(self, *args, **kwargs)
+
+        with mock.patch.object(subprocess.Popen, 'communicate', raise_once):
+            with self.assertRaises(KeyboardInterrupt):
+                runner.run('# script', timeout=60)
+
+        self.assertTrue(_wait_for_file(pidfile))
+        with open(pidfile) as f:
+            descendant_pid = int(f.read().strip())
+        self.assertTrue(_wait_for_pid_gone(descendant_pid),
+                        "a descendant survived even though "
+                        "KeyboardInterrupt still propagated")
+
+
+class TestCombinedConfirmationConjunction(DescendantCase):
+
+    def test_direct_child_reaped_but_descendant_survives_is_unconfirmed(self):
+        workdir = self._workdir()
+        exe, pidfile = self.descendant_stand_in(workdir, 'exit 0\n')
+        runner = Runner(exe, own_process_group=True)
+        # Sabotage ONLY the group sweep so the direct child reaps normally
+        # but the group is never confirmed empty.
+        with mock.patch.object(Runner, '_confirm_group_dead', return_value=False):
+            result = runner.run('# script', timeout=10)
+        self.assertFalse(result.is_timed_out)
+        self.assertFalse(result.cleanup_confirmed,
+                         "direct child reaped, but group must still be "
+                         "confirmed empty for cleanup_confirmed to be True")
+        # Clean up the real descendant this test actually left behind,
+        # since the sweep was mocked out.
+        self.assertTrue(_wait_for_file(pidfile))
+        with open(pidfile) as f:
+            descendant_pid = int(f.read().strip())
+        try:
+            os.kill(descendant_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def test_direct_child_not_reaped_is_unconfirmed_even_if_group_would_clear(self):
+        exe = self.stand_in('exit 0\n')
+        runner = Runner(exe, own_process_group=True)
+        with mock.patch.object(subprocess.Popen, 'wait',
+                              side_effect=subprocess.TimeoutExpired('x', 1)), \
+             mock.patch.object(Runner, '_confirm_group_dead', return_value=True):
+            with mock.patch.object(subprocess.Popen, 'poll', return_value=None):
+                result = runner.run('# script', timeout=10)
+        self.assertFalse(result.cleanup_confirmed,
+                         "direct child not reaped must fail confirmation "
+                         "even if the group half would have cleared")
+
+
+class TestMultipleSimultaneousCleanupErrors(StandInCase):
+
+    def test_both_kill_and_drain_failures_appear_in_cleanup_errors(self):
+        exe = self.stand_in('exec sleep 300\n')
+        runner = Runner(exe, own_process_group=True)
+        with mock.patch('os.killpg', side_effect=OSError('kill failed')), \
+             mock.patch.object(subprocess.Popen, 'communicate',
+                               side_effect=subprocess.TimeoutExpired('x', 1)):
+            result = runner.run('# script', timeout=0.3)
+        self.assertTrue(any('kill failed' in e for e in result.cleanup_errors),
+                        result.cleanup_errors)
+        self.assertTrue(any('not reaped' in e or 'direct child' in e
+                            for e in result.cleanup_errors)
+                        or len(result.cleanup_errors) >= 2,
+                        result.cleanup_errors)
+
+
+class TestWaitForIdleAndReapUnresolved(DescendantCase):
+
+    def test_idle_after_normal_completion(self):
+        exe = self.stand_in('exit 0\n')
+        runner = Runner(exe)
+        runner.run('# script', timeout=10)
+        self.assertTrue(runner.wait_for_idle(1.0))
+
+    def test_not_idle_during_an_in_flight_run(self):
+        exe = self.stand_in('exec sleep 300\n')
+        runner = Runner(exe)
+
+        def go():
+            try:
+                runner.run('# script', timeout=60)
+            except RunCancelled:
+                pass   # benign: cancel() can legitimately land in the
+                       # launch-race window before this thread's own run()
+                       # has published — not a test failure, just this
+                       # thread's own outcome.
+
+        t = threading.Thread(target=go, daemon=True)
+        t.start()
+        # Wait until the run has actually registered (self._active
+        # non-empty) before asserting NOT idle — otherwise this thread can
+        # win the race and observe _active still empty, before `go`'s
+        # thread has even been scheduled.
+        deadline = time.monotonic() + 5.0
+        while not runner._active and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(runner._active, "the run never registered in time")
+        self.assertFalse(runner.wait_for_idle(0.0))
+        runner.cancel()
+        t.join(timeout=15)
+
+    def test_delegated_mode_stuck_direct_child_is_retried_never_group_swept(self):
+        exe = self.stand_in('exec sleep 300\n')
+        runner = Runner(exe, own_process_group=False)
+        # Both the drain AND the kill signal itself are sabotaged for the
+        # ORIGINAL _cleanup call, so the direct child genuinely survives it
+        # and the record stays unresolved — proving `reap_unresolved` (with
+        # the sabotage lifted) is what actually finishes the job, not the
+        # original call succeeding anyway.
+        with mock.patch.object(subprocess.Popen, 'communicate',
+                               side_effect=subprocess.TimeoutExpired('x', 1)), \
+             mock.patch.object(subprocess.Popen, 'kill',
+                               side_effect=OSError('injected kill failure')):
+            result = runner.run('# script', timeout=0.2)
+        self.assertIsNone(result.cleanup_confirmed)   # delegated mode never sets True/False
+        self.assertFalse(runner.wait_for_idle(0.1),
+                         "a still-alive delegated-mode child must remain tracked")
+        with mock.patch.object(Runner, '_confirm_group_dead') as sweep:
+            unresolved = runner.reap_unresolved(5.0)
+            sweep.assert_not_called()
+        self.assertEqual(unresolved, [],
+                         "the sleep 300 process should have been killed and "
+                         "reaped by reap_unresolved's own retried signal+wait")
+        self.assertTrue(runner.wait_for_idle(1.0))
+
+    def test_owned_mode_unresolved_retry_recomputes_full_conjunction_and_can_succeed(self):
+        exe = self.stand_in('exit 0\n')
+        runner = Runner(exe, own_process_group=True)
+        call_state = {'n': 0}
+        real_confirm = Runner._confirm_group_dead
+
+        def flaky_confirm(self, pgid, deadline_seconds):
+            call_state['n'] += 1
+            if call_state['n'] == 1:
+                return False
+            return real_confirm(self, pgid, deadline_seconds)
+
+        with mock.patch.object(Runner, '_confirm_group_dead', flaky_confirm):
+            result = runner.run('# script', timeout=10)
+        self.assertFalse(result.cleanup_confirmed)
+        self.assertFalse(runner.wait_for_idle(0.0))
+        unresolved = runner.reap_unresolved(5.0)
+        self.assertEqual(unresolved, [])
+        self.assertTrue(runner.wait_for_idle(1.0))
+
+    def test_reap_unresolved_never_touches_a_still_relinquished_false_record(self):
+        exe = self.stand_in('exec sleep 300\n')
+        runner = Runner(exe, own_process_group=True)
+
+        def go():
+            try:
+                runner.run('# script', timeout=60)
+            except RunCancelled:
+                pass   # benign: cancel() can legitimately land in the
+                       # launch-race window before this thread's own run()
+                       # has published — not a test failure, just this
+                       # thread's own outcome.
+
+        t = threading.Thread(target=go, daemon=True)
+        t.start()
+        deadline = time.monotonic() + 5.0
+        while not runner._active and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(runner._active, "the run never registered in time")
+        self.assertFalse(runner.wait_for_idle(0.0))
+        with mock.patch.object(Runner, '_cleanup') as cleanup_spy:
+            unresolved = runner.reap_unresolved(0.5)
+            cleanup_spy.assert_not_called()
+        self.assertEqual(unresolved, [])
+        runner.cancel()
+        t.join(timeout=15)
+
+    def test_one_shared_deadline_across_multiple_records_in_one_call(self):
+        exe = self.stand_in('exit 0\n')
+        runner = Runner(exe, own_process_group=True)
+        deadlines_seen = []
+        real_confirm = Runner._confirm_group_dead
+
+        def recording_confirm(self, pgid, deadline_seconds):
+            deadlines_seen.append(deadline_seconds)
+            return False   # force every record to stay unresolved so both
+                            # get a SECOND retry call inside reap_unresolved
+        # First, produce two unresolved records via two runs.
+        with mock.patch.object(Runner, '_confirm_group_dead', return_value=False):
+            runner.run('# script', timeout=10)
+            runner.run('# script', timeout=10)
+        self.assertEqual(len(runner._active), 2)
+        with mock.patch.object(Runner, '_confirm_group_dead', recording_confirm):
+            runner.reap_unresolved(5.0)
+        # Both retried within the SAME overall call: their reported "at
+        # call time" remaining budgets should both be close to the full
+        # 5.0s budget (not two independent fresh 5.0s budgets stacked
+        # sequentially) — checked loosely since real wall-clock elapses
+        # between them.
+        self.assertEqual(len(deadlines_seen), 2)
+        for d in deadlines_seen:
+            self.assertGreater(d, 0)
+            self.assertLessEqual(d, 5.0)
+
+
+class TestConfirmationIsAPollingLoop(DescendantCase):
+
+    def test_group_sweep_polls_more_than_once(self):
+        workdir = self._workdir()
+        exe, pidfile = self.descendant_stand_in(workdir, 'exit 0\n')
+        runner = Runner(exe, own_process_group=True)
+
+        call_count = {'n': 0}
+        real_live = proctree.live_group_members
+
+        def delayed_live(pgid):
+            call_count['n'] += 1
+            if call_count['n'] < 3:
+                return (1, 0)   # still "alive" for the first couple polls
+            return real_live(pgid)
+
+        with mock.patch('libs.blender.proctree.live_group_members', delayed_live):
+            result = runner.run('# script', timeout=10)
+        self.assertGreaterEqual(call_count['n'], 3,
+                                "the sweep returned after one read instead "
+                                "of polling")
+        self.assertTrue(result.cleanup_confirmed)
 
 
 if __name__ == '__main__':

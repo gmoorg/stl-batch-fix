@@ -136,7 +136,8 @@ def is_already_clean(mesh: Mesh) -> bool:
 
     Stateless: takes only the mesh, reads nothing from `pipeconfig` or any
     other module-level state, so whether/how this gates `repair()` is a
-    single call site's decision, not something spread across flags.
+    single call site's decision, not something spread across flags. It is
+    called from `repair()` when its opt-in `skip_clean` argument is set.
 
     `Scan.is_clean` (`open_edges == 0 and non_manifold == 0`) is NOT
     sufficient by itself — a mesh can score `is_clean` while having
@@ -170,6 +171,9 @@ def repair(mesh: Mesh,
            part_steps: tuple[tuple[str, Callable[..., tuple[bool, Mesh, str]]], ...] | None = None,
            step_logger: StepLogger = steplog.null_logger,
            source_name: str = '',
+           nested_process_group: bool = False,
+           *,
+           skip_clean: bool = False,
            ) -> Result:
     """Split, wrap each part, and merge; no file is written.
 
@@ -197,6 +201,23 @@ def repair(mesh: Mesh,
     contract — so an incremental record survives even a crash partway
     through. `source_name` identifies which file's steps these are, for a
     caller sharing one log across several files/processes.
+
+    `nested_process_group` is a caller-known fact (matching `min_shell_faces`'s
+    own style — supplied by the caller, not measured per mesh), threaded into
+    every part's own `StepConfig` so `blender.step_blender_repair`, if it
+    appears in `part_steps`, knows whether to give its Blender invocation its
+    own process session. See `pipeconfig.StepConfig.nested_process_group`.
+
+    `skip_clean` turns on the `is_already_clean` gate, off by default because
+    the gate is not yet validated on real models (docs/refactor/TODO.md). It
+    checks twice. First the whole mesh after `WHOLE_MESH_STEPS`: if clean,
+    split, part steps and merge are skipped — the result is still measured
+    like any repair. Otherwise each part retained by the split (shell-floor
+    filtering still applies): a clean one is merged as is, bypassing the part
+    sequence whether it is the default or a caller's own `part_steps`. Each
+    verdict is logged as a 'clean_gate' info line. A consistently wound but
+    globally inverted or self-intersecting mesh passes the gate — see
+    `is_already_clean`.
     """
     require_geometry(mesh)
 
@@ -238,6 +259,14 @@ def repair(mesh: Mesh,
             return _failed(mesh, whole_outcome.detail, tuple(steps),
                            faces_in, volume_in, time.monotonic() - started)
 
+        # Model gate (opt-in via `skip_clean`): a mesh that is already clean after whole-mesh
+        # preparation skips split, part steps and merge entirely. It still
+        # gets the same closing measurements as a repaired mesh, so the
+        # caller's judge sees real numbers, not an assumed success.
+        if skip_clean and _gate_says_clean(mesh, step_logger, source_name, '-'):
+            return _closing_result(mesh, before, steps, faces_in, volume_in,
+                                   1, started, step_logger, source_name)
+
         with steplog.timed_info(step_logger, source_name, 'scan_diagonal') as report:
             whole_model_diag = scanner.diagonal(mesh)
             report(f'{whole_model_diag}')
@@ -265,8 +294,15 @@ def repair(mesh: Mesh,
             # `StepConfig.faceCount`.
             target_faces = len(part.geometry.faces)
             part_config = pipeconfig.StepConfig(
-                faceCount=target_faces, whole_model_diag=whole_model_diag)
+                faceCount=target_faces, whole_model_diag=whole_model_diag,
+                nested_process_group=nested_process_group)
             part_id = f'{index + 1}/{len(parts)}'
+
+            # Part gate (same `skip_clean` switch): a part that is already clean is merged
+            # as split, bypassing the part sequence — default or custom.
+            if skip_clean and _gate_says_clean(part, step_logger, source_name, part_id):
+                repaired.append(part)
+                continue
 
             outcome = execstep.run_sequence(
                 resolved_part_entries, part, part_config, steps,
@@ -295,33 +331,55 @@ def repair(mesh: Mesh,
         if merge_outcome.record_error is not None:
             raise merge_outcome.record_error
 
-        # A tool can hand back geometry that is not measurable — PyMeshFix,
-        # PyMeshLab and Blender all return arrays this module did not build.
-        # Checked before the closing measurements rather than after, because
-        # `_count_lost` feeds those arrays to cKDTree, which raises on
-        # non-finite input; that raise used to happen below this block and so
-        # escaped `repair` entirely, past every verdict the pipeline makes.
-        if not np.isfinite(mesh.geometry.verts).all():
-            raise ValueError(
-                "the repaired mesh has NaN or infinite coordinates")
-
-        # Inside the guard: these are measurements of tool output, and a
-        # measurement that fails is a failed repair, not an exception for the
-        # caller to discover.
-        with steplog.timed_info(step_logger, source_name, 'scan_volume_out') as report:
-            volume_out = scanner.component_volume(mesh)
-            report(f'{volume_out}')
-        result = Result(mesh, True, None, tuple(steps), faces_in,
-                        len(mesh.geometry.faces), volume_in,
-                        volume_out, len(parts),
-                        time.monotonic() - started,
-                        lost_vertices=_count_lost(before, mesh.geometry.verts))
+        result = _closing_result(mesh, before, steps, faces_in, volume_in,
+                                 len(parts), started, step_logger, source_name)
 
     except Exception as exc:
         return _failed(mesh, f"{type(exc).__name__}: {exc}", tuple(steps),
                        faces_in, volume_in, time.monotonic() - started)
 
     return result
+
+
+def _gate_says_clean(mesh: Mesh, step_logger: StepLogger, source_name: str,
+                     part: str) -> bool:
+    """Run `is_already_clean` and log its verdict at this call site."""
+    with steplog.timed_info(step_logger, source_name, 'clean_gate', part=part) as report:
+        clean = is_already_clean(mesh)
+        report('clean: steps skipped' if clean else 'not clean')
+    return clean
+
+
+def _closing_result(mesh: Mesh, before: np.ndarray, steps: list[StepResult],
+                    faces_in: int, volume_in: float, parts: int, started: float,
+                    step_logger: StepLogger, source_name: str) -> Result:
+    """Measure the final mesh and build the successful `Result`.
+
+    Shared by the normal merge path and the model gate's early return, so a
+    skipped repair is measured exactly like a performed one. Raises on
+    unmeasurable geometry; `repair` turns that into a failed `Result`.
+    """
+    # A tool can hand back geometry that is not measurable — PyMeshFix,
+    # PyMeshLab and Blender all return arrays this module did not build.
+    # Checked before the closing measurements rather than after, because
+    # `_count_lost` feeds those arrays to cKDTree, which raises on
+    # non-finite input; that raise used to happen below this block and so
+    # escaped `repair` entirely, past every verdict the pipeline makes.
+    if not np.isfinite(mesh.geometry.verts).all():
+        raise ValueError(
+            "the repaired mesh has NaN or infinite coordinates")
+
+    # Called inside `repair`'s guard: these are measurements of tool output,
+    # and a measurement that fails is a failed repair, not an exception for
+    # the caller to discover.
+    with steplog.timed_info(step_logger, source_name, 'scan_volume_out') as report:
+        volume_out = scanner.component_volume(mesh)
+        report(f'{volume_out}')
+    return Result(mesh, True, None, tuple(steps), faces_in,
+                  len(mesh.geometry.faces), volume_in,
+                  volume_out, parts,
+                  time.monotonic() - started,
+                  lost_vertices=_count_lost(before, mesh.geometry.verts))
 
 
 def _failed(mesh: Mesh, problem: str, steps: tuple[StepResult, ...] = (),
