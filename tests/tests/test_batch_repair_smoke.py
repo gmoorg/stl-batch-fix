@@ -54,6 +54,12 @@ class TestRealEndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Run complete.', result.stdout)
         self.assertTrue((self.output / 'foot1.stl').exists())
+        # The per-model raw log: the parent's attempt header, then the
+        # child's step separators around the tools' own output.
+        log = (self.output / 'foot1.log').read_text()
+        self.assertIn('repair: ', log)
+        self.assertIn('start alpha_wrap [1/', log)
+        self.assertIn('end   judge', log)
 
     def test_two_fixtures_run_in_parallel_and_both_publish(self):
         shutil.copy2(FIXTURES / 'arms.stl', self.input / 'arms.stl')

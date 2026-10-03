@@ -9,15 +9,6 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
 - [ ] Measure alpha-wrap peak memory and replace the unvalidated factor 3.
   The 890 bytes/triangle estimate covers decimation, not reconstruction.
 
-## Logging
-
-- [ ] Write every captured error to the log. PyMeshFix's stderr is captured
-  but only scanned for `WARNING-`; on failure the text is dropped and never
-  reaches `batch.log`. Blender's captured stderr needs the same check. A child
-  that crashes (segfault, abort, OOM kill) loses its own stderr entirely,
-  because `_spawn_child` sends it to `DEVNULL`; keep it in a per-file file the
-  parent appends to the log when the child dies without a result.
-
 ## Tests
 
 Target: end-to-end coverage — real `batch_repair.py` runs over a few fixtures

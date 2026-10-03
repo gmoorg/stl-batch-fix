@@ -190,8 +190,20 @@ class TestSkipping(ConverterCase):
 
 class TestConversion(ConverterCase):
 
+    def test_convert_is_told_the_model_destination(self):
+        _ascii_stl(self.s('Leia', 'head.stl'))
+        seen = []
+
+        def convert(source, export, **kwargs):
+            seen.append(kwargs)
+            _binary_stl(export)
+            return True, export
+
+        self.run_prepare(convert=convert)
+        self.assertEqual(seen, [{'model_destination': self.o('Leia', 'head.stl')}])
+
     def _fake_convert(self, succeed=True, record=None):
-        def convert(source, destination):
+        def convert(source, destination, **kwargs):
             if record is not None:
                 with self.lock:
                     record.append((source, destination))
@@ -319,7 +331,7 @@ class TestConversion(ConverterCase):
         """
         _ascii_stl(self.s('Leia', 'head.stl'))
 
-        def explode(source, export):
+        def explode(source, export, **kwargs):
             raise RuntimeError("converter fell over")
 
         summary = self.run_prepare(convert=explode)
@@ -393,7 +405,7 @@ class TestMixedTree(ConverterCase):
         _binary_stl(self.s('Leia', 'done.stl'))
         _binary_stl(self.o('Leia', 'done.stl'))       # already fixed
 
-        def convert(source, destination):
+        def convert(source, destination, **kwargs):
             _binary_stl(destination)
             return True, destination
 

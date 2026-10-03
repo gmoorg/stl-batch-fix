@@ -39,7 +39,10 @@ tools/project_python.sh -m unittest discover -s tests/tests -t . -q -p 'test_*.p
 A bad or unknown key stops the run before anything is written. Input/output
 directories must not overlap. `max_faces = 0` disables only the initial
 decimation; post-wrap per-part reduction still runs. Face targets are
-best-effort. Steps append to `<output>/batch.log` by default (`log_file`
+best-effort. Every model also gets a raw log beside its output
+(`foo.stl` → `foo.log`, appended per run with a dated header) holding
+every tool's own output, step separators and any crash message.
+Steps append to `<output>/batch.log` by default (`log_file`
 overrides it). Run summary/progress also goes to the terminal.
 `skip_clean = true` (opt-in, not yet validated) skips repair for an
 already-clean decimated model, or otherwise for its individual clean parts.

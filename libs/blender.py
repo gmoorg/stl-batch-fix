@@ -1,4 +1,5 @@
-"""Run headless Blender with a deadline and captured output."""
+"""Run headless Blender with a deadline and captured output, optionally
+copying that output to a log after each run."""
 
 from __future__ import annotations
 
@@ -69,6 +70,47 @@ class BlenderCleanupUnconfirmed(Exception):
             + (f" for {destination}" if destination is not None else ""))
         self.result = result
         self.destination = destination
+
+
+class _Stdio:
+    def __repr__(self) -> str:
+        return 'blender.STDIO'
+
+
+#: `output_log` value meaning "write Blender's captured output to this
+#: process's own stdout/stderr". Used inside a repair child, whose fd 1/2 are
+#: already the model's log, so no log path has to travel through the pipeline.
+STDIO = _Stdio()
+
+
+def _write_output(output_log: "str | _Stdio | None", stdout: str | None,
+                  stderr: str | None) -> None:
+    """Append one Blender run's captured output to `output_log`.
+
+    Called after the run, on every path that has output — Blender keeps its
+    own PIPE capture because success is decided from its stdout, so this is
+    a copy, never the evidence. Never raises: a log that cannot be written
+    must not change the run's outcome or cause a rerun. A failure is reported
+    on stderr, and if even that fails it is dropped.
+    """
+    if output_log is None:
+        return
+    out = f'---- blender stdout ----\n{stdout or ""}'
+    err = f'---- blender stderr ----\n{stderr or ""}'
+    out, err = (t if t.endswith('\n') else t + '\n' for t in (out, err))
+    try:
+        if output_log is STDIO:
+            os.write(1, out.encode('utf-8', 'replace'))
+            os.write(2, err.encode('utf-8', 'replace'))
+        else:
+            with open(output_log, 'a', encoding='utf-8', errors='replace') as handle:
+                handle.write(out + err)
+    except Exception as exc:
+        try:
+            os.write(2, f'blender: could not write output log {output_log!r}: {exc}\n'
+                        .encode('utf-8', 'replace'))
+        except Exception:
+            pass
 
 
 #: One shared cleanup budget: computed once per `_cleanup` invocation as an
@@ -286,9 +328,16 @@ class Runner:
     # Launch / run.
     # ------------------------------------------------------------------
 
-    def run(self, script: str, timeout: float) -> Result:
+    def run(self, script: str, timeout: float,
+            output_log: "str | _Stdio | None" = None) -> Result:
         """Write `script` to a temp file, run it headless, return what
         happened.
+
+        `output_log`: a path to append Blender's captured stdout/stderr to,
+        `STDIO` for this process's own stdout/stderr, or None (nothing
+        written). Written after the run — including timeout, cancellation
+        and interruption, whatever output cleanup captured — and never
+        affects the Result or the exception raised.
 
         The temp file is always removed. Every exit path — timeout, any
         other exception (including `KeyboardInterrupt`), and ordinary
@@ -301,7 +350,7 @@ class Runner:
             tmp.write(script)
             script_path = tmp.name
         try:
-            return self._run_launched(script_path, timeout, started)
+            return self._run_launched(script_path, timeout, started, output_log)
         finally:
             try:
                 os.unlink(script_path)
@@ -309,7 +358,8 @@ class Runner:
                 pass
 
     def _run_launched(self, script_path: str, timeout: float,
-                      started: float) -> Result:
+                      started: float,
+                      output_log: "str | _Stdio | None" = None) -> Result:
         with self._lock:
             if self._cancel_requested:
                 raise RunCancelled("Runner was already cancelled")
@@ -345,7 +395,8 @@ class Runner:
             # A `cancel()` call ran between registration and publish: it saw
             # `proc is None` and could only flag, not kill. Kill now.
             deadline = time.monotonic() + CLEANUP_BUDGET_DEFAULT
-            cleanup_confirmed, errors, _, _ = self._cleanup(proc, deadline)
+            cleanup_confirmed, errors, out, err = self._cleanup(proc, deadline)
+            _write_output(output_log, out, err)
             with self._lock:
                 record.cleanup_confirmed = cleanup_confirmed
                 record.relinquished = True
@@ -361,6 +412,7 @@ class Runner:
             deadline = time.monotonic() + CLEANUP_BUDGET_DEFAULT
             cleanup_confirmed, errors, out2, err2 = self._cleanup(proc, deadline)
             self._finish_record(run_id, cleanup_confirmed)
+            _write_output(output_log, out2, err2)
             return Result(exit_code=None, stdout_capture=out2, stderr_capture=err2,
                          is_timed_out=True, second_elapsed=time.monotonic() - started,
                          cleanup_confirmed=cleanup_confirmed,
@@ -370,8 +422,9 @@ class Runner:
             # Exception` would let this slip past with NO cleanup at all)
             # and any other real exception from communicate() itself.
             deadline = time.monotonic() + CLEANUP_BUDGET_DEFAULT
-            cleanup_confirmed, errors, _, _ = self._cleanup(proc, deadline)
+            cleanup_confirmed, errors, out, err = self._cleanup(proc, deadline)
             self._finish_record(run_id, cleanup_confirmed)
+            _write_output(output_log, out, err)
             exc = sys.exc_info()[1]
             for e in errors:
                 try:
@@ -392,6 +445,7 @@ class Runner:
             cleanup_confirmed, errors, _, _ = self._cleanup(
                 proc, deadline, already_captured=(stdout, stderr))
             self._finish_record(run_id, cleanup_confirmed)
+            _write_output(output_log, stdout, stderr)
             return Result(exit_code=proc.returncode, stdout_capture=stdout,
                          stderr_capture=stderr, is_timed_out=False,
                          second_elapsed=time.monotonic() - started,
@@ -533,7 +587,8 @@ REPAIR_SCRIPT = load_script('repair')
 
 def convert(source: str, destination: str, timeout: float = 600,
             executable: str = 'blender', *,
-            runner: "Runner | None" = None) -> tuple[bool, str]:
+            runner: "Runner | None" = None,
+            output_log: "str | _Stdio | None" = None) -> tuple[bool, str]:
     """Convert `source` to a binary STL at `destination`.
 
     Accepts OBJ or STL in either encoding; always writes binary STL.  A
@@ -554,6 +609,9 @@ def convert(source: str, destination: str, timeout: float = 600,
     `Runner(executable)` — letting a caller (e.g. intake) share one `Runner`
     across many conversions so `cancel()` reaches all of them.
 
+    `output_log` is passed to `Runner.run` (Blender's output copied there
+    after the run). Success is still decided from the captured stdout only.
+
     Raises `BlenderCleanupUnconfirmed` whenever the underlying `Runner.run()`
     result has `cleanup_confirmed is False` — regardless of whether the
     conversion itself would otherwise report `ok=True` or `ok=False`.
@@ -561,7 +619,7 @@ def convert(source: str, destination: str, timeout: float = 600,
     """
     script = CONVERT_SCRIPT.format(src=source, dst=destination)
     active_runner = runner if runner is not None else Runner(executable)
-    result = active_runner.run(script, timeout=timeout)
+    result = active_runner.run(script, timeout=timeout, output_log=output_log)
     ok = (not result.is_timed_out
           and result.exit_code == 0
           and 'BLENDER_CONVERT_OK' in result.stdout_capture)
@@ -573,6 +631,7 @@ def convert(source: str, destination: str, timeout: float = 600,
 def repair(source: str, destination: str,
            timeout: float = 600, executable: str = 'blender', *,
            runner: "Runner | None" = None,
+           output_log: "str | _Stdio | None" = None,
            ) -> tuple[bool, Result]:
     """Run the repair script from binary PLY `source` to `destination`.
 
@@ -581,14 +640,14 @@ def repair(source: str, destination: str,
     Both paths must be PLY; `convert` separately writes binary STL.
 
     `runner`, when supplied, is used instead of constructing a fresh
-    `Runner(executable)`.
+    `Runner(executable)`. `output_log` is passed to `Runner.run`.
 
     Raises `BlenderCleanupUnconfirmed` whenever the underlying `Runner.run()`
     result has `cleanup_confirmed is False`, regardless of `ok`.
     """
     script = REPAIR_SCRIPT.format(src=source, dst=destination)
     active_runner = runner if runner is not None else Runner(executable)
-    result = active_runner.run(script, timeout=timeout)
+    result = active_runner.run(script, timeout=timeout, output_log=output_log)
     ok = (not result.is_timed_out
           and result.exit_code in (0, 2)
           and os.path.exists(destination))
@@ -624,6 +683,10 @@ def step_blender_repair(mesh: Mesh, config: object | None = None) -> tuple[bool,
     `proctree`-managed process group, so it must NOT get its own session —
     `own_process_group=False`. Absent/`False` (the default; matches
     `Runner`'s own safe-by-default) -> `own_process_group=True`.
+
+    Blender's output is written to this process's own stdout/stderr
+    (`STDIO`) after the run. Inside a repair child those are the model's log,
+    so the step logs itself without a path travelling through the pipeline.
     """
     try:
         nested = getattr(config, 'nested_process_group', False) if config is not None else False
@@ -633,7 +696,8 @@ def step_blender_repair(mesh: Mesh, config: object | None = None) -> tuple[bool,
             source = os.path.join(folder, 'part.ply')
             target = os.path.join(folder, 'fixed.ply')
             mesh_io.write_ply(mesh, source)
-            ok, result = repair(source, target, timeout=STEP_TIMEOUT, runner=runner)
+            ok, result = repair(source, target, timeout=STEP_TIMEOUT, runner=runner,
+                                output_log=STDIO)
             if not ok:
                 why = ('timed out' if result.is_timed_out
                        else f"exit {result.exit_code}")

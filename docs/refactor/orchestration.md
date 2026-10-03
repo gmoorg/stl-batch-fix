@@ -75,6 +75,12 @@ contain the repaired mesh. Tool execution success alone is not acceptance.
 
 - Initial-decimation loss, meaningful small-part loss, and final winding are
   not fully guarded by the judge. See [modules](modules.md).
+- Each model has a raw log beside its output (`foo.log`): intake conversion
+  and every repair attempt append a dated header; a repair child's stdout and
+  stderr go straight into it (all tools, crash messages, faulthandler
+  traceback), with a separator line before and after each step. Blender's
+  output is copied in after each Blender run. A log that cannot be written
+  only produces a warning.
 - Incremental step logging exists (`batch.log`), and `progress.log` persists
   run/progress/job/final records; the terminal summary is printed separately.
 - Memory estimate: 890 bytes/input triangle × **unvalidated** alpha-wrap factor 3.

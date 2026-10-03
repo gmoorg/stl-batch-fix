@@ -1244,5 +1244,156 @@ class TestConfirmationIsAPollingLoop(DescendantCase):
         self.assertTrue(result.cleanup_confirmed)
 
 
+
+class TestOutputLog(StandInCase):
+    """`Runner.run(..., output_log=)` copies Blender's captured output to the
+    model log after the run — on every path that has output — without
+    changing the Result, the exception, or how many times Blender runs."""
+
+    def setUp(self):
+        super().setUp()
+        self.dir = tempfile.mkdtemp(prefix='blender-outlog-')
+        self.log = os.path.join(self.dir, 'model.log')
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+        super().tearDown()
+
+    def read(self):
+        with open(self.log) as f:
+            return f.read()
+
+    def test_normal_run_appends_stdout_and_stderr_and_keeps_the_result(self):
+        exe = self.stand_in('echo out-line\necho err-line >&2\n')
+        result = Runner(exe).run('# script', timeout=10, output_log=self.log)
+        text = self.read()
+        self.assertIn('---- blender stdout ----\nout-line', text)
+        self.assertIn('---- blender stderr ----\nerr-line', text)
+        self.assertIn('out-line', result.stdout_capture)
+        self.assertIn('err-line', result.stderr_capture)
+
+    def test_runs_append_rather_than_replace(self):
+        exe = self.stand_in('echo again\n')
+        for _ in range(2):
+            Runner(exe).run('# script', timeout=10, output_log=self.log)
+        self.assertEqual(self.read().count('again'), 2)
+
+    def test_nonzero_exit_is_logged(self):
+        exe = self.stand_in('echo failing >&2\nexit 3\n')
+        result = Runner(exe).run('# script', timeout=10, output_log=self.log)
+        self.assertEqual(result.exit_code, 3)
+        self.assertIn('failing', self.read())
+
+    def test_timeout_logs_what_was_printed_before_the_kill(self):
+        exe = self.stand_in('echo before-kill\nexec sleep 30\n')
+        result = Runner(exe).run('# script', timeout=0.5, output_log=self.log)
+        self.assertTrue(result.is_timed_out)
+        self.assertIn('before-kill', self.read())
+
+    def test_no_output_log_writes_nothing(self):
+        exe = self.stand_in('echo quiet\n')
+        Runner(exe).run('# script', timeout=10)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_stdio_writes_to_this_process_fd_1_and_2(self):
+        exe = self.stand_in('echo to-stdout\necho to-stderr >&2\n')
+        saved = (os.dup(1), os.dup(2))
+        with open(self.log, 'wb') as target:
+            os.dup2(target.fileno(), 1)
+            os.dup2(target.fileno(), 2)
+            try:
+                Runner(exe).run('# script', timeout=10, output_log=blender.STDIO)
+            finally:
+                os.dup2(saved[0], 1)
+                os.dup2(saved[1], 2)
+                os.close(saved[0])
+                os.close(saved[1])
+        text = self.read()
+        self.assertIn('to-stdout', text)
+        self.assertIn('to-stderr', text)
+
+    def test_an_unwritable_log_changes_nothing_and_runs_once(self):
+        counter = os.path.join(self.dir, 'runs')
+        exe = self.stand_in(f'echo x >> {counter}\necho fine\n')
+        bad = os.path.join(self.dir, 'missing-dir', 'model.log')
+        with mock.patch('os.write') as write:      # the stderr warning
+            result = Runner(exe).run('# script', timeout=10, output_log=bad)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn('fine', result.stdout_capture)
+        with open(counter) as f:
+            self.assertEqual(f.read().count('x'), 1)
+        self.assertTrue(any(b'could not write output log' in c.args[1]
+                            for c in write.call_args_list))
+
+    def test_convert_success_still_needs_the_marker_on_stdout(self):
+        exe = self.stand_in('echo BLENDER_CONVERT_OK >&2\n')
+        runner = Runner(exe)
+        ok, _ = blender.convert('/in.obj', os.path.join(self.dir, 'out.stl'),
+                                runner=runner, output_log=self.log)
+        self.assertFalse(ok, 'a marker on stderr must not count as success')
+        self.assertIn('BLENDER_CONVERT_OK', self.read())
+
+    @staticmethod
+    def cleanup_reporting(out, err):
+        """The REAL cleanup (so the stand-in is killed and reaped — a stub
+        that skipped it left zombies for later tests), reporting known text
+        as what it captured."""
+        real = Runner._cleanup
+
+        def cleanup(self, proc, deadline, already_captured=None):
+            confirmed, errors, _, _ = real(self, proc, deadline, already_captured)
+            return confirmed, errors, out, err
+        return cleanup
+
+    def test_interrupted_run_logs_cleanup_output_and_reraises(self):
+        exe = self.stand_in('exec sleep 30\n')
+        runner = Runner(exe)
+        real_communicate = subprocess.Popen.communicate
+        calls = []
+
+        def interrupt_once(proc_self, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise KeyboardInterrupt()          # the run's own wait
+            return real_communicate(proc_self, *args, **kwargs)   # cleanup's drain
+
+        with mock.patch.object(subprocess.Popen, 'communicate', interrupt_once), \
+             mock.patch.object(Runner, '_cleanup',
+                               self.cleanup_reporting('late-out', 'late-err')):
+            with self.assertRaises(KeyboardInterrupt):
+                runner.run('# script', timeout=10, output_log=self.log)
+        text = self.read()
+        self.assertIn('late-out', text)
+        self.assertIn('late-err', text)
+
+    def test_cancelled_launch_logs_cleanup_output_and_raises_cancelled(self):
+        exe = self.stand_in('exec sleep 30\n')
+        real_record = blender._RunRecord
+
+        def always_cancelled(**kwargs):
+            return real_record(**{**kwargs, 'cancelled': True})
+
+        with mock.patch.object(blender, '_RunRecord', side_effect=always_cancelled), \
+             mock.patch.object(Runner, '_cleanup',
+                               self.cleanup_reporting('cancel-out', 'cancel-err')):
+            with self.assertRaises(RunCancelled):
+                Runner(exe).run('# script', timeout=10, output_log=self.log)
+        text = self.read()
+        self.assertIn('cancel-out', text)
+        self.assertIn('cancel-err', text)
+
+    def test_blender_repair_step_echoes_to_stdio(self):
+        seen = {}
+
+        def fake_repair(source, target, **kwargs):
+            seen.update(kwargs)
+            return False, blender.Result(1, '', '', False, 0.0)
+
+        with mock.patch.object(blender, 'repair', fake_repair):
+            blender.step_blender_repair(tetra())
+        self.assertIs(seen.get('output_log'), blender.STDIO)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

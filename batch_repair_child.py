@@ -7,15 +7,21 @@ value it needs arrives on the command line from the parent; it never reads
 `batch_repair.toml`, so editing the config mid-run cannot change a running
 batch. `batch_repair.py` itself takes no arguments — this script is where
 the per-file arguments live instead.
+
+The parent points this process's stdout and stderr at the model's own log
+(`libs.modellog`), so everything any tool prints lands there. This script
+adds a separator line before and after every step, and enables
+`faulthandler` so a native crash also leaves a Python traceback there.
 """
 
 import argparse
+import faulthandler
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import batch_repair                                                       # noqa: E402
-from libs import childresult, steplog                                     # noqa: E402
+from libs import childresult, modellog, steplog                           # noqa: E402
 
 
 def run_one_file(args) -> int:
@@ -37,13 +43,35 @@ def run_one_file(args) -> int:
     `terminate_and_confirm` can then still reach). Absent (a direct
     diagnostic or test invocation) -> `False`, the safe default.
     """
-    step_logger = (steplog.open_step_log(args.log_file) if args.log_file
-                   else steplog.null_logger)
+    step_logger = _with_separators(steplog.open_step_log(args.log_file) if args.log_file
+                                   else steplog.null_logger)
     result = batch_repair._process_one_file(
         args.one_file, args.destination, args.max_faces, step_logger,
         nested_process_group=args.managed_child, skip_clean=args.skip_clean)
     childresult.write(args.result_file, result)
     return 0
+
+
+def _with_separators(step_logger: steplog.StepLogger) -> steplog.StepLogger:
+    """Also write each step's start/end as a separator line to fd 1.
+
+    The executor already reports both events for every step, so this one
+    tee brackets every step's tool output in the model log — no wrapper
+    around any step. `os.write`, not `print`: it bypasses Python's buffer,
+    so a separator lands before the native output that follows it. Text a
+    native library still holds in its OWN buffer can appear later; that
+    cannot be forced from here. A failed write is ignored — the model log
+    must never turn a step into a failure.
+    """
+    def log(source_name, event, step, part, duration, detail):
+        step_logger(source_name, event, step, part, duration, detail)
+        if event in ('start', 'end'):
+            try:
+                os.write(1, modellog.separator(event, step, part, duration, detail)
+                         .encode('utf-8', 'replace'))
+            except Exception:
+                pass
+    return log
 
 
 def _non_negative_int(text: str) -> int:
@@ -57,6 +85,7 @@ def _non_negative_int(text: str) -> int:
 
 
 def main(argv=None) -> int:
+    faulthandler.enable()            # a native crash leaves a traceback on fd 2
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--one-file', required=True, metavar='SRC')
     parser.add_argument('--destination', required=True, metavar='DST')

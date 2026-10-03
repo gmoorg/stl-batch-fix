@@ -33,7 +33,7 @@ from pathlib import Path
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 from libs import alphawrap, blender, childresult, converter, decimator      # noqa: E402
-from libs import meshfix, meshlab, mesh_io, processor, publication, runconfig, runstate, steplog  # noqa: E402
+from libs import meshfix, meshlab, mesh_io, modellog, processor, publication, runconfig, runstate, steplog  # noqa: E402
 from libs.childresult import ChildResult                                  # noqa: E402
 from libs.indicators import Indicator                                     # noqa: E402
 from libs.mesh_io import Mesh                                             # noqa: E402
@@ -370,7 +370,14 @@ def _preflight(emitted: list[Mesh]) -> tuple[list[Mesh], list[tuple[Mesh, str]]]
 def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
                   result_file: str, log_file: str | None = None,
                   *,
-                  skip_clean: bool = False) -> subprocess.Popen:
+                  skip_clean: bool = False,
+                  output_log=None) -> subprocess.Popen:
+    """Start one child. `output_log`, when given, is an already-open binary
+    file (the model log, opened for append by the caller) that receives the
+    child's stdout and stderr directly, so every tool's output lands there as
+    it is written and survives the child crashing; None sends them to
+    DEVNULL. Opening is the caller's job, so a log that cannot be opened is
+    never mistaken for a failed launch."""
     argv = [python, script, '--one-file', mesh.path, '--destination', mesh.destination,
            '--max-faces', str(max_faces), '--result-file', result_file,
            '--managed-child']
@@ -378,9 +385,9 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
         argv += ['--log-file', log_file]
     if skip_clean:
         argv.append('--skip-clean')
+    output = subprocess.DEVNULL if output_log is None else output_log
     return subprocess.Popen(
-        argv, start_new_session=True,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        argv, start_new_session=True, stdout=output, stderr=output,
     )
 
 
@@ -454,8 +461,10 @@ class _Runner:
 
     def __init__(self, config: RunConfig, python: str, script: str,
                  baselines: dict[str, frozenset[str]],
-                 reporter: "ProgressReporter | None" = None):
+                 reporter: "ProgressReporter | None" = None,
+                 run_id: str = '-'):
         self.config = config
+        self.run_id = run_id      # stamped into each model log's attempt header
         self.python = python
         self.script = script
         self.baselines = baselines
@@ -593,18 +602,38 @@ class _Runner:
             result['elapsed_seconds'] = elapsed
         self.run_state.complete_once(token, self._report, result)
 
+    def _start_model_log(self, mesh: Mesh):
+        """Write this attempt's header to the model log and return the log
+        opened for binary append, for the child's stdout/stderr — or None,
+        with a visible warning, when either step fails. Both happen here, in
+        one guarded place, so logging can never stop a repair."""
+        path = modellog.path_for(mesh.destination, _reserved_logs(self.config))
+        try:
+            modellog.write_header(path, self.run_id, 'repair', mesh.path)
+            return open(path, 'ab')
+        except OSError as exc:
+            self._log(f'[warning] cannot write model log {path}: {exc}; '
+                      f'tool output for {mesh.path} will not be logged')
+            return None
+
     def _run_one(self, token, mesh):
         fd, result_file = tempfile.mkstemp(prefix='.stlfix-result-', suffix='.json')
         os.close(fd)
         try:
+            output_log = self._start_model_log(mesh)
             try:
                 proc = _spawn_child(self.python, self.script, mesh, self.config.max_faces,
                                    result_file, self.config.log_file or None,
-                                   skip_clean=self.config.skip_clean)
+                                   skip_clean=self.config.skip_clean,
+                                   output_log=output_log)
             except Exception as exc:
+                if output_log is not None:
+                    output_log.close()
                 self.run_state.mark_launch_failed(token)
                 self._complete(token, _build_launch_failure_result(mesh, exc))
                 return
+            if output_log is not None:
+                output_log.close()          # the child holds its own copy
 
             if not self.run_state.spawned(token, proc):
                 confirmed, detail = terminate_and_confirm(proc, self.config.reap_deadline)
@@ -669,6 +698,35 @@ def _emit_indicator(indicator) -> Indicator | None:
     return Indicator[indicator]
 
 
+def _reserved_logs(config: RunConfig) -> tuple[str, ...]:
+    """The run's own log files, which no model log may share."""
+    reserved = [_progress_log_path(config), os.path.join(config.output, 'batch.log'),
+                os.path.join(config.output, 'progress.log')]
+    if config.log_file:
+        reserved.append(config.log_file)
+    return tuple(reserved)
+
+
+def _convert_logged(source: str, export: str, *, model_destination: str,
+                    runner: blender.Runner, run_id: str,
+                    reserved: tuple[str, ...] = ()) -> tuple[bool, str]:
+    """Intake conversion, with Blender's output appended to the model log.
+
+    Writes a 'conversion' header to the log beside `model_destination`, then
+    lets `blender.convert` copy Blender's output there after the run. A log
+    that cannot be written only loses the logging, with a visible warning;
+    it never stops or repeats the conversion.
+    """
+    log = modellog.path_for(model_destination, reserved)
+    try:
+        modellog.write_header(log, run_id, 'conversion', source)
+    except OSError as exc:
+        _log_line(f'[warning] cannot write model log {log}: {exc}; '
+                  f'conversion output for {source} will not be logged')
+        log = None
+    return blender.convert(source, export, runner=runner, output_log=log)
+
+
 def _progress_log_path(config: RunConfig) -> str:
     """`progress.log` beside the step log — `<output>/progress.log` by
     default, or beside a customized `log_file` (spec 5d's Location note)."""
@@ -705,7 +763,8 @@ def _run(config: RunConfig) -> int:
         summary = converter.prepare(
             config.input, config.output, collect,
             copy_extensions={'.png', '.jpg', '.jpeg', '.gif', '.txt'},
-            convert=functools.partial(blender.convert, runner=intake_runner),
+            convert=functools.partial(_convert_logged, runner=intake_runner, run_id=run_id,
+                                      reserved=_reserved_logs(config)),
             workers=1,
         )
     except KeyboardInterrupt:
@@ -787,7 +846,8 @@ def _run(config: RunConfig) -> int:
                         'indicator': None, 'reason': reason, 'recovered': False})
 
     python = sys.executable
-    runner = _Runner(config, python, CHILD_SCRIPT, baselines, reporter=reporter)
+    runner = _Runner(config, python, CHILD_SCRIPT, baselines, reporter=reporter,
+                     run_id=run_id)
     runner.total_jobs = len(dispatchable)
     runner.queue.extend(dispatchable)
     _log_line(f'Intake done: {len(dispatchable)} job(s) to process '

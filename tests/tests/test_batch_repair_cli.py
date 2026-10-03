@@ -175,9 +175,13 @@ class TestBatchRepairCLI(unittest.TestCase):
                 (self.source / 'stl-exported/body.stl').unlink()
         # See test_invalid_binary_is_intake_failure's comment: `--output`
         # now always exists once `_run` starts (progress.log precedes
-        # intake), even though nothing was ever published.
+        # intake), even though nothing was ever published. The model log
+        # holds one 'conversion' header per run — appended, not replaced.
         self.assertEqual(sorted(p.name for p in self.output.iterdir()),
-                         ['progress.log'])
+                         ['body.log', 'progress.log'])
+        log = (self.output / 'body.log').read_text()
+        self.assertEqual(log.count('conversion: '), 2)
+        self.assertIn(str(self.source / 'body.obj'), log)
 
     def test_companion_copy_failure(self):
         (self.source / 'notes.txt').write_text('notes')
@@ -383,6 +387,155 @@ class TestCleanGateFlags(unittest.TestCase):
         self.assertIn('clean_gate', text)
         self.assertIn('clean: steps skipped', text)
         self.assertTrue(dest.exists())
+
+
+class TestModelLog(unittest.TestCase):
+    """The per-model raw log: the parent's attempt header, the child's
+    stdout/stderr pointed at it, step separators, and crash output."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def runner(self):
+        config = RunConfig(input=str(self.root), output=str(self.root / 'out'),
+                           max_faces=0, workers=1, memory_budget_bytes=10 ** 9)
+        return batch_repair._Runner(config, sys.executable, 'unused.py', {}, run_id='R1')
+
+    def mesh(self, name='body.stl'):
+        from libs.mesh_io import Kind, Mesh
+        return Mesh(str(self.root / name), str(self.root / 'out' / 'sub' / name),
+                    Kind.BINARY_STL, 4, True)
+
+    def test_each_attempt_appends_its_own_header(self):
+        runner, mesh = self.runner(), self.mesh()
+        for _ in range(2):
+            handle = runner._start_model_log(mesh)
+            self.assertEqual(handle.name, str(self.root / 'out' / 'sub' / 'body.log'))
+            handle.close()
+        text = (self.root / 'out' / 'sub' / 'body.log').read_text()
+        self.assertEqual(text.count('run R1  repair: '), 2)
+
+    def test_an_unwritable_log_warns_and_returns_none(self):
+        (self.root / 'out').mkdir()
+        (self.root / 'out' / 'sub').write_text('a file where the folder should be')
+        runner = self.runner()
+        with mock.patch.object(runner, '_log') as log:
+            self.assertIsNone(runner._start_model_log(self.mesh()))
+        self.assertIn('cannot write model log', log.call_args.args[0])
+
+    def test_header_written_but_log_cannot_be_opened_still_repairs(self):
+        """The failure Codex found: a header write that succeeds followed by
+        an open that fails must only warn, then launch once with DEVNULL —
+        not be reported as a launch failure."""
+        runner, mesh = self.runner(), self.mesh()
+        real_open = open
+
+        def open_fails_for_append(path, mode='r', *args, **kwargs):
+            if mode == 'ab':
+                raise PermissionError('denied')
+            return real_open(path, mode, *args, **kwargs)
+
+        with mock.patch('builtins.open', open_fails_for_append), \
+             mock.patch.object(runner, '_log') as log:
+            self.assertIsNone(runner._start_model_log(mesh))
+        self.assertIn('cannot write model log', log.call_args.args[0])
+        # ...and the repair still launches, exactly once, without a log.
+        spawned = []
+
+        def spawn_and_stop(*args, **kwargs):
+            spawned.append(kwargs)
+            raise OSError('launch stubbed out here')
+
+        token, _, _ = runner.run_state.start(0, 10 ** 9)
+        with mock.patch.object(runner, '_start_model_log', return_value=None), \
+             mock.patch.object(batch_repair, '_spawn_child', side_effect=spawn_and_stop):
+            runner._run_one(token, mesh)
+        self.assertEqual(len(spawned), 1)
+        self.assertIsNone(spawned[0]['output_log'])
+
+    def test_model_log_never_lands_on_a_run_log(self):
+        from libs import modellog
+        out = self.root / 'out'
+        config = RunConfig(input=str(self.root), output=str(out), max_faces=0,
+                           log_file=str(out / 'batch.log'), workers=1,
+                           memory_budget_bytes=10 ** 9)
+        reserved = batch_repair._reserved_logs(config)
+        self.assertEqual(modellog.path_for(str(out / 'progress.stl'), reserved),
+                         str(out / 'progress.model.log'))
+        self.assertEqual(modellog.path_for(str(out / 'batch.stl'), reserved),
+                         str(out / 'batch.model.log'))
+        self.assertEqual(modellog.path_for(str(out / 'foot.stl'), reserved),
+                         str(out / 'foot.log'))
+        custom = batch_repair._reserved_logs(
+            RunConfig(input=str(self.root), output=str(out), max_faces=0,
+                      log_file=str(out / 'logs' / 'steps.log')))
+        self.assertEqual(modellog.path_for(str(out / 'logs' / 'steps.stl'), custom),
+                         str(out / 'logs' / 'steps.model.log'))
+        self.assertEqual(modellog.path_for(str(out / 'logs' / 'progress.obj'), custom),
+                         str(out / 'logs' / 'progress.model.log'))
+        # The fallback name itself reserved by a custom log_file.
+        tricky = batch_repair._reserved_logs(
+            RunConfig(input=str(self.root), output=str(out), max_faces=0,
+                      log_file=str(out / 'progress.model.log')))
+        self.assertEqual(modellog.path_for(str(out / 'progress.stl'), tricky),
+                         str(out / 'progress.model.2.log'))
+
+    def test_child_output_and_crash_traceback_land_in_the_log(self):
+        """A child that prints, then dies natively: both its output and the
+        faulthandler traceback must be in the log, written by the child
+        itself into the file the parent handed it."""
+        log = self.root / 'body.log'
+        script = self.root / 'crashing_child.py'
+        script.write_text(
+            'import os, sys\n'
+            f'sys.path.insert(0, {str(Path(batch_repair_child.__file__).resolve().parent)!r})\n'
+            'import batch_repair_child, batch_repair\n'
+            'def die(*a, **k):\n'
+            '    os.write(2, b"about to crash\\n")\n'
+            '    os.abort()\n'
+            'batch_repair._process_one_file = die\n'
+            'batch_repair_child.main(sys.argv[1:])\n')
+        mesh = self.mesh()
+        with open(log, 'ab') as handle:
+            proc = batch_repair._spawn_child(sys.executable, str(script), mesh, 0,
+                                             str(self.root / 'result.json'), output_log=handle)
+        proc.wait(timeout=60)
+        self.assertNotEqual(proc.returncode, 0)
+        text = log.read_text()
+        self.assertIn('about to crash', text)
+        self.assertIn('Fatal Python error', text)       # faulthandler
+        self.assertFalse((self.root / 'result.json').exists())
+
+    def test_real_child_brackets_each_step_with_separators(self):
+        from libs import mesh_io
+        from libs.mesh_io import Geometry, Kind, Mesh
+        import numpy as np
+        source = self.root / 'body.stl'
+        geometry = Geometry(
+            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32),
+            np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64))
+        mesh_io.write(Mesh(str(source), str(source), Kind.BINARY_STL, 4, True, geometry=geometry))
+        log = self.root / 'out' / 'body.log'
+        log.parent.mkdir()
+        mesh = Mesh(str(source), str(self.root / 'out' / 'body.stl'), Kind.BINARY_STL, 4, True)
+        with open(log, 'ab') as handle:
+            proc = batch_repair._spawn_child(
+                sys.executable, str(Path(batch_repair_child.__file__).resolve()), mesh, 0,
+                str(self.root / 'result.json'), skip_clean=True, output_log=handle)
+        proc.wait(timeout=300)
+        self.assertEqual(proc.returncode, 0)
+        lines = [l for l in log.read_text().splitlines() if l.startswith('---- ')]
+        events = [(l.split()[2], l.split()[3]) for l in lines]
+        starts = [step for event, step in events if event == 'start']
+        self.assertIn('decimate', starts)
+        # Steps nest (a scan runs inside decimate), so ends come in completion
+        # order; what must hold is a matching end after every start.
+        self.assertEqual(sorted(starts),
+                         sorted(step for event, step in events if event == 'end'))
+        for step in set(starts):
+            self.assertLess(events.index(('start', step)), events.index(('end', step)))
 
 
 class TestInterruptedIntakeIntegration(unittest.TestCase):

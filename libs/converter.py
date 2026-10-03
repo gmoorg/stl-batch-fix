@@ -61,13 +61,15 @@ def prepare(source_root: str,
             output_root: str,
             emit: Callable[[Mesh], None],
             copy_extensions: Iterable[str] = (),
-            convert: Callable[[str, str], tuple[bool, str]] | None = None,
+            convert: Callable[..., tuple[bool, str]] | None = None,
             workers: int = 4) -> Summary:
     """Classify everything under `source_root`, then feed `emit`.
 
-    `convert(source, destination) -> (ok, path)` does the format conversion —
-    `libs.blender.convert` has this shape.  Without it, files needing one are
-    emitted as invalid rather than silently dropped.
+    `convert(source, export, *, model_destination) -> (ok, path)` does the
+    format conversion, writing `export`. `model_destination` is the output
+    path the converted file will be repaired to, so the converter can log
+    against that model (`libs.modellog`). Without `convert`, files needing
+    one are emitted as invalid rather than silently dropped.
 
     Two phases, because a converted file's triangle count does not exist until
     Blender has written it:
@@ -154,7 +156,7 @@ def prepare(source_root: str,
     def convert_one(item):
         source, export, destination = item
         try:
-            ok, path = convert(source, export)
+            ok, path = convert(source, export, model_destination=destination)
         except Exception as exc:          # noqa: BLE001 — emitted, not raised
             # A converter that throws and one that returns False report the
             # same event: this file was not converted.  Handled here rather

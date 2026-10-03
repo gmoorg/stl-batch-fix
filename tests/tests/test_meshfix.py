@@ -10,7 +10,6 @@ tetrahedron with one face removed has exactly three open edges, and two
 disjoint tetrahedra are eight faces that must still be eight afterwards.
 """
 
-import io
 import os
 import unittest
 from unittest import mock
@@ -146,57 +145,31 @@ class TestShellsAreNotDeleted(unittest.TestCase):
 
 
 @unittest.skipUnless(is_available(), "pymeshfix not installed")
-class TestOutputCapture(unittest.TestCase):
-    """PyMeshFix writes from C++ straight to the file descriptors."""
+class TestOutputReachesTheProcessStreams(unittest.TestCase):
+    """PyMeshFix writes from C++ straight to fd 1/2. Nothing captures it any
+    more: inside a repair child those descriptors are the model's log, so the
+    text must reach them rather than being swallowed."""
 
-    def test_stdout_is_captured(self):
-        self.assertGreater(len(repair(holed()).stdout_capture), 0,
-                           "nothing captured — the library went quiet, or the "
-                           "redirect stopped working")
+    def test_progress_and_output_reach_fd_1_and_2(self):
+        import subprocess
+        import sys
+        import tempfile
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with tempfile.TemporaryFile() as log:
+            subprocess.run(
+                [sys.executable, '-c',
+                 'from tests.tests.test_meshfix import holed\n'
+                 'from libs.meshfix import repair\n'
+                 'assert repair(holed()).ok\n'],
+                cwd=root, stdout=log, stderr=log, check=True, timeout=120)
+            log.seek(0)
+            text = log.read().decode('utf-8', 'replace')
+        self.assertIn('Loading', text)
 
-    def test_progress_appears_in_the_capture(self):
-        self.assertIn('Loading', repair(holed()).stdout_capture)
-
-    def test_the_descriptors_are_restored(self):
-        """The failure mode that matters: a capture that does not restore
-        leaves the process writing to a closed temp file, silently swallowing
-        every log line thereafter."""
-        before = os.fstat(1)
+    def test_the_descriptors_are_untouched(self):
+        before = (os.fstat(1).st_ino, os.fstat(2).st_ino)
         repair(holed())
-        self.assertEqual(os.fstat(1).st_ino, before.st_ino)
-        self.assertEqual(os.fstat(2).st_ino, os.fstat(2).st_ino)
-
-    def test_the_descriptors_are_restored_after_an_exception(self):
-        """`__exit__` restores first and returns False, so the exception
-        propagates with stdout intact."""
-        original = os.fstat(1).st_ino
-
-        class Boom(Exception):
-            pass
-
-        with self.assertRaises(Boom):
-            with meshfix._Capture():
-                raise Boom()
-        self.assertEqual(os.fstat(1).st_ino, original)
-
-    def test_a_capture_holds_what_was_written_to_both(self):
-        with meshfix._Capture() as capture:
-            os.write(1, b'to stdout')
-            os.write(2, b'to stderr')
-        self.assertEqual(capture.out, 'to stdout')
-        self.assertEqual(capture.err, 'to stderr')
-
-    def test_python_level_redirect_would_not_have_worked(self):
-        """Why the fd dance exists at all: `redirect_stdout` swaps a Python
-        object, and C++ writing to fd 1 never sees it."""
-        import contextlib
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            with meshfix._Capture():
-                os.write(1, b'straight to the descriptor')
-        self.assertEqual(buffer.getvalue(), '',
-                         "redirect_stdout caught a raw fd write, which would "
-                         "mean this module's capture is unnecessary")
+        self.assertEqual((os.fstat(1).st_ino, os.fstat(2).st_ino), before)
 
 
 class TestAvailability(unittest.TestCase):
@@ -216,7 +189,7 @@ class TestAvailability(unittest.TestCase):
 class TestResult(unittest.TestCase):
 
     def test_result_is_immutable(self):
-        result = Result(mesh(TETRA_VERTS, TETRA_FACES), True, None, '', '', 0.1)
+        result = Result(mesh(TETRA_VERTS, TETRA_FACES), True, None, 0.1)
         with self.assertRaises(Exception):
             result.ok = False
 
