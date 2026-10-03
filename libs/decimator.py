@@ -122,11 +122,14 @@ def make_step(sink: list[Result] | None = None
     """Build the uniform step `(mesh, config) -> (ok, mesh, detail)` for
     decimation, reading its target from `config.faceCount`.
 
-    Both places decimation runs in the pipeline — the CLI's initial
-    whole-mesh pass in `processor.process`, and each part's post-wrap pass
-    in `repairer.repair` — call this same function, so there is one
-    implementation of "decimation as a step", not two (docs/refactor/TODO.md's
-    "use one decimator step implementation in both positions").
+    Every place decimation runs in the pipeline — the CLI's initial
+    whole-mesh pass in `processor.process`, and each part's post-wrap
+    `decimate` and `decimate_again` entries in `repairer.DEFAULT_PART_STEPS`
+    — uses this same function, so every round guards, decimates and logs
+    identically (docs/refactor/TODO.md's "use one decimator step
+    implementation"). The guard is `decimate`'s own: a mesh already within
+    `faceCount` (or a target of 0) is returned unchanged as `not_needed`
+    without calling the library.
 
     `sink`, when given, receives the rich `decimator.Result` for this call
     (exactly one `append` per call) — for a caller that needs more than the
@@ -147,3 +150,4 @@ def make_step(sink: list[Result] | None = None
             return False, mesh, _detail_for(result)
         return True, result.mesh, _detail_for(result)
     return step
+

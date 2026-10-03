@@ -207,6 +207,35 @@ class TestDecimationFailure(unittest.TestCase):
         self.assertIsNone(outcome.repair)
 
 
+class TestInitialDecimationIsOneRound(unittest.TestCase):
+    """Only parts get `decimate_again`; the initial whole-model pass runs
+    the decimator once even when it stops above `max_faces`."""
+
+    def test_initial_pass_calls_the_decimator_once(self):
+        big = mesh(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
+                   TETRA_FACES + [[4, 6, 5], [4, 5, 7], [4, 7, 6], [5, 6, 7]])
+        over = big.geometry                      # "decimated" but still 8 faces > 6
+        with mock.patch.object(decimator, '_decimate_fastsimp', return_value=over) as fast:
+            outcome = process(big, 6, part_steps=())
+        self.assertEqual(fast.call_count, 1)
+        self.assertIsNotNone(outcome.decimation)
+
+    def test_a_second_round_error_is_failed_not_undecimated(self):
+        from libs import execstep
+        entries = list(repairer.DEFAULT_PART_STEPS)
+        inflated = mesh(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
+                        TETRA_FACES + [[4, 6, 5], [4, 5, 7], [4, 7, 6], [5, 6, 7]])
+        entries[0] = execstep.mesh_entry(
+            'alpha_wrap', lambda m, config=None: (True, m.with_geometry(inflated.geometry), 'wrapped'))
+        six = mesh(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
+                   TETRA_FACES + [[4, 6, 5], [4, 5, 7]]).geometry
+        with mock.patch.object(decimator, '_decimate_fastsimp',
+                               side_effect=[six, RuntimeError('boom')]):
+            outcome = process(mesh(), 0, part_steps=tuple(entries))
+        self.assertIs(outcome.indicator, Indicator.FAILED)
+        self.assertIn('boom', outcome.reason)
+
+
 class TestCleanGates(unittest.TestCase):
     """`process(..., skip_clean=)` threads the opt-in gate to
     `repairer.repair`; a gated mesh is still judged normally."""

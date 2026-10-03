@@ -46,10 +46,11 @@ Incomplete runs, diagnostics, and companion-copy failures return nonzero.
 | 3 | `repairer._split_stage` → `splitter.make_shell_split_step` | Always present; default floor 100 faces; if all shells are below floor, retain original mesh |
 | 4 | (seam split) | Absent from the default split composition; add a `collection_entry` in `_split_stage` to enable, not a flag |
 | 4a | Part gate (same `skip_clean`, model not clean) | Per retained part: if `is_already_clean`, merge it as split, bypassing 5 (default or custom `part_steps`); verdict logged as `clean_gate` with the part id |
-| 5 | Per-part `DEFAULT_PART_STEPS`, via `execstep.run_sequence` | `(alpha_wrap, decimate, meshfix)` by default; caller may replace `part_steps` entirely — nothing appended |
+| 5 | Per-part `DEFAULT_PART_STEPS`, via `execstep.run_sequence` | `(alpha_wrap, decimate, decimate_again, meshfix)` by default; caller may replace `part_steps` entirely — nothing appended |
 | 5a | `alphawrap.step_alpha_wrap` | Reads `whole_model_diag` from `StepConfig` |
-| 5b | `decimator.make_step()` | Reads `faceCount` (target captured after splitting, before wrapping) from `StepConfig`; same implementation as step 1 |
-| 5c | `execstep.ConditionStep(scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)` | MeshFix only if the decimated part has open or non-manifold edges; unavailable/failed tool fails the step |
+| 5b | `decimator.make_step()` | Reads `faceCount` (target captured after splitting, before wrapping) from `StepConfig`; same implementation as step 1. Missing the target is **never** a reason to fail the part or the mesh (owner decision, 2026-10-03): the other steps decide whether the model is repaired, and extra faces only make slicing and printing slower. |
+| 5c | `decimator.make_step()` again (`decimate_again`) | The same step as 5b, run once more on 5b's output: a single fast_simplification call can plateau short of target on alpha-wrap output. Already within target → `not_needed` (decimate's own guard), no library call. Still above target afterwards is not a failure; a decimator error fails the part like 5b. No loop. |
+| 5d | `execstep.ConditionStep(scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)` | MeshFix only if the decimated part has open or non-manifold edges; unavailable/failed tool fails the step |
 | 6 | `execstep.run_merge_step` → `splitter.merge` | Concatenate successful parts; no welding or boolean union |
 | 7 | Closing repair checks | Finite coordinates, component volume, lost-vertex measurements; exceptions fail repair |
 | 8 | `processor._judge` | Ordered gates below |
@@ -59,8 +60,9 @@ Alpha wrap uses `alpha=min(diag/800, 0.15)`, `offset=min(diag/2000, 0.06)`;
 `diag` belongs to the whole mesh **after initial decimation**, not each part.
 The captured per-part target is best-effort, including when CLI max faces is
 zero. There is no post-merge decimation. Each entry in a part's sequence
-produces its own `Step.PART` record — three by default (alpha wrap, decimate,
-meshfix), one per entry in whatever sequence actually ran.
+produces its own `Step.PART` record — four by default (alpha wrap, decimate,
+decimate_again, meshfix; a skipped step still records), one per entry in
+whatever sequence actually ran.
 
 Judge order: failed repair → `FAILED`; non-finite volume/ratio → `FAILED`;
 retained component-volume ratio below 0.90 → `DESTROYED`; non-manifold edges

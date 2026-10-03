@@ -176,9 +176,10 @@ def _decimate_logged(mesh: Mesh, max_faces: int, step_name: str,
                      step_logger: steplog.StepLogger, source_name: str) -> decimator.Result:
     """The initial whole-mesh decimation pass, run through the SAME shared
     executor and the SAME `decimator.make_step` implementation that
-    `repairer.repair` uses for each part's post-wrap decimation — one
-    decimator step implementation used in both positions
-    (docs/refactor/TODO.md's "Uniform-step refactor" section), not two.
+    `repairer.repair` uses for each part's post-wrap `decimate` and
+    `decimate_again` entries — one decimator step implementation in every
+    position (docs/refactor/TODO.md's "Uniform-step refactor" section).
+    This initial pass is a single round; only parts get a second one.
 
     `evidence` is a fresh local list owned entirely by this call: nothing
     else reads or writes it, and it goes out of scope when this function

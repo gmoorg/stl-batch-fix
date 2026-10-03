@@ -38,9 +38,17 @@ WHOLE_MESH_STEPS: tuple[Entry, ...] = ()
 #: `_judge`'s actual gates are volume ratio, non-manifold, open edges, and
 #: enclosed volume — no face-count check exists today, so this comment
 #: states a fact already true in code.
+#: `decimate_again` is the SAME step as `decimate`, run once more: one
+#: fast_simplification call can plateau short of its target on alpha-wrap
+#: output (remaining collapses would flip faces), and a fresh call continues
+#: from there. A part already within target is `not_needed` — decimate's own
+#: guard — so the extra entry costs nothing otherwise. Still above target
+#: after it is never a failure; a decimator error fails like the first
+#: round. It sits before MeshFix so anything it changes is still repaired.
 DEFAULT_PART_STEPS: tuple[Entry, ...] = (
     mesh_entry('alpha_wrap', alphawrap.step_alpha_wrap),
     mesh_entry('decimate', decimator.make_step()),
+    mesh_entry('decimate_again', decimator.make_step()),
     mesh_entry('meshfix', execstep.ConditionStep(
         scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)),
 )
