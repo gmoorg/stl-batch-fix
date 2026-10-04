@@ -356,12 +356,15 @@ def union_volume(parts) -> float:
     return total - sum(o for _, _, o in overlaps)
 
 
-def union_boundary_samples(fixture: Fixture, n: int, seed: int = 0, max_rounds: int = 50):
+def union_boundary_samples(fixture: Fixture, n: int, seed: int = 0, max_rounds: int = 50,
+                           part: int | None = None):
     """Exactly `n` area-weighted points on the union's boundary, with their
     truth part's outward normals. A point of part i is buried — rejected —
     when a tiny step along its OWN outward normal enters another part
     (winding number > 0.5): that covers faces inside another part and faces
-    shared with a touching part."""
+    shared with a touching part. `part` restricts proposals to that truth
+    part (so a small part is not under-sampled), still rejecting points
+    buried in any OTHER part."""
     import igl
     rng = np.random.default_rng(seed)
     parts = [(np.asarray(v, np.float64), np.asarray(f, np.int64)) for v, f in fixture.truth]
@@ -370,6 +373,8 @@ def union_boundary_samples(fixture: Fixture, n: int, seed: int = 0, max_rounds: 
     for v, f in parts:
         a, b, c = (v[f[:, k]] for k in range(3))
         areas.append(np.linalg.norm(np.cross(b - a, c - a), axis=1) / 2)
+    if part is not None:
+        areas = [a if i == part else np.zeros_like(a) for i, a in enumerate(areas)]
     weights = np.concatenate(areas) / sum(a.sum() for a in areas)
     owner = np.concatenate([np.full(len(a), i) for i, a in enumerate(areas)])
     local = np.concatenate([np.arange(len(a)) for a in areas])
@@ -457,4 +462,88 @@ def fixtures() -> dict:
     inch = (v / np.float32(25.4)).astype(np.float32)
     add('inch_scale', inch, f, ((inch, f),), dict(open=False, non_manifold=False, shells=1, volume_sign=1, scale=1 / 25.4),
         'correct sphere in inches')
+    return out
+
+
+# ---------------------------------------------------------------------------
+# End-to-end composites: several defects per mesh, so the real script runs a
+# few times instead of once per defect (each run costs ~90 s).
+# ---------------------------------------------------------------------------
+
+def sphere_sag(v, centre, r) -> float:
+    """How far this faceted sphere's faces dip below the smooth sphere:
+    r − the smallest face-plane distance from the centre."""
+    v = np.asarray(v, np.float64) - np.asarray(centre, np.float64)
+    f = sphere()[1]
+    a, b, c = (v[f[:, i]] for i in range(3))
+    nrm = np.cross(b - a, c - a)
+    nrm /= np.linalg.norm(nrm, axis=1)[:, None]
+    return float(r - np.abs(np.einsum('ij,ij->i', nrm, a)).min())
+
+
+def _shift(mesh, d):
+    v, f = mesh
+    return (np.asarray(v, np.float64) + np.asarray(d, np.float64)).astype(np.float32), np.asarray(f, np.int64)
+
+
+def _box_shift(bx, d):
+    lo, hi = bx
+    return (np.asarray(lo, float) + d, np.asarray(hi, float) + d)
+
+
+def composites() -> dict:
+    """Four meshes combining defects for the end-to-end tests. Mesh, truth
+    parts, vanish boxes and feature points are transformed together.
+
+    defects carries: 'sag' — per truth part, how far its facets dip below
+    the smooth shape (the tolerance basis, see docs/refactor/tests.md);
+    'parts' — the part ids the batch log should show; 'rod_tip' where
+    relevant. Acceptance limits built from 'sag' are engineering limits
+    chosen before running, not proven error bounds.
+    """
+    v, f = sphere()
+    s10 = sphere_sag(v, (0, 0, 0), 10.0)
+    out = {}
+
+    def add(name, mesh, truth, defects, notes, vanish=()):
+        mv, mf = mesh
+        out[name] = Fixture(name, np.asarray(mv, np.float32), np.asarray(mf, np.int64), tuple(truth),
+                            union_volume(list(truth)), tuple(vanish), defects, notes)
+
+    # 1. Everything at once on one sphere (doubles -> two coincident shells).
+    ab = fixtures()['allbad']
+    add('c_allbad', (ab.verts, ab.faces), ab.truth,
+        dict(open=True, non_manifold=True, shells=2, sag=(s10,), parts=('1/2', '2/2')),
+        ab.notes, ab.vanish_boxes)
+
+    # 2. One sphere with a reversed cap AND a hole; debris far away.
+    seamed = build_seam(v, f)[1]
+    cap = v[f].mean(axis=1)[:, 2] > 5.0
+    holed = np.delete(seamed, np.flatnonzero(~cap)[180:192], axis=0)
+    sheet = (np.array([[30, -3, -3], [30, 3, -3], [30, 3, 3], [30, -3, 3]], np.float32), np.array([[0, 1, 2], [0, 2, 3]]))
+    speck = box((30, 6, 0), (30.5, 6.5, 0.5), n=1)
+    add('c_hole_seam_debris', _with(v, holed, sheet, speck), ((v, f),),
+        dict(open=True, seams=True, shells=3, sag=(s10,), parts=('1/1',)),
+        'reversed cap + 12 faces removed; open sheet and closed speck at x = 30',
+        vanish=((np.array([29, -4, -4]), np.array([31, 4, 4])),
+                (np.array([29.5, 5.5, -0.5]), np.array([31, 7, 1]))))
+
+    # 3. Big sphere, small inside-out sphere, and a sphere with an attached rod.
+    si = build_shell_inverted(v, f)
+    small = (si[0][len(v):] - np.float32([15, 0, 0]), f)          # r 5 centred at x = 25
+    small_mesh = (small[0], f[:, ::-1])
+    rod = _shift(sphere_with_rod(), (-25, 0, 0))
+    s5 = sphere_sag(small[0], (25, 0, 0), 5.0)
+    add('c_multishell_rod', _with(v, f, small_mesh, rod), ((v, f), small, rod),
+        dict(open=False, shells=3, sag=(s10, s5, s10), parts=('1/3', '2/3', '3/3'),
+             rod_tip=(-25.0, 0.0, 18.0), rod_radius=0.75),
+        'r10 sphere; r5 inside-out at x = 25; sphere + rod (tip z 18) at x = -25')
+
+    # 4. Overlapping shells in inches.
+    ov = fixtures()['overlapping_shells']
+    k = np.float32(1 / 25.4)
+    add('c_inch_overlap', ((ov.verts * k).astype(np.float32), ov.faces),
+        tuple(((pv * k).astype(np.float32), pf) for pv, pf in ov.truth),
+        dict(open=False, shells=2, sag=(s10 / 25.4, s10 / 25.4), parts=('1/2', '2/2')),
+        'overlapping_shells scaled to inches')
     return out

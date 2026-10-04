@@ -173,6 +173,64 @@ class TestGeometricFacts(unittest.TestCase):
         np.testing.assert_allclose(np.ptp(inch.verts, 0), np.ptp(FIXTURES['correct'].verts, 0) / 25.4, rtol=1e-6)
 
 
+class TestComposites(unittest.TestCase):
+    """The end-to-end inputs, checked cheaply before any real run."""
+
+    COMPOSITES = ds.composites()
+
+    def test_declared_defects_truth_and_vanish_boxes(self):
+        for name, fx in self.COMPOSITES.items():
+            m = as_mesh(fx.verts, fx.faces)
+            s = scanner.scan(m)
+            d = fx.defects
+            with self.subTest(name):
+                self.assertEqual(len(scanner.shells(m)), d['shells'])
+                if 'open' in d:
+                    self.assertEqual(s.open_edges > 0, d['open'])
+                if 'non_manifold' in d:
+                    self.assertEqual(s.non_manifold > 0, d['non_manifold'])
+                if 'seams' in d:
+                    self.assertEqual(scanner.winding_seams(m)[0] > 0, d['seams'])
+                self.assertEqual(len(d['sag']), len(fx.truth))
+                for (v, f), sag in zip(fx.truth, d['sag']):
+                    ts = scanner.scan(as_mesh(v, f))
+                    self.assertEqual((ts.open_edges, ts.non_manifold), (0, 0))
+                    self.assertGreater(ds.signed_volume(v, f), 0)
+                    self.assertGreater(sag, 0)
+                for lo, hi in fx.vanish_boxes:
+                    inside = lambda vv: np.all((np.asarray(vv) >= lo) & (np.asarray(vv) <= hi), axis=1)
+                    self.assertTrue(inside(fx.verts).any())
+                    self.assertFalse(any(inside(v).any() for v, _ in fx.truth))
+
+    def test_parts_kept_after_an_stl_round_trip(self):
+        """The part ids the batch log must show: shells kept by the
+        splitter after the mesh is written and read back as STL."""
+        from libs import mesh_io, splitter
+        tmp = tempfile.mkdtemp(prefix='composite-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for name, fx in self.COMPOSITES.items():
+            path = os.path.join(tmp, name + '.stl')
+            mesh_io.write(Mesh(path, path, Kind.BINARY_STL, len(fx.faces), True, None,
+                               Geometry(fx.verts, fx.faces)))
+            kept = splitter.by_shells(mesh_io.load(mesh_io.probe(path, path)))
+            with self.subTest(name):
+                n = len(kept)
+                self.assertEqual(fx.defects['parts'], tuple(f'{i}/{n}' for i in range(1, n + 1)))
+
+    def test_rod_tip_lies_on_the_truth_and_the_rod_is_resolvable(self):
+        fx = self.COMPOSITES['c_multishell_rod']
+        tip = np.asarray(fx.defects['rod_tip'])
+        rod_v = fx.truth[2][0]
+        self.assertAlmostEqual(float(rod_v[:, 2].max()), tip[2], places=5)
+        cap = rod_v[np.abs(rod_v[:, 2] - tip[2]) < 1e-6]
+        np.testing.assert_allclose(cap.mean(0), tip, atol=1e-5)
+
+    def test_inch_composite_scales_everything(self):
+        fx, ov = self.COMPOSITES['c_inch_overlap'], FIXTURES['overlapping_shells']
+        np.testing.assert_allclose(fx.verts, ov.verts / 25.4, rtol=1e-6, atol=1e-6)
+        self.assertAlmostEqual(fx.truth_volume, ov.truth_volume / 25.4 ** 3, places=6)
+
+
 class TestProbeCompatibility(unittest.TestCase):
 
     def test_committed_probes_are_reproduced_byte_for_byte(self):

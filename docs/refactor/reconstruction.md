@@ -203,6 +203,61 @@ octree is rebuilt per block (~2–3 s each there). A 100 mm cube in ONE block
 (300 M grid points) was stopped at 12 GB and rising — the planner would
 estimate ~24 GB and split it.
 
+## Decimation after reconstruction (2026-10-04)
+
+Found by the end-to-end test (`c_multishell_rod`): post-reconstruction
+decimation with `fast_simplification` destroyed a thin attached rod
+(radius 0.75, sphere r 10, h 0.092) that reconstruction had kept exactly.
+
+Rod part, 840 input faces, rebuilt to 453,220 (tip 0.000, max 0.017):
+
+| Decimation | Faces | Rod tip | p99 | max |
+|---|---|---|---|---|
+| fast_simplification round 1 (any target 840–50,000) | 73,552 | 0.029 | 0.673 | 0.772 |
+| fast_simplification round 2, target 20,000 / 50,000 | 19,998 / 50,000 | 7.833 / 7.972 | 5.45 / 5.57 | 7.87 / 8.01 |
+| fast_simplification `lossless` (target ignored) | 385,142 | 0.000 | 0.004 | 0.017 |
+| PyMeshLab quadric, defaults, target 840 | 840 | 0.002 | 0.035 | 0.109 |
+| PyMeshLab quadric, original vertices kept, target 840 | 840 | 0.004 | 0.055 | 0.174 |
+
+Rebuilt sphere r 10 (442,056 faces): fast_simplification ×2 stalled at
+17,314 faces and went oblong (extent ratio 1.014, max 0.191); PyMeshLab
+defaults reached 760 faces exactly, round (1.000), max 0.089.
+
+Why fast_simplification fails here: every collapse moves the merged vertex
+to the quadric optimum (25.6 % of round-1 vertices were new positions), and
+collapse cost is area-weighted, so a thin low-area feature looks cheap and
+goes first; it plateaus far above extreme targets (500×), and a fresh second
+round restarts the quadrics and collapses the rod. `agg` only changes the
+pace (and its threshold is absolute, so unit-dependent); `preserve_border`
+does nothing on closed meshes; no mode keeps original vertices. Snapping
+vertices back to originals was rejected (folds triangles).
+
+`lossless` removes only zero-error collapses: 0 faces on the composite,
+0 of 300,002 on Mirko, 50 of 3,799,673 on join_complication, 15 % of the
+rebuilt rod — useless as a decimator.
+
+The whole 3-part composite through reconstruction + PyMeshLab (defaults,
+single pass, target = part's face count): 2,360 faces, every part within
+limits by ≥ 5× (max 0.045 / 0.015 / 0.088 vs 0.49 / 0.34 / 0.49), rod tip
+0.002, volume −0.12 %, no MeshFix needed. The same input decimated directly
+(no split, no rebuild) to 1,180 / 590 faces kept all 3 shells and the rod.
+
+Original (pre-reconstruction) models — both decimators accurate:
+
+| Model, target | fast_simplification max (orig→out / out→orig), defects | PyMeshLab max, defects |
+|---|---|---|
+| Mirko (clean, 300 k), 100 k | 0.0145 / 0.0133, clean | 0.0237 / 0.0259, clean |
+| Mirko, 30 k | 0.0430 / 0.0440, clean | 0.0739 / 0.0555, 2 NM |
+| join_complication (3.8 M; open 435, NM 28), 900 k | 0.0137 / 0.0129, open 200 NM 94 | 0.0093 / 0.0087, open 234 NM 26 |
+| join_complication, 300 k | 0.0490 / 0.0304, open 129 NM 101 | 0.0652 / 0.0280, open 148 NM 39 |
+
+Owner reviewed the outputs (rod/sphere at < 1,000 faces, Mirko, join
+complication): PyMeshLab defaults "look good"; Mirko results identical.
+
+**Decision (owner, 2026-10-04): switch both pre- and post-decimation to
+PyMeshLab `meshing_decimation_quadric_edge_collapse` with defaults; the
+post-reconstruction decimation is a single run (no `decimate_again`).**
+
 ## Open
 
 - **Block size** — chosen per part from `reconstruct_memory_budget_gb`

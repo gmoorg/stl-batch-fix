@@ -55,6 +55,14 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
   inputs; have batch admission use `winding.estimate_bytes` (it still uses
   source triangles × 890 B × 3, so concurrent workers can exceed RAM).
 
+- [ ] Switch decimation to PyMeshLab `meshing_decimation_quadric_edge_collapse`
+  (defaults) for both the initial whole-model pass and the post-reconstruction
+  pass; post-reconstruction is a single run — remove `decimate_again`
+  (owner decision 2026-10-04; evidence in
+  [reconstruction](reconstruction.md#decimation-after-reconstruction-2026-10-04)).
+  Keep the guard (within target → not needed), the never-fail-on-a-miss rule
+  and failure semantics. `c_multishell_rod` in `test_end_to_end` must then pass.
+
 ## Tests
 
 Target: end-to-end coverage — real `batch_repair.py` runs over a few fixtures
