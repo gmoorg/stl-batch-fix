@@ -27,3 +27,62 @@ tools/project_python.sh tests/tests/make_fixtures.py --check
 - Cover scale, opposite winding, component retention, invalid input, timeout/crash, atomic writes, and exactly-once reporting.
 
 High-priority probes are `small_valid_shell.stl`, `opposite_volume_shells.stl`, `decimation_lost_appendage.stl`, and `reversed_tjunction_chain.stl`. Their construction is tested; pipeline verdict tests remain missing.
+
+## Inventory for the outcome-test rework (2026-10-04)
+
+Goal (TODO "Tests"): end-to-end runs of `batch_repair.py` on defect-sphere
+fixtures, plus per-step tests with the fixtures each step fixes, asserting
+outcomes (published, closed, radius/volume tolerance, debris gone,
+indicator) — not internals. A scripted pass over 791 tests flagged 68 that
+assert only internals (mocks, call counts, step names, fakes); by hand they
+fall into three groups. Removal waits until the replacement exists.
+
+**1. Forced failure paths — keep.** Mocks force conditions no fixture can
+produce; they protect behaviour, not composition.
+
+- Missing library → result/step failure, not a crash: `test_alphawrap`
+  (availability, missing CGAL, empty result), `test_decimator` (availability,
+  missing fast_simplification, failure recorded), `test_meshfix`
+  (missing library, returned failure), `test_meshlab` (filter exception),
+  `test_blender` (returned failure / raised exception reported),
+  `test_winding` (open result rejected, invalid input rejected before
+  native calls, failures are step results).
+- I/O and runner failures: `test_converter` (companion copy fails, is
+  counted once, interrupted copy leaves nothing, each mesh emitted once),
+  `test_batch_repair_cli` (config rejected before intake, malformed TOML,
+  intake exception incomplete, companion copy failure, model log
+  unwritable / unopenable), `test_batch_repair_progress` (launch failure
+  elapsed), `test_batch_repair_run` (SIGINT during pool start),
+  `test_runstate` (spawn/cancel race), `test_runconfig` (`resolve`: autos,
+  fraction, zero budget, sysconf unavailable; example lists every field).
+
+**2. Configuration plumbing — keep until end-to-end covers it.** A value
+reaching the place it is used: `test_batch_repair_run` gate flag to
+`_spawn_child`; `test_batch_repair_cli` GB → bytes per child;
+`test_winding` configured budget used. Replace with end-to-end runs whose
+config changes the outcome (e.g. `skip_clean`, a tiny budget →
+`BudgetError` in the log), then delete.
+
+**3. Pipeline composition pins — replace, then delete.** These encode HOW
+the pipeline is assembled, so every refactor rewrites them:
+
+| Test (test_repairer.py) | Protects | Outcome replacement |
+|---|---|---|
+| `TestSequence` (order, one call per part, part whole, destination kept, single shell not split) | each part reaches repair intact; merge keeps destination | end-to-end: multi-shell sphere fixture → every shell present, published at the right path |
+| `TestPartIdentity` (part ids, `-` for split/merge) | log attribution | end-to-end: `batch.log` lines carry `1/2`, `2/2` |
+| `TestBlenderBeforePymeshfix.test_production_sequence_is_winding_decimate_meshfix` | default step list | end-to-end outcome on defect fixtures (sequence names unnecessary) |
+| `TestAlphaWrapBinding` (whole-mesh spacing, caps, custom tool bypasses CGAL) | spacing from WHOLE mesh, not per part | per-step: two shells of different size rebuilt with the same `h` (equal bevel / face density) |
+| `TestSecondDecimationRound` (7) | second round runs only above target, fails like round one, never fails on a miss | per-step: alpha-wrap/winding-like output that plateaus → reaches target; on-target input untouched |
+| `TestContract` (no remove-T-vertices, no re-orient filter) | removed MeshLab filters stay out | none needed — those tools are out of the default pipeline; delete with the unwired-tool suites |
+| `TestFailure` (default tool / explicit alpha-wrap propagate failure; closing measurement failure) | a failed part fails the repair | keep the closing-measurement one (forced failure); the other two are covered by `test_winding`/`test_alphawrap` step-failure tests |
+| `TestCleanGates.test_model_skip_keeps_the_non_finite_guard` | NaN guard on the skip path | keep (forced failure) |
+
+**Suites outside the default pipeline** (decide with item "remove tests of
+unwired tools"): `test_welder` (39), `test_meshlab` (5), `test_pipeline.py`
+(36, legacy `stl_batch_fix.py`), alpha-wrap now explicit-use
+(`test_alphawrap`, 20), Blender repair parts of `test_blender`.
+
+Not a target: frozen-dataclass checks (10) — they protect immutability,
+which nothing else checks, and never churn. Exact duplicates were removed
+2026-10-04 (`test_welder` endpoint/clean-mesh, `test_decimator`
+fastsimp-failure).

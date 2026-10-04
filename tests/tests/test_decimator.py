@@ -184,15 +184,6 @@ class TestFastSimplification(DecimatorCase):
 
 class TestFastSimplificationFailure(DecimatorCase):
 
-    def test_it_runs_when_fastsimp_fails(self):
-        """The failure explains why the undecimated marker is needed."""
-        with mock.patch.object(decimator, '_decimate_fastsimp',
-                               side_effect=RuntimeError("boom")):
-            result = decimate(self.loaded(), max_faces=1000)
-        self.assertEqual([r for r, _ in result.attempts],
-                         [Rung.FAST_SIMPLIFICATION])
-        self.assertIn('boom', result.attempts[0][1])
-
     def test_missing_fast_simplification_is_a_failure(self):
         mesh = self.loaded()
         with mock.patch.object(decimator, '_FASTSIMP', False):

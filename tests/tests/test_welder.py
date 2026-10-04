@@ -93,11 +93,6 @@ class TestFind(unittest.TestCase):
         self.assertIn(junction.edge[1], triangle)
         self.assertNotIn(junction.vertex, triangle)
 
-    def test_a_vertex_at_an_endpoint_is_not_a_junction(self):
-        """Every vertex lies on the edges it belongs to; only interior
-        positions count."""
-        self.assertEqual(find(tetra()), ())
-
     def test_unloaded_raises(self):
         with self.assertRaises(ValueError):
             find(Mesh('/a.stl', '/b.stl', Kind.BINARY_STL, 4, True))
