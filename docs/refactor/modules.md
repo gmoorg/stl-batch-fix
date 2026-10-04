@@ -80,6 +80,25 @@ cannot otherwise infer which context it is running in. The child's
 `processor.process` (via `batch_repair._process_one_file`); absent means
 `False`, the safe default.
 
+## Print-risk check (separate from repair)
+
+`check_3mf.py` reads a Bambu Studio 3MF and predicts base-layer print
+failures before printing. It shares no code path with the repair pipeline and,
+unlike `batch_repair.py`, takes command-line arguments. Read-only. Exit 0 = no
+risk detected within scope, 1 = risk, 2 = unreadable/invalid arguments,
+3 = no risk found but some analysis incomplete.
+
+| Module | Scope / main interface | Limitations and edge cases |
+|---|---|---|
+| `bambu3mf` | `read(path) -> Project(settings, instances, is_bambu)`; `Instance(object_id, instance_id, name, plate, printable, parts, overrides)`; `Part(name, subtype, vertices, faces, overrides)` in world mm; `ReadError` | Streaming `iterparse` (vertex/triangle parents cleared as read; fae.3mf's 121 MB object file reads in ~10 s). Transforms are row-vector 4x3: `component @ item`; Bambu's per-part `matrix` metadata repeats the component transform and is ignored. Part subtype matched by identity (component `objectid` == `<part id>`); an unmatched part gets `subtype=None`, never assumed printable. `instance_id` = index of the build item among that object's items. Plain 3MF: one plate, all parts normal, no settings. Cycles, depth > 16, missing objects, bad indices, non-finite/singular transforms raise `ReadError`. Plate-local origins are not resolved; coordinates are project XY. |
+| `basecheck` | `check(parts, Thresholds) -> Result`; `clip_above`/`clip_below` | Predictions, not a slice; thresholds provisional until compared with sliced output (no slicer CLI here). Layer 1 is the slice at `first_layer/2`; an underside below `first_layer + support_top_z_distance` has no room for support. **A**: underside map (lowest surface ≥ 0 per 0.05 mm cell, no normals needed) → footprint (contact, plus near-plate cells shallower than the support angle), contact fraction, contact islands vs footprint regions (ripple signature), informational RMS, optional sink depth. Ripple RMS is NOT a risk test: on the scale of `ripple_sigma` it also measures curvature (a 4 mm rod scored 0.12 mm). **B**: near-plate cells above layer 1 and shallower than the support angle, as regions with area, height, location, reach from contact; plate clearance only — undersides above model geometry are out of scope (stated in every report). **C**: faces 0.5–10° from horizontal within the foot band, clipped to it, grouped through shared vertices; informational only; up/down label follows winding. Plate cut: triangles clipped at z=0; per-part crossing parity marks columns where the plate is inside a part (unioned, so overlapping parts do not XOR); a sunk open part falls back to "any surface below" and is incomplete. Negative volumes are NOT subtracted (instance incomplete). Grid capped at 25 M cells (coarsened with a note). |
+
+Real-file evidence (2026-10-04): fae.3mf `base.stl` has a ~0.1° tilt in its
+build transform, lifting a 2,080 mm² strip of its flat base to 0.10–0.15 mm,
+off layer 1. Mysterium_Megha `lower_fixed…_A`: the only geometry reaching the
+plate lies inside its negative volume, so after Bambu subtracts it the whole
+12,700 mm² base starts at 0.12–0.2 mm.
+
 ## Evidence worth preserving
 
 - Never infer shape preservation from clean topology alone, or use summed
