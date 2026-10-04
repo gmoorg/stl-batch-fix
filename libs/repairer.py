@@ -53,7 +53,7 @@ DEFAULT_PART_STEPS: tuple[Entry, ...] = (
 
 #: Allow float re-rounding when counting retained vertices. This absolute
 #: threshold is a known scale risk; see
-#: archive/docs-refactor-2026-09-22/open-issues.md.
+#: ../stl-batch-fix.old/archive/docs-refactor-2026-09-22/open-issues.md.
 LOST_VERTEX_TOLERANCE = 1e-4
 
 
@@ -149,7 +149,7 @@ def is_already_clean(mesh: Mesh) -> bool:
     sufficient by itself — a mesh can score `is_clean` while having
     inverted normals: Amidara's real `base.stl` has 1,506 of them and 922
     winding-seam edges while reading as fully `is_clean` (measured
-    2026-09-21, archive/docs-refactor-2026-09-22/open-issues.md). Adding
+    2026-09-21, ../stl-batch-fix.old/archive/docs-refactor-2026-09-22/open-issues.md). Adding
     `winding_seams(mesh) == 0` closes that gap. `scanner.winding_seams`'s
     own known limitation — it only examines edges shared by exactly two
     faces, so it cannot see winding on a non-manifold edge — does not apply

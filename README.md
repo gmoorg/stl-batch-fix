@@ -15,7 +15,7 @@ Implementation: `libs/` and `batch_repair.py`. The pre-refactor script
 
 Do not read all references at startup. Historical designs, completed handoffs,
 and investigation narratives are excluded from the normal reading path.
-Use [the archive index](archive/README.md) only for evidence a task actually needs.
+Use [the archive index](../stl-batch-fix.old/archive/README.md) (kept outside the repository) only for evidence a task actually needs.
 Current code establishes implemented behavior; TODO records future decisions.
 
 ## Run and verify

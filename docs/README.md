@@ -8,7 +8,7 @@ Read only the reference relevant to the task:
 - [Tests](refactor/tests.md): commands, suite boundaries, regression evidence.
 - [Reconstruction](refactor/reconstruction.md): winding-number + marching-cubes experiment (alpha-wrap alternative).
 
-[Archives](../archive/README.md) retain dated reviews and historical evidence.
+[Archives](../../stl-batch-fix.old/archive/README.md) (outside the repository) retain dated reviews and historical evidence.
 All current actions belong in TODO. Avoid recursive documentation reads.
 
 ## Keep one current reference per topic

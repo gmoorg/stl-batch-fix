@@ -2,7 +2,7 @@
 
 Open tasks only. Implemented behavior: [modules](modules.md) and
 [pipeline](orchestration.md). Historical review evidence and test results are
-[archived](../../archive/README.md). Remove completed tasks; update the owning reference.
+[archived](../../../stl-batch-fix.old/archive/README.md). Remove completed tasks; update the owning reference.
 
 ## Reconstruction
 

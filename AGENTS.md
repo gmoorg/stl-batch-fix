@@ -3,7 +3,8 @@
 Start with [README.md](README.md) and follow only the compact documentation needed.
 
 Read only task-relevant sections linked from README; do not preload every
-reference or recursively read `archive/`, `design/`, or historical handoffs.
+reference or recursively read the archived history in `../stl-batch-fix.old/`
+(`archive/`, `design/`, outside this repository) or historical handoffs.
 
 Review the user's proposals honestly and independently, not with automatic
 agreement. Understand the whole proposal and its purpose, then explain any

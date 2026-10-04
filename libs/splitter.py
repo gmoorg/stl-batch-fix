@@ -13,7 +13,7 @@ from . import scanner
 from .mesh_io import Geometry, Mesh
 
 #: Fixed debris floor; scaling it with the largest shell discarded real small
-#: parts. Corpus measurements are in archive/docs-before-compact-2026-09-19/refactor/implementation-evidence.md.
+#: parts. Corpus measurements are in ../stl-batch-fix.old/archive/docs-before-compact-2026-09-19/refactor/implementation-evidence.md.
 MIN_SHELL_FACES = 100
 
 

@@ -88,6 +88,6 @@ cannot otherwise infer which context it is running in. The child's
 - Seam-region repair and aggressive cleanup have destroyed real models.
 - Keep the model-loss fixtures and tests even when historical prose is archived.
 
-For exact measurements only: [alpha-wrap/tool investigation](../../archive/docs-refactor-2026-09-22/discovered-bugs.md),
-[MeshFix destruction](../../archive/docs-refactor-2026-09-22/amidara-clean-destroys.md),
-[seam-region loss](../../archive/docs-refactor-2026-09-22/mandy-volume-loss.md).
+For exact measurements only: [alpha-wrap/tool investigation](../../../stl-batch-fix.old/archive/docs-refactor-2026-09-22/discovered-bugs.md),
+[MeshFix destruction](../../../stl-batch-fix.old/archive/docs-refactor-2026-09-22/amidara-clean-destroys.md),
+[seam-region loss](../../../stl-batch-fix.old/archive/docs-refactor-2026-09-22/mandy-volume-loss.md).
