@@ -13,9 +13,7 @@ tools/project_python.sh tests/tests/make_fixtures.py --check
 - `tests/tests/test_<module>.py`: focused `libs` contracts and algorithms.
 - `test_repair_pipeline.py`: refactor geometry sequence against known controls.
 - `test_regression_fixtures.py`: guards source geometry of review probes.
-- `test_pipeline.py`: legacy script coverage; not proof of the refactor runner.
-- `make_fixtures.py`: generates/checks both fixture groups.
-- `tests/fixtures/`: legacy fixtures; `tests/probes/`: refactor/model-loss probes.
+- `make_fixtures.py`: generates/checks the model-loss probes in `tests/probes/`.
 
 ## What tests must prove
 
@@ -104,8 +102,7 @@ the pipeline is assembled, so every refactor rewrites them:
 | `TestCleanGates.test_model_skip_keeps_the_non_finite_guard` | NaN guard on the skip path | keep (forced failure) |
 
 **Suites outside the default pipeline** (decide with item "remove tests of
-unwired tools"): `test_welder` (39), `test_meshlab` (5), `test_pipeline.py`
-(36, legacy `stl_batch_fix.py`), alpha-wrap now explicit-use
+unwired tools"): `test_welder` (39), `test_meshlab` (5), alpha-wrap now explicit-use
 (`test_alphawrap`, 20), Blender repair parts of `test_blender`.
 
 Not a target: frozen-dataclass checks (10) — they protect immutability,

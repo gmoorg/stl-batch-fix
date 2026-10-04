@@ -1,9 +1,8 @@
 # STL Batch Fix
 
 Repair STL batches for FDM printing while preserving meaningful geometry.
-Current implementation: `libs/` and `batch_repair.py`. The legacy
-`stl_batch_fix.py` and its TUI are outside the refactor; do not use their
-repair logic as authority or modify them until the refactor is complete.
+Implementation: `libs/` and `batch_repair.py`. The pre-refactor script
+(`stl_batch_fix.py` and its TUI) lives only on the `old-script` branch.
 
 ## Read only what the task needs
 
@@ -21,7 +20,7 @@ Current code establishes implemented behavior; TODO records future decisions.
 
 ## Run and verify
 
-`install.sh` installs dependencies; it and `run.sh` select the project environment.
+`install.sh` checks and installs dependencies into the project environment.
 Use `tools/project_python.sh` for every project Python command (including probes).
 It selects `/mnt/sda2/python/.venv/bin/python` and sets the repository directory.
 The batch runner takes no command-line arguments. Every option lives in

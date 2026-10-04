@@ -12,7 +12,7 @@ evidence-backed concerns and alternatives. Follow the shared
 
 For every non-trivial task, follow [COLLABORATION.md](COLLABORATION.md). Act as lead orchestrator. Before planning, ask Codex to validate your interpretation with `tools/ask_codex.sh`. Then have Codex challenge the plan. Proceed automatically when agreement is reached. Assign exactly one implementer and require independent review by the other agent. Ask the user only for unresolved material ambiguity or disagreement, consequential preference, or required approval for destructive/high-risk action.
 
-Run Python through `tools/project_python.sh`, which resolves `/mnt/sda2/python/.venv/bin/python` independently of the caller's working directory. Do not use legacy `stl_batch_fix.py` as repair-design authority while the refactor is unfinished.
+Run Python through `tools/project_python.sh`, which resolves `/mnt/sda2/python/.venv/bin/python` independently of the caller's working directory.
 
 Before each new collaboration task, run `tools/reset_codex.sh`. Do not reset
 between phases or fix reviews. Interpretation and planning reuse one Codex

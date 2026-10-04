@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# install.sh — check and install dependencies for stl_batch_fix.py
+# install.sh — check and install dependencies for batch_repair.py
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Prefer the venv Python (same logic as run.sh).
+# Prefer the project venv (the one tools/project_python.sh runs).
 VENV_PYTHON="$SCRIPT_DIR/../.venv/bin/python"
 if [ -z "${PYTHON:-}" ] && [ -x "$VENV_PYTHON" ]; then
     PYTHON="$VENV_PYTHON"
@@ -48,7 +48,7 @@ if "$PYTHON" -c "import pymeshlab" 2>/dev/null; then
 else
     warn "pymeshlab not found — installing..."
     "$PYTHON" -m pip install pymeshlab && ok "pymeshlab installed" || {
-        fail "pymeshlab install failed — it is REQUIRED (shell splitting and merging have no fallback)"
+        fail "pymeshlab install failed — it is REQUIRED (it is the decimator)"
         exit 1
     }
 fi
@@ -118,21 +118,6 @@ else
     }
 fi
 
-# ── fast-simplification (legacy only) ────────────────────────────────────────
-# Used only by the legacy stl_batch_fix.py. The refactored batch_repair.py
-# decimates with PyMeshLab (owner decision 2026-10-04): fast-simplification
-# moves vertices to quadric optima and destroyed thin features on rebuilt
-# output. It was faster (~7.5s / 1.1 GB vs PyMeshLab 42s / 1.6 GB on a 2.55M
-# triangle mesh), so a failed install here only warns.
-echo "→ fast-simplification (legacy)"
-if "$PYTHON" -c "import fast_simplification" 2>/dev/null; then
-    ok "fast-simplification already installed"
-else
-    warn "fast-simplification not found — installing..."
-    "$PYTHON" -m pip install fast-simplification && ok "fast-simplification installed" || \
-        warn "fast-simplification install failed — only the legacy stl_batch_fix.py needs it"
-fi
-
 # ── numpy (required by pymeshfix) ─────────────────────────────────────────────
 echo "→ numpy"
 if "$PYTHON" -c "import numpy" 2>/dev/null; then
@@ -142,29 +127,18 @@ else
     "$PYTHON" -m pip install numpy && ok "numpy installed" || fail "numpy install failed"
 fi
 
-# ── rich (required by the TUI) ────────────────────────────────────────────────
-echo "→ rich"
-if "$PYTHON" -c "from rich.console import Console" 2>/dev/null; then
-    ok "rich already installed"
-else
-    warn "rich not found — installing..."
-    "$PYTHON" -m pip install rich && ok "rich installed" || fail "rich install failed"
-fi
-
 # ── Blender ───────────────────────────────────────────────────────────────────
 echo "→ Blender"
-BLENDER_BIN="${BLENDER_BIN:-blender}"
-if command -v "$BLENDER_BIN" &>/dev/null; then
-    ver=$("$BLENDER_BIN" --version 2>&1 | head -1 || echo "unknown")
+if command -v blender &>/dev/null; then
+    ver=$(blender --version 2>&1 | head -1 || echo "unknown")
     ok "$ver"
 else
-    warn "Blender not found on PATH."
-    echo "   Blender is the fallback repair tool (used when pymeshlab/pymeshfix cannot fully fix a mesh)."
-    echo "   Download: https://www.blender.org/download/"
-    echo "   After installing, either:"
-    echo "     • Add Blender to your PATH, or"
-    echo "     • Set BLENDER_BIN=/path/to/blender before running run.sh"
+    fail "Blender not found on PATH — it is REQUIRED: batch_repair.py converts OBJ and"
+    echo "   ASCII STL with it and will not start without it."
+    echo "   Download: https://www.blender.org/download/ and put 'blender' on your PATH."
+    exit 1
 fi
 
 echo
-echo "=== Done. Run: bash run.sh  (or  INPUT_FOLDER=/path/to/stls  bash run.sh) ==="
+echo "=== Done. First run: cp batch_repair.example.toml batch_repair.toml, edit it,"
+echo "    then: tools/project_python.sh batch_repair.py ==="

@@ -228,7 +228,7 @@ class TestWindingSeams(unittest.TestCase):
 
     @staticmethod
     def _original(faces):
-        """`find_winding_seams` from stl_batch_fix.py, verbatim.
+        """`find_winding_seams` from the pre-refactor script, verbatim.
 
         Kept as the oracle: it is slow but it ran on the whole collection, so
         agreement with it is the strongest correctness statement available.

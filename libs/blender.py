@@ -565,7 +565,8 @@ def load_script(name: str) -> str:
 
 CONVERT_SCRIPT = load_script('convert')
 
-#: The repair script, lifted from the frozen `stl_batch_fix.blender` with two
+#: The repair script, lifted from the pre-refactor `stl_batch_fix.blender`
+#: (`old-script` branch) with two
 #: of its six steps disabled — see the comments at those sites in
 #: `blender_fx/repair.blender`.  Both were measured to be redundant or wrong
 #: once the mesh arrives through `repairer`:

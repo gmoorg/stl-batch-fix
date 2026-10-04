@@ -1,11 +1,11 @@
 """Real end-to-end smoke tests: the actual batch_repair.py script, reading a
 real batch_repair.toml beside it and spawning real batch_repair_child.py
-processes that run the real pipeline (decimate, alpha-wrap, write) against
-real fixtures.
+processes that run the real pipeline (prepare, reconstruct, decimate, write)
+against generated defect spheres (tests/tests/defect_spheres.py).
 
 The scripts are COPIED into a temp folder (with `libs` linked beside them)
 so the config sits next to the script under test — never the user's own
-batch_repair.toml.  Slow (CGAL import + real repair, tens of seconds per
+batch_repair.toml.  Slow (real repair, tens of seconds per
 file) — kept to a couple of cases, not a substitute for the fast unit/pool
 layers in test_batch_repair_unit.py and test_batch_repair_pool.py.
 """
@@ -17,11 +17,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-FIXTURES = Path(__file__).resolve().parent.parent / 'fixtures'
+import numpy as np
+
+from libs import mesh_io
+from libs.mesh_io import Geometry, Kind, Mesh
+from tests.tests import defect_spheres as ds
+
 PROJECT = Path(__file__).resolve().parent.parent.parent
 
 
-@unittest.skipUnless(FIXTURES.exists(), 'fixtures directory not found')
 class TestRealEndToEnd(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -36,6 +40,14 @@ class TestRealEndToEnd(unittest.TestCase):
             shutil.copy2(PROJECT / name, self.app / name)
         (self.app / 'libs').symlink_to(PROJECT / 'libs', target_is_directory=True)
 
+    def add(self, fixture: str, name: str) -> None:
+        """Write defect sphere `fixture` into the input folder as `name`."""
+        fx = ds.fixtures()[fixture]
+        path = str(self.input / name)
+        mesh_io.write(Mesh(path, path, Kind.BINARY_STL, len(fx.faces), True, None,
+                           Geometry(np.asarray(fx.verts, np.float32),
+                                    np.asarray(fx.faces, np.int64))))
+
     def run_batch(self, workers):
         # Relative paths: they must resolve against the config's folder,
         # not the working directory (cwd is deliberately elsewhere).
@@ -49,7 +61,7 @@ class TestRealEndToEnd(unittest.TestCase):
             cwd=self.input, capture_output=True, text=True, timeout=300)
 
     def test_single_small_fixture_publishes(self):
-        shutil.copy2(FIXTURES / 'foot1.stl', self.input / 'foot1.stl')
+        self.add('hole', 'foot1.stl')                  # one shell with a real hole
         result = self.run_batch(workers=1)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Run complete.', result.stdout)
@@ -62,8 +74,8 @@ class TestRealEndToEnd(unittest.TestCase):
         self.assertIn('end   judge', log)
 
     def test_two_fixtures_run_in_parallel_and_both_publish(self):
-        shutil.copy2(FIXTURES / 'arms.stl', self.input / 'arms.stl')
-        shutil.copy2(FIXTURES / 'leg.stl', self.input / 'leg.stl')
+        self.add('two_shells', 'arms.stl')
+        self.add('seam', 'leg.stl')
         result = self.run_batch(workers=2)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((self.output / 'arms.stl').exists())

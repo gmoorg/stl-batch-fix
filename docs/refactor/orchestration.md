@@ -160,5 +160,4 @@ in the table.
   group. Conversion intake and direct Blender use have separate lifecycle limits.
 - Startup checks libigl, Blender, PyMeshFix, and PyMeshLab (also the
   decimator). Splitting itself uses NumPy/SciPy, not PyMeshLab.
-- No refactor TUI is planned: runs are configured by editing `batch_repair.toml`.
-  The existing TUI drives the legacy code only.
+- No TUI is planned: runs are configured by editing `batch_repair.toml`.

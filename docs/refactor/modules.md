@@ -1,7 +1,7 @@
 # Current module reference
 
 Checked against `libs/` on 2026-09-28. Read only entries relevant to the task,
-then inspect code for exact signatures. Modules do not depend on the legacy script.
+then inspect code for exact signatures.
 
 ## Contracts
 

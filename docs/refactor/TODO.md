@@ -43,7 +43,7 @@ that each combine many defects — replacing per-tool unit tests of geometry.
   default. They take milliseconds and need no fixtures.
 - [ ] Then remove unit tests the end-to-end set covers, and all tests of tools
   absent from the default pipeline (welder, seam split, MeshLab filters,
-  Blender repair, `open_loops_are_printable`, legacy `test_pipeline.py`).
+  Blender repair, `open_loops_are_printable`).
   Justify each removal by the remaining coverage; never bless known geometry
   loss to make a test pass.
 - [ ] Split the suite into fast tests (robustness, config) and the slow
