@@ -20,35 +20,26 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
 Target: end-to-end coverage — real `batch_repair.py` runs over a few fixtures
 that each combine many defects — replacing per-tool unit tests of geometry.
 
-- [ ] Build the end-to-end fixture set: a few models whose defects together
-  cover open edges, non-manifold edges, inconsistent and globally inverted
-  winding, oppositely wound shells, self-intersection, tiny debris shells, and
-  a meaningful small part that must survive. Each test checks the published
-  output and indicator, not only `open=0`/`nm=0`. Runtime: about 50 s per model
-  through alpha-wrap regardless of shape — a 6,080-face sphere took 52 s, a
-  1,232-face real foot 46 s (2026-10-02), because alpha scales with the model's
-  own size and output is ~0.7–0.9M faces either way. Synthetic shapes are
-  therefore not faster; keep the set small and run it with several workers.
-- [ ] Keep the runner robustness tests, which use fake child scripts because
-  real models cannot fail on demand: child crash, timeout, Ctrl+C (cleanup and
-  second Ctrl+C), half-written output, recovery after a crash, and each file
-  reported exactly once.
-- [ ] Keep the config validation tests (`test_runconfig`, CLI config cases).
-  They prove that a mistake in `batch_repair.toml` stops the run before any
-  file is written, with a message naming the key: misspelled or unknown key,
-  missing `input`/`output`/`max_faces`, wrong type (`workers = "4"`,
-  `skip_clean = 1`), out-of-range value (negative, zero timeout, fraction
-  above 1, `inf`), malformed TOML, unreadable file, NUL in a path, and that
-  `batch_repair.example.toml` still lists every option with the code's
-  default. They take milliseconds and need no fixtures.
+- [ ] Extend the end-to-end set. `test_end_to_end` runs four defect
+  composites (`defect_spheres.composites()`) through the real two-pass batch
+  and checks shape, volume, debris, the rod tip and log attribution. Still
+  missing: a meaningful small part that must survive, self-intersection, and
+  real broken models (large holes).
+- [ ] Per-step outcome tests (shape kept by each step on defect spheres):
+  done for the decimator (`test_decimator.TestShapeIsKept`), not yet for
+  winding, MeshFix or the split.
+- Keep (not a task): the runner robustness tests with fake child scripts
+  (crash, timeout, Ctrl+C, half-written output, recovery, exactly-once
+  reporting, both passes) and the config validation tests — real models
+  cannot fail on demand, and config mistakes must stop a run before any write.
 - [ ] Then remove unit tests the end-to-end set covers, and all tests of tools
   absent from the default pipeline (welder, seam split, MeshLab filters,
   Blender repair, `open_loops_are_printable`).
   Justify each removal by the remaining coverage; never bless known geometry
   loss to make a test pass.
 - [ ] Split the suite into fast tests (robustness, config) and the slow
-  end-to-end set so the fast part can run on every change; update the test
-  guide.
+  end-to-end set so the fast part can run on every change (the full suite
+  takes ~8 min); update the test guide.
 
 ## Deferred (not critical now)
 
@@ -65,7 +56,10 @@ that each combine many defects — replacing per-tool unit tests of geometry.
   after a run over the full collection (the `meshfix` step records whether it
   ran).
 - [ ] Move step tuning values into `pipeconfig` (MeshFix clean/fill parameters,
-  lost-vertex tolerance, shell floor, retained-volume threshold, Blender
-  timeouts); decide then whether any belong in `batch_repair.toml`.
+  lost-vertex tolerance, retained-volume threshold, Blender timeouts); decide
+  then whether any belong in `batch_repair.toml` (the shell floor already is:
+  `min_shell_faces`).
+- [ ] Job memory calibration has no MeshFix-heavy multi-part model yet
+  (orchestration.md "Job memory"); add one when such a model turns up.
 - [ ] Consider moving step ordering into `pipeconfig`, per-step IDs, and explicit
   split/merge entries. Do not restore removed ENABLE switches.

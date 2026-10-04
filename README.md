@@ -29,7 +29,7 @@ example once, edit it, then run:
 
 ```bash
 cp batch_repair.example.toml batch_repair.toml   # first time only; then edit it
-tools/project_python.sh batch_repair.py
+./fix.sh                                         # = tools/project_python.sh batch_repair.py
 tools/project_python.sh -m unittest tests.tests.test_processor
 tools/project_python.sh -m unittest discover -s tests/tests -t . -q -p 'test_*.py'
 ```
