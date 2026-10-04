@@ -174,6 +174,24 @@ class TestReconstructBudget(_TempDir):
                 self.load_text(REQUIRED + f'reconstruct_memory_budget_gb = {text}\n')
 
 
+class TestMinShellFaces(_TempDir):
+    def test_default_is_the_splitter_floor(self):
+        from libs import splitter
+        self.assertEqual(self.load_text(REQUIRED).min_shell_faces, splitter.MIN_SHELL_FACES)
+        self.assertEqual(splitter.MIN_SHELL_FACES, 100)
+
+    def test_accepts_zero_and_other_counts(self):
+        for value in (0, 250):
+            with self.subTest(value=value):
+                self.assertEqual(self.load_text(REQUIRED + f'min_shell_faces = {value}\n')
+                                 .min_shell_faces, value)
+
+    def test_rejects_values_that_are_not_a_face_count(self):
+        for text in ('-1', 'true', '1.5', '"100"'):
+            with self.subTest(text=text), self.assertRaisesRegex(ConfigError, 'min_shell_faces'):
+                self.load_text(REQUIRED + f'min_shell_faces = {text}\n')
+
+
 class TestUnreadableFiles(_TempDir):
     def test_missing_file(self):
         with self.assertRaisesRegex(ConfigError, 'not found'):

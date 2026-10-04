@@ -118,20 +118,19 @@ else
     }
 fi
 
-# ── fast-simplification ───────────────────────────────────────────────────────
-# Required decimator. Same quadric edge collapse as PyMeshLab/Blender, but
-# operating on numpy arrays instead of a full mesh database: measured ~7.5s /
-# 1.1 GB where PyMeshLab needs 42s / 1.6 GB and Blender OOMs, on a 2.55M
-# triangle mesh. Without it the pipeline cannot meet its decimation contract.
-echo "→ fast-simplification"
+# ── fast-simplification (legacy only) ────────────────────────────────────────
+# Used only by the legacy stl_batch_fix.py. The refactored batch_repair.py
+# decimates with PyMeshLab (owner decision 2026-10-04): fast-simplification
+# moves vertices to quadric optima and destroyed thin features on rebuilt
+# output. It was faster (~7.5s / 1.1 GB vs PyMeshLab 42s / 1.6 GB on a 2.55M
+# triangle mesh), so a failed install here only warns.
+echo "→ fast-simplification (legacy)"
 if "$PYTHON" -c "import fast_simplification" 2>/dev/null; then
     ok "fast-simplification already installed"
 else
     warn "fast-simplification not found — installing..."
-    "$PYTHON" -m pip install fast-simplification && ok "fast-simplification installed" || {
-        fail "fast-simplification install failed — it is REQUIRED for decimation"
-        exit 1
-    }
+    "$PYTHON" -m pip install fast-simplification && ok "fast-simplification installed" || \
+        warn "fast-simplification install failed — only the legacy stl_batch_fix.py needs it"
 fi
 
 # ── numpy (required by pymeshfix) ─────────────────────────────────────────────

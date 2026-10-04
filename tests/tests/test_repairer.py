@@ -722,10 +722,10 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
 
     def test_production_sequence_is_winding_decimate_meshfix(self):
         """`DEFAULT_PART_STEPS`: winding reconstruction (which replaced
-        alpha-wrap), decimate, decimate again, then conditional meshfix, as
+        alpha-wrap), one decimate pass, then conditional meshfix, as
         ordinary entries."""
         names = [entry.name for entry in repairer.DEFAULT_PART_STEPS]
-        self.assertEqual(names, ['winding', 'decimate', 'decimate_again', 'meshfix'])
+        self.assertEqual(names, ['winding', 'decimate', 'meshfix'])
 
     def _record(self, name, ok=True, note=None):
         def step(mesh, config=None):
@@ -1010,30 +1010,28 @@ class TestCleanGates(unittest.TestCase):
         self.assertEqual(recorder.seen, [])
 
 
-class TestSecondDecimationRound(unittest.TestCase):
-    """The default part sequence's `decimate_again` entry — the same
-    decimate step run twice — through the REAL `decimate` and
-    `decimate_again` entries of `DEFAULT_PART_STEPS`;
-    alpha-wrap and MeshFix are stand-ins so the forwarded geometry can be
-    checked exactly."""
+class TestPartDecimation(unittest.TestCase):
+    """The default part sequence's single `decimate` pass (PyMeshLab, owner
+    decision 2026-10-04), through the REAL `decimate` entry of
+    `DEFAULT_PART_STEPS`; reconstruction and MeshFix are stand-ins so the
+    forwarded geometry can be checked exactly."""
 
     BIG = mesh(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
                TETRA_FACES + [[4, 6, 5], [4, 5, 7], [4, 7, 6], [5, 6, 7]])   # 8 faces
 
     def sequence(self, seen_by_meshfix):
         entries = list(repairer.DEFAULT_PART_STEPS)
-        names = [e.name for e in entries]
-        self.assertEqual(names, ['winding', 'decimate', 'decimate_again', 'meshfix'])
+        self.assertEqual([e.name for e in entries], ['winding', 'decimate', 'meshfix'])
 
-        def fake_wrap(part, config=None):            # wrap inflates the part
-            return True, self.BIG, 'wrapped'
+        def fake_rebuild(part, config=None):          # reconstruction inflates the part
+            return True, self.BIG, 'rebuilt'
 
         def spy_meshfix(part, config=None):
             seen_by_meshfix.append(part)
             return True, part, 'meshfix spy'
 
-        entries[0] = execstep.mesh_entry('winding', fake_wrap)
-        entries[3] = execstep.mesh_entry('meshfix', spy_meshfix)
+        entries[0] = execstep.mesh_entry('winding', fake_rebuild)
+        entries[2] = execstep.mesh_entry('meshfix', spy_meshfix)
         return tuple(entries)
 
     def geometry(self, n):
@@ -1041,37 +1039,42 @@ class TestSecondDecimationRound(unittest.TestCase):
                                  dtype=np.float32),
                         np.array((TETRA_FACES + [[4, 6, 5], [4, 5, 7]])[:n], dtype=np.int64))
 
-    def test_second_round_gets_first_round_output_and_meshfix_gets_second(self):
-        first, second = self.geometry(6), self.geometry(4)   # target is the tetra's 4 faces
+    def test_one_pass_with_the_parts_own_target_and_meshfix_gets_its_output(self):
+        decimated = self.geometry(4)                  # target is the tetra's 4 faces
         seen = []
-        with mock.patch.object(decimator, '_decimate_fastsimp',
-                               side_effect=[first, second]) as fast:
+        with mock.patch.object(decimator, '_decimate_meshlab', return_value=decimated) as call:
             result = repair(tetra(), min_shell_faces=0, part_steps=self.sequence(seen))
         self.assertTrue(result.ok, result.problem)
-        self.assertEqual(fast.call_count, 2)
-        self.assertIs(fast.call_args_list[1].args[0], first)
-        self.assertEqual(fast.call_args_list[1].args[1], 4)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(len(call.call_args.args[0].geometry.faces), 8)
+        self.assertEqual(call.call_args.args[1], 4)
         self.assertEqual(len(seen), 1)
-        self.assertIs(seen[0].geometry, second)
+        self.assertIs(seen[0].geometry, decimated)
         names = [s.detail.split(':')[0] for s in result.steps if s.step is Step.PART]
-        self.assertEqual(names, ['winding', 'decimate', 'decimate_again', 'meshfix'])
+        self.assertEqual(names, ['winding', 'decimate', 'meshfix'])
 
-    def test_first_round_on_target_skips_the_second(self):
+    def test_a_part_already_within_target_is_not_decimated(self):
+        def no_inflation(part, config=None):
+            return True, part, 'rebuilt'
+        entries = list(self.sequence([]))
+        entries[0] = execstep.mesh_entry('winding', no_inflation)
+        with mock.patch.object(decimator, '_decimate_meshlab') as call:
+            result = repair(tetra(), min_shell_faces=0, part_steps=tuple(entries))
+        self.assertTrue(result.ok, result.problem)
+        call.assert_not_called()
+        detail = [s.detail for s in result.steps if s.detail.startswith('decimate')][0]
+        self.assertIn('not_needed', detail)
+
+    def test_still_above_target_is_not_a_failure(self):
         seen = []
-        with mock.patch.object(decimator, '_decimate_fastsimp',
-                               return_value=self.geometry(4)) as fast:
+        with mock.patch.object(decimator, '_decimate_meshlab', return_value=self.geometry(6)):
             result = repair(tetra(), min_shell_faces=0, part_steps=self.sequence(seen))
         self.assertTrue(result.ok, result.problem)
-        self.assertEqual(fast.call_count, 1)
-        again = [s.detail for s in result.steps
-                 if s.step is Step.PART and s.detail.startswith('decimate_again')]
-        self.assertEqual(len(again), 1)
-        self.assertIn('not_needed', again[0])
+        self.assertEqual(len(seen[0].geometry.faces), 6)
 
-    def test_a_second_round_error_fails_the_repair_before_meshfix(self):
+    def test_a_decimator_error_fails_the_repair_before_meshfix(self):
         seen = []
-        with mock.patch.object(decimator, '_decimate_fastsimp',
-                               side_effect=[self.geometry(6), RuntimeError('boom')]):
+        with mock.patch.object(decimator, '_decimate_meshlab', side_effect=RuntimeError('boom')):
             result = repair(tetra(), min_shell_faces=0, part_steps=self.sequence(seen))
         self.assertFalse(result.ok)
         self.assertIn('boom', result.problem)
@@ -1079,40 +1082,19 @@ class TestSecondDecimationRound(unittest.TestCase):
 
     def test_an_exception_escaping_decimate_fails_the_repair(self):
         seen = []
-        real = decimator.decimate
-        calls = []
-
-        def second_call_raises(m, n):
-            calls.append(n)
-            if len(calls) == 2:
-                raise RuntimeError('escaped')
-            return decimator.Result(m.with_geometry(self.geometry(6)),
-                                    decimator.Rung.FAST_SIMPLIFICATION, 8, 6)
-
-        with mock.patch.object(decimator, 'decimate', side_effect=second_call_raises):
+        with mock.patch.object(decimator, 'decimate', side_effect=RuntimeError('escaped')):
             result = repair(tetra(), min_shell_faces=0, part_steps=self.sequence(seen))
         self.assertFalse(result.ok)
         self.assertIn('escaped', result.problem)
         self.assertEqual(seen, [])
 
-    def test_still_above_target_after_both_rounds_is_not_a_failure(self):
-        seen = []
-        with mock.patch.object(decimator, '_decimate_fastsimp',
-                               side_effect=[self.geometry(6), self.geometry(5)]):
-            result = repair(tetra(), min_shell_faces=0, part_steps=self.sequence(seen))
-        self.assertTrue(result.ok, result.problem)
-        self.assertEqual(len(seen[0].geometry.faces), 5)
-
-    def test_both_rounds_log_the_same_way(self):
-        with mock.patch.object(decimator, '_decimate_fastsimp',
-                               side_effect=[self.geometry(6), self.geometry(4)]):
+    def test_the_step_logs_the_decimator_and_the_count(self):
+        with mock.patch.object(decimator, '_decimate_meshlab', return_value=self.geometry(4)):
             result = repair(tetra(), min_shell_faces=0, part_steps=self.sequence([]))
-        details = {s.detail.split(':', 1)[0]: s.detail.split(':', 1)[1].strip()
-                   for s in result.steps if s.step is Step.PART}
-        self.assertEqual(details['decimate'], 'fastsimp, 6 faces out')
-        self.assertEqual(details['decimate_again'], 'fastsimp, 4 faces out')
+        detail = [s.detail for s in result.steps if s.detail.startswith('decimate')][0]
+        self.assertEqual(detail.split(':', 1)[1].strip(), 'meshlab, 4 faces out')
 
-    def test_custom_sequences_get_no_second_round(self):
+    def test_custom_sequences_are_unchanged(self):
         result = repair(tetra(), min_shell_faces=0, part_steps=(('recorder', Recorder()),))
         self.assertTrue(result.ok, result.problem)
         self.assertEqual(len([s for s in result.steps if s.step is Step.PART]), 1)

@@ -34,6 +34,7 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 from libs import blender, childresult, converter, decimator, pipeconfig, winding  # noqa: E402
 from libs import meshfix, meshlab, mesh_io, modellog, processor, publication, runconfig, runstate, steplog  # noqa: E402
+from libs import splitter                                                 # noqa: E402
 from libs.childresult import ChildResult                                  # noqa: E402
 from libs.indicators import Indicator                                     # noqa: E402
 from libs.mesh_io import Mesh                                             # noqa: E402
@@ -45,10 +46,9 @@ from libs.runstate import RunState                                        # noqa
 
 DEPENDENCIES = (
     ('libigl', winding),
-    ('fast_simplification', decimator),
     ('Blender', blender),
     ('PyMeshFix', meshfix),
-    ('PyMeshLab', meshlab),
+    ('PyMeshLab', meshlab),                  # also the decimator
 )
 
 #: The run configuration: always beside the script, never chosen per run.
@@ -274,7 +274,8 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                        nested_process_group: bool = False,
                        *,
                        skip_clean: bool = False,
-                       reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes
+                       reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
+                       min_shell_faces: int = splitter.MIN_SHELL_FACES
                        ) -> ChildResult:
     """The exact per-file body the old serial loop ran, now for one file only.
 
@@ -310,7 +311,8 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                                            step_logger=step_logger, source_name=source_name,
                                            nested_process_group=nested_process_group,
                                            skip_clean=skip_clean,
-                                           reconstruct_budget_bytes=reconstruct_budget_bytes)
+                                           reconstruct_budget_bytes=reconstruct_budget_bytes,
+                                           min_shell_faces=min_shell_faces)
                 if outcome.repair is not None:
                     steps = tuple(f'{s.step.name}: {s.detail}' for s in outcome.repair.steps)
                 stage = 'write'
@@ -375,7 +377,8 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
                   *,
                   skip_clean: bool = False,
                   output_log=None,
-                  reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes
+                  reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
+                  min_shell_faces: int = splitter.MIN_SHELL_FACES
                   ) -> subprocess.Popen:
     """Start one child. `output_log`, when given, is an already-open binary
     file (the model log, opened for append by the caller) that receives the
@@ -391,6 +394,7 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
     if skip_clean:
         argv.append('--skip-clean')
     argv += ['--reconstruct-budget-bytes', str(reconstruct_budget_bytes)]
+    argv += ['--min-shell-faces', str(min_shell_faces)]
     output = subprocess.DEVNULL if output_log is None else output_log
     return subprocess.Popen(
         argv, start_new_session=True, stdout=output, stderr=output,
@@ -633,7 +637,8 @@ class _Runner:
                                    skip_clean=self.config.skip_clean,
                                    output_log=output_log,
                                    reconstruct_budget_bytes=runconfig.budget_bytes(
-                                       self.config.reconstruct_memory_budget_gb))
+                                       self.config.reconstruct_memory_budget_gb),
+                                   min_shell_faces=self.config.min_shell_faces)
             except Exception as exc:
                 if output_log is not None:
                     output_log.close()

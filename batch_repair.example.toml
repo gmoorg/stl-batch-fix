@@ -70,6 +70,18 @@ skip_clean = false
 reconstruct_memory_budget_gb = 10.0
 
 
+# Debris floor for the shell split. After the initial decimation the model is
+# split into shells (surfaces connected by shared edges); a shell with FEWER
+# faces than this is dropped as debris, and each remaining shell is repaired
+# as its own part. A shell with exactly this many faces is kept. It counts
+# faces, so it does not depend on the model's units (mm or inch). If every
+# shell is below the floor, the whole model is kept as one part. 0 keeps
+# every shell. With `skip_clean = true`, a model that is already clean is not
+# split at all, so nothing is dropped.
+# Default: 100
+min_shell_faces = 100
+
+
 # --- Logging -----------------------------------------------------------------
 
 # Step log: one line before and after every step of every file.

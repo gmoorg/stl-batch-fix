@@ -298,6 +298,7 @@ class TestBatchRepairCLI(unittest.TestCase):
                 args.managed_child = flag_present
                 args.skip_clean = False
                 args.reconstruct_budget_bytes = 10 ** 10
+                args.min_shell_faces = 100
                 with mock.patch.object(processor, 'process', fake_process):
                     batch_repair_child.run_one_file(args)
                 os.unlink(result_path)
@@ -367,6 +368,7 @@ class TestCleanGateFlags(unittest.TestCase):
             args.managed_child = False
             args.skip_clean = flag
             args.reconstruct_budget_bytes = 10 ** 10
+            args.min_shell_faces = 100
             with mock.patch.object(processor, 'process', spy):
                 batch_repair_child.run_one_file(args)
         self.assertEqual(captured, [False, True])
@@ -470,6 +472,105 @@ class TestReconstructBudgetPlumbing(unittest.TestCase):
              mock.patch('builtins.print'):
             batch_repair._run(config)
         self.assertEqual(captured[0]['reconstruct_budget_bytes'], 2_500_000_000)
+
+
+class TestMinShellFacesPlumbing(unittest.TestCase):
+    """`min_shell_faces` -> child argv -> child parse -> `_process_one_file`
+    -> `processor.process`. What the floor does to a mesh is tested in
+    test_processor.TestShellFloor."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def _mesh(self):
+        from libs.mesh_io import Kind, Mesh
+        return Mesh(str(self.root / 'a.stl'), str(self.root / 'out' / 'a.stl'), Kind.BINARY_STL, 4, True)
+
+    def test_spawn_child_passes_the_floor(self):
+        captured = {}
+        real_popen = subprocess.Popen
+
+        def spy(argv, **kwargs):
+            captured['argv'] = argv
+            return real_popen([sys.executable, '-c', 'pass'])
+
+        with mock.patch('subprocess.Popen', spy):
+            batch_repair._spawn_child(sys.executable, 'c.py', self._mesh(), 0, '/tmp/r.json',
+                                      min_shell_faces=250).wait()
+        argv = captured['argv']
+        self.assertEqual(argv[argv.index('--min-shell-faces') + 1], '250')
+
+    def test_child_parses_the_floor(self):
+        from libs import splitter
+        base = ['--one-file', 'a.stl', '--destination', 'b.stl',
+                '--result-file', 'r.json', '--max-faces', '0']
+        for extra, expected in (([], splitter.MIN_SHELL_FACES),
+                                (['--min-shell-faces', '0'], 0),
+                                (['--min-shell-faces', '250'], 250)):
+            seen = {}
+
+            def fake_run(args):
+                seen['floor'] = args.min_shell_faces
+                return 0
+
+            with self.subTest(extra=extra), mock.patch.object(batch_repair_child, 'run_one_file', fake_run):
+                batch_repair_child.main(base + extra)
+                self.assertEqual(seen['floor'], expected)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            batch_repair_child.main(base + ['--min-shell-faces', '-1'])
+
+    def test_child_hands_the_floor_to_processor(self):
+        from libs import mesh_io, processor
+        from libs.mesh_io import Geometry, Kind, Mesh
+        import numpy as np
+        source = self.root / 'a.stl'
+        geometry = Geometry(
+            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32),
+            np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64))
+        mesh_io.write(Mesh(str(source), str(source), Kind.BINARY_STL, 4, True, geometry=geometry))
+        dest = self.root / 'out' / 'a.stl'
+        captured = {}
+
+        def fake_process(mesh, max_faces, **kwargs):
+            captured['floor'] = kwargs.get('min_shell_faces')
+            from libs.indicators import Indicator
+            return processor.Outcome(
+                Indicator.PROCESS, mesh_io.load(mesh_io.probe(str(source), str(dest))),
+                None, 'clean')
+
+        class FakeArgs:
+            pass
+
+        args = FakeArgs()
+        args.one_file, args.destination = str(source), str(dest)
+        args.max_faces, args.log_file = 0, None
+        args.result_file = str(self.root / 'result.json')
+        args.managed_child, args.skip_clean = False, False
+        args.reconstruct_budget_bytes = 10 ** 10
+        args.min_shell_faces = 250
+        with mock.patch.object(processor, 'process', fake_process):
+            batch_repair_child.run_one_file(args)
+        self.assertEqual(captured['floor'], 250)
+
+    def test_runner_passes_the_configured_floor(self):
+        mesh = self._mesh()
+        Path(mesh.path).write_bytes(b'x')
+        config = RunConfig(input=str(self.root), output=str(self.root / 'out'), max_faces=0,
+                           workers=1, memory_budget_bytes=10 ** 15, min_shell_faces=250)
+        captured = []
+
+        def refuse(*a, **kw):
+            captured.append(kw)
+            raise OSError('not launched in this test')
+
+        with mock.patch.object(converter, 'prepare',
+                               side_effect=lambda *a, **k: (a[2](mesh), converter.Summary())[1]), \
+             mock.patch.object(batch_repair, '_spawn_child', side_effect=refuse), \
+             mock.patch('builtins.print'):
+            batch_repair._run(config)
+        self.assertEqual(captured[0]['min_shell_faces'], 250)
 
 
 class TestModelLog(unittest.TestCase):

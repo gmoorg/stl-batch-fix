@@ -18,6 +18,8 @@ import os
 import tomllib
 from dataclasses import MISSING, dataclass, fields, replace
 
+from .splitter import MIN_SHELL_FACES
+
 
 class ConfigError(Exception):
     """The configuration file is missing, unreadable, or has a bad value."""
@@ -41,6 +43,8 @@ class RunConfig:
     memory_budget_bytes    explicit budget in bytes; 0 derives it from the fraction
     reconstruct_memory_budget_gb  per-part memory sizing target (decimal GB)
                            for the winding-number reconstruction's block count
+    min_shell_faces        shells with fewer faces are dropped as debris at the
+                           shell split; 0 keeps every shell
     """
 
     input: str
@@ -54,6 +58,7 @@ class RunConfig:
     memory_budget_fraction: float = 0.7
     memory_budget_bytes: int = 0
     reconstruct_memory_budget_gb: float = 10.0
+    min_shell_faces: int = MIN_SHELL_FACES
 
 
 #: Keys that hold paths, resolved against the config file's folder.

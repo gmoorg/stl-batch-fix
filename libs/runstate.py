@@ -8,8 +8,11 @@ import threading
 from dataclasses import dataclass, field
 
 
-#: Confirmed-real decimator (fast_simplification) peak-memory figure. See
-#: archive/docs-before-compact-2026-09-19/refactor/pool/d5.md.
+#: End-to-end peak-memory figure (7,000,034 triangles peaked at 5.8 GB),
+#: measured when fast_simplification was the decimator; see
+#: archive/docs-before-compact-2026-09-19/refactor/pool/d5.md. Not re-measured
+#: since PyMeshLab became the decimator (2026-10-04); an older standalone
+#: measurement had PyMeshLab at 1.6 GB on 2.55 M triangles.
 #: Does not cover alpha-wrap's own memory use.
 BUDGET_BYTES_PER_TRIANGLE = 890
 

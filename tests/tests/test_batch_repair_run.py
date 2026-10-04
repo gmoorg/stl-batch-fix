@@ -94,6 +94,7 @@ class TestRunSigint(unittest.TestCase):
             "p.add_argument('--result-file', required=True)\n"
             "p.add_argument('--managed-child', action='store_true')\n"
             "p.add_argument('--reconstruct-budget-bytes')\n"
+            "p.add_argument('--min-shell-faces')\n"
             'args = p.parse_args()\n'
             f'open({str(child_running_marker)!r}, "w").close()\n'   # proves the child is really running
             'time.sleep(600)\n'   # never finishes on its own — must be killed
@@ -203,6 +204,7 @@ class TestRunSigint(unittest.TestCase):
             "p.add_argument('--result-file', required=True)\n"
             "p.add_argument('--managed-child', action='store_true')\n"
             "p.add_argument('--reconstruct-budget-bytes')\n"
+            "p.add_argument('--min-shell-faces')\n"
             'args = p.parse_args()\n'
             'os.makedirs(os.path.dirname(args.destination), exist_ok=True)\n'
             "with open(args.destination, 'wb') as f:\n"

@@ -1,4 +1,10 @@
-"""Reduce a loaded mesh to a face budget with fast_simplification."""
+"""Reduce a loaded mesh to a face budget with PyMeshLab quadric edge collapse.
+
+PyMeshLab's `meshing_decimation_quadric_edge_collapse` with its default
+parameters (owner decision 2026-10-04): fast_simplification destroyed thin
+features on reconstructed output, turned spheres oblong and stalled far
+above extreme targets; evidence in docs/refactor/reconstruction.md,
+"Decimation after reconstruction"."""
 
 from __future__ import annotations
 
@@ -6,23 +12,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
-import numpy as np
-
-from . import mesh_io
+from . import meshlab
 from .mesh_io import Geometry, Mesh, require_geometry
-
-try:
-    import fast_simplification as _fastsimp
-    _FASTSIMP = True
-except ImportError:                                   # pragma: no cover
-    _FASTSIMP = False
 
 class Rung(Enum):
     """Whether the required decimator ran, was unnecessary, or failed."""
 
-    FAST_SIMPLIFICATION = 'fastsimp'
+    MESHLAB = 'meshlab'
     NOT_NEEDED = 'not_needed'        # already within budget; nothing ran
-    FAILED = 'failed'                # fast_simplification failed
+    FAILED = 'failed'                # the decimator failed
 
 
 @dataclass(frozen=True)
@@ -56,23 +54,21 @@ def is_available() -> bool:
     re-decimate on its own, reintroducing the defects this tool exists to
     remove — so a false here is a reason not to start, not a reason to skip.
     """
-    return _FASTSIMP
+    return meshlab.is_available()
 
 
 def available_rungs() -> tuple[Rung, ...]:
     """Report whether the required decimator is available."""
-    return (Rung.FAST_SIMPLIFICATION,) if _FASTSIMP else ()
+    return (Rung.MESHLAB,) if meshlab.is_available() else ()
 
 
-def _decimate_fastsimp(geometry: Geometry, max_faces: int) -> Geometry:
-    """Quadric edge collapse on plain numpy arrays — the fast path."""
-    n_in = len(geometry.faces)
-    # fast_simplification takes the fraction of faces to REMOVE, not to keep.
-    reduction = 1.0 - (float(max_faces) / float(n_in))
-    verts, faces = _fastsimp.simplify(
-        geometry.verts, geometry.faces.astype(np.uint32), reduction)
-    return Geometry(np.asarray(verts, dtype=np.float32),
-                    np.asarray(faces, dtype=np.int64))
+def _decimate_meshlab(mesh: Mesh, max_faces: int) -> Geometry:
+    """PyMeshLab quadric edge collapse to `max_faces`, every other parameter
+    at its default (optimal vertex placement, quality threshold 0.3, no
+    topology/boundary constraints, autoclean)."""
+    return meshlab.apply_filters(
+        mesh, (('meshing_decimation_quadric_edge_collapse',
+                {'targetfacenum': int(max_faces)}),)).geometry
 
 
 def decimate(mesh: Mesh, max_faces: int) -> Result:
@@ -94,18 +90,18 @@ def decimate(mesh: Mesh, max_faces: int) -> Result:
     if max_faces <= 0 or faces_in <= max_faces:
         return Result(mesh, Rung.NOT_NEEDED, faces_in, faces_in)
 
-    if not _FASTSIMP:
+    if not meshlab.is_available():
         return Result(mesh, Rung.FAILED, faces_in, faces_in,
-                      ((Rung.FAST_SIMPLIFICATION,
-                        'fast_simplification is not installed'),))
+                      ((Rung.MESHLAB,
+                        'PyMeshLab is not installed'),))
 
     try:
-        geometry = _decimate_fastsimp(mesh.geometry, max_faces)
+        geometry = _decimate_meshlab(mesh, max_faces)
     except Exception as exc:
         return Result(mesh, Rung.FAILED, faces_in, faces_in,
-                      ((Rung.FAST_SIMPLIFICATION,
+                      ((Rung.MESHLAB,
                         f"{type(exc).__name__}: {exc}"),))
-    return Result(mesh.with_geometry(geometry), Rung.FAST_SIMPLIFICATION,
+    return Result(mesh.with_geometry(geometry), Rung.MESHLAB,
                   faces_in, len(geometry.faces))
 
 
@@ -123,13 +119,11 @@ def make_step(sink: list[Result] | None = None
     decimation, reading its target from `config.faceCount`.
 
     Every place decimation runs in the pipeline — the CLI's initial
-    whole-mesh pass in `processor.process`, and each part's post-wrap
-    `decimate` and `decimate_again` entries in `repairer.DEFAULT_PART_STEPS`
-    — uses this same function, so every round guards, decimates and logs
-    identically (docs/refactor/TODO.md's "use one decimator step
-    implementation"). The guard is `decimate`'s own: a mesh already within
-    `faceCount` (or a target of 0) is returned unchanged as `not_needed`
-    without calling the library.
+    whole-mesh pass in `processor.process` and each part's post-reconstruction
+    `decimate` entry in `repairer.DEFAULT_PART_STEPS` — uses this same
+    function, so every pass guards, decimates and logs identically. The guard
+    is `decimate`'s own: a mesh already within `faceCount` (or a target of 0)
+    is returned unchanged as `not_needed` without calling the library.
 
     `sink`, when given, receives the rich `decimator.Result` for this call
     (exactly one `append` per call) — for a caller that needs more than the

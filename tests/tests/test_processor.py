@@ -185,7 +185,7 @@ class TestDecimationFailure(unittest.TestCase):
         lesser repair failure."""
         failed = decimator.Result(
             mesh(), decimator.Rung.FAILED, 4, 4,
-            ((decimator.Rung.FAST_SIMPLIFICATION, 'boom'),))
+            ((decimator.Rung.MESHLAB, 'boom'),))
         original = decimator.decimate
         try:
             decimator.decimate = lambda m, n: failed
@@ -208,32 +208,67 @@ class TestDecimationFailure(unittest.TestCase):
 
 
 class TestInitialDecimationIsOneRound(unittest.TestCase):
-    """Only parts get `decimate_again`; the initial whole-model pass runs
-    the decimator once even when it stops above `max_faces`."""
+    """The initial whole-model pass runs the decimator once, even when it
+    stops above `max_faces`."""
 
     def test_initial_pass_calls_the_decimator_once(self):
         big = mesh(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
                    TETRA_FACES + [[4, 6, 5], [4, 5, 7], [4, 7, 6], [5, 6, 7]])
         over = big.geometry                      # "decimated" but still 8 faces > 6
-        with mock.patch.object(decimator, '_decimate_fastsimp', return_value=over) as fast:
+        with mock.patch.object(decimator, '_decimate_meshlab', return_value=over) as run:
             outcome = process(big, 6, part_steps=())
-        self.assertEqual(fast.call_count, 1)
+        self.assertEqual(run.call_count, 1)
         self.assertIsNotNone(outcome.decimation)
 
-    def test_a_second_round_error_is_failed_not_undecimated(self):
+    def test_a_part_decimation_error_is_failed_not_undecimated(self):
+        """The initial pass is not needed here (max_faces 0); the part pass
+        after reconstruction raises. That is a repair failure, not the
+        'printer will reduce it' UNDECIMATED case."""
         from libs import execstep
         entries = list(repairer.DEFAULT_PART_STEPS)
         inflated = mesh(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
                         TETRA_FACES + [[4, 6, 5], [4, 5, 7], [4, 7, 6], [5, 6, 7]])
         entries[0] = execstep.mesh_entry(
             'winding', lambda m, config=None: (True, m.with_geometry(inflated.geometry), 'wrapped'))
-        six = mesh(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
-                   TETRA_FACES + [[4, 6, 5], [4, 5, 7]]).geometry
-        with mock.patch.object(decimator, '_decimate_fastsimp',
-                               side_effect=[six, RuntimeError('boom')]):
+        with mock.patch.object(decimator, '_decimate_meshlab',
+                               side_effect=RuntimeError('boom')) as run:
             outcome = process(mesh(), 0, part_steps=tuple(entries))
+        self.assertEqual(run.call_count, 1)
         self.assertIs(outcome.indicator, Indicator.FAILED)
         self.assertIn('boom', outcome.reason)
+
+
+class TestShellFloor(unittest.TestCase):
+    """`min_shell_faces` decides which shells survive the split: a sphere
+    (hundreds of faces) plus a far 4-face tetrahedron (well under 10% of
+    the volume, so dropping it is not DESTROYED). No part steps, no initial
+    decimation — only the split acts."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.tests import defect_spheres as ds
+        sv, sf = ds.sphere(10.0, 20)
+        tv = np.asarray(TETRA_VERTS, np.float32) + 30
+        cls.sphere_faces = len(sf)
+        cls.verts = np.vstack([sv, tv]).astype(np.float32)
+        cls.faces = np.vstack([sf, np.asarray(TETRA_FACES) + len(sv)]).astype(np.int64)
+
+    def _faces_out(self, **kwargs):
+        m = mesh(self.verts, self.faces)
+        outcome = process(m, 0, part_steps=(), **kwargs)
+        self.assertIs(outcome.indicator, Indicator.PROCESS, outcome.reason)
+        return outcome.mesh.triangles
+
+    def test_default_drops_the_small_shell(self):
+        self.assertGreaterEqual(self.sphere_faces, 100)
+        self.assertEqual(self._faces_out(), self.sphere_faces)
+
+    def test_zero_keeps_every_shell(self):
+        self.assertEqual(self._faces_out(min_shell_faces=0), self.sphere_faces + 4)
+
+    def test_a_shell_exactly_at_the_floor_is_kept(self):
+        self.assertEqual(self._faces_out(min_shell_faces=4), self.sphere_faces + 4)
+        self.assertEqual(self._faces_out(min_shell_faces=5), self.sphere_faces)
 
 
 class TestCleanGates(unittest.TestCase):

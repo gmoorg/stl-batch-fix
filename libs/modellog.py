@@ -2,7 +2,7 @@
 
 `out/sub/foot.stl` gets `out/sub/foot.log`. A repair child's stdout and
 stderr are pointed straight at it, so whatever any library prints — CGAL,
-fast_simplification, PyMeshFix, a crash message, a faulthandler traceback —
+PyMeshLab, PyMeshFix, a crash message, a faulthandler traceback —
 lands there as it is written. Blender copies its captured output there after
 each run. The file is appended to across runs; each attempt starts with a
 header line, and each step inside a repair is bracketed by separator lines.

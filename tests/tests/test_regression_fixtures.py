@@ -35,15 +35,17 @@ class TestModelLossFixtures(unittest.TestCase):
         self.assertLess(volumes[0] * volumes[1], 0.0)
         self.assertLess(abs(sum(volumes)), max(map(abs, volumes)) * 1e-6)
 
-    def test_appendage_is_shortened_by_decimation(self):
+    def test_appendage_survives_decimation(self):
+        """fast_simplification shortened this appendage (tip 10.25 -> 10.10);
+        the PyMeshLab decimator keeps it. A guard against regressing."""
         mesh = load('decimation_lost_appendage')
         self.assertTrue(scanner.scan(mesh).is_clean)
         self.assertAlmostEqual(float(mesh.geometry.verts[:, 0].max()), 10.25)
         result = decimator.decimate(mesh, 20)
-        if result.rung is not decimator.Rung.FAST_SIMPLIFICATION:
-            self.skipTest('fixture is calibrated for fast_simplification')
+        self.assertIs(result.rung, decimator.Rung.MESHLAB)
+        self.assertEqual(result.faces_out, 20)
         self.assertTrue(scanner.scan(result.mesh).is_clean)
-        self.assertLess(float(result.mesh.geometry.verts[:, 0].max()), 10.15)
+        self.assertAlmostEqual(float(result.mesh.geometry.verts[:, 0].max()), 10.25, delta=1e-6)
 
     def test_tjunction_path_runs_backward_along_the_spanning_edge(self):
         verts, faces = make_fixtures.build_reversed_tjunction_chain()

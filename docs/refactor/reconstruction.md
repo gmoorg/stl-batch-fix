@@ -257,6 +257,9 @@ complication): PyMeshLab defaults "look good"; Mirko results identical.
 **Decision (owner, 2026-10-04): switch both pre- and post-decimation to
 PyMeshLab `meshing_decimation_quadric_edge_collapse` with defaults; the
 post-reconstruction decimation is a single run (no `decimate_again`).**
+Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
+`test_decimator.TestShapeIsKept` (round sphere, rebuilt rod tip) and the
+`decimation_lost_appendage` regression guard.
 
 ## Open
 

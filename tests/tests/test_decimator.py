@@ -104,11 +104,11 @@ class TestAvailability(DecimatorCase):
         The required decimator missing means the run cannot produce its
         deliverable at all.
         """
-        with mock.patch.object(decimator, '_FASTSIMP', False):
+        with mock.patch.object(decimator.meshlab, 'is_available', return_value=False):
             self.assertFalse(is_available())
 
     def test_available_rungs_reports_what_is_missing(self):
-        with mock.patch.object(decimator, '_FASTSIMP', False):
+        with mock.patch.object(decimator.meshlab, 'is_available', return_value=False):
             self.assertEqual(available_rungs(), ())
 
     def test_there_is_no_blender_rung(self):
@@ -137,17 +137,16 @@ class TestNotNeeded(DecimatorCase):
             decimate(self.probed(), max_faces=100)
 
 
-class TestFastSimplification(DecimatorCase):
+class TestMeshLab(DecimatorCase):
 
     def test_it_reduces_to_about_the_target(self):
         mesh = self.loaded()
         before = mesh.triangles
         result = decimate(mesh, max_faces=1000)
-        self.assertIs(result.rung, Rung.FAST_SIMPLIFICATION)
+        self.assertIs(result.rung, Rung.MESHLAB)
         self.assertLess(result.faces_out, before)
-        # Quadric collapse lands near the target, not exactly on it.
-        self.assertLessEqual(result.faces_out, 1200)
-        self.assertGreater(result.faces_out, 700)
+        # PyMeshLab's quadric collapse reaches the target exactly here.
+        self.assertEqual(result.faces_out, 1000)
 
     def test_the_result_is_a_loaded_mesh(self):
         """Mesh in, mesh out — the caller can keep working in memory."""
@@ -182,11 +181,11 @@ class TestFastSimplification(DecimatorCase):
         self.assertEqual(set(os.listdir(self.dir)), before)
 
 
-class TestFastSimplificationFailure(DecimatorCase):
+class TestMeshLabMissing(DecimatorCase):
 
-    def test_missing_fast_simplification_is_a_failure(self):
+    def test_missing_pymeshlab_is_a_failure(self):
         mesh = self.loaded()
-        with mock.patch.object(decimator, '_FASTSIMP', False):
+        with mock.patch.object(decimator.meshlab, 'is_available', return_value=False):
             result = decimate(mesh, max_faces=1000)
         self.assertIs(result.rung, Rung.FAILED)
         self.assertIs(result.mesh, mesh)
@@ -195,13 +194,13 @@ class TestFastSimplificationFailure(DecimatorCase):
 
 
 
-class TestFastSimplificationFailureResult(DecimatorCase):
+class TestMeshLabFailureResult(DecimatorCase):
 
     def test_the_input_is_returned_unchanged(self):
         """Decimation is a deliverable: the caller must be able to tell
         'not decimated' from 'decimated badly' and mark the file."""
         mesh = self.loaded()
-        with mock.patch.object(decimator, '_decimate_fastsimp',
+        with mock.patch.object(decimator, '_decimate_meshlab',
                        side_effect=RuntimeError("boom")):
             result = decimate(mesh, max_faces=1000)
         self.assertIs(result.rung, Rung.FAILED)
@@ -211,12 +210,56 @@ class TestFastSimplificationFailureResult(DecimatorCase):
 
     def test_failure_is_recorded(self):
         """The failure explains why the undecimated marker is needed."""
-        with mock.patch.object(decimator, '_decimate_fastsimp',
+        with mock.patch.object(decimator, '_decimate_meshlab',
                                side_effect=RuntimeError("boom")):
             result = decimate(self.loaded(), max_faces=1000)
         self.assertEqual([r for r, _ in result.attempts],
-                         [Rung.FAST_SIMPLIFICATION])
+                         [Rung.MESHLAB])
         self.assertIn('boom', result.attempts[0][1])
+
+
+class TestShapeIsKept(unittest.TestCase):
+    """Outcomes, not internals: the decimated surface stays on the input
+    shape. fast_simplification failed both of these (owner decision
+    2026-10-04, docs/refactor/reconstruction.md)."""
+
+    def test_a_sphere_stays_round(self):
+        """fast_simplification made spheres oblong. Every vertex of the
+        icosphere lies on radius R = sqrt(1 + t^2); the decimated one must
+        stay within 1% of R and keep equal extents (a fixture-specific
+        tolerance, not a general accuracy bound)."""
+        verts, faces = _sphere(subdivisions=5)          # 20480 faces
+        mesh = Mesh('/s', '/s', Kind.BINARY_STL, len(faces), True, None,
+                    Geometry(verts, faces))
+        result = decimate(mesh, max_faces=1000)
+        self.assertIs(result.rung, Rung.MESHLAB)
+        R = float(np.sqrt(1 + ((1 + 5 ** 0.5) / 2) ** 2))
+        v = result.mesh.geometry.verts.astype(np.float64)
+        self.assertLessEqual(np.abs(np.linalg.norm(v, axis=1) - R).max(), 0.01 * R)
+        extent = np.ptp(v, axis=0)
+        self.assertLessEqual(extent.max() / extent.min(), 1.01)
+
+    def test_a_rebuilt_thin_rod_keeps_its_tip(self):
+        """The e2e failure: after reconstruction the part is decimated back
+        to its own face count, and fast_simplification pulled the rod tip
+        7.8 units down. The tip must stay within 2h of the truth."""
+        from libs import winding
+        from tests.tests import defect_spheres as ds
+        if not winding.is_available():
+            self.skipTest('libigl is needed')
+        import igl
+        verts, faces = ds.sphere_with_rod()
+        h = 0.2
+        rebuilt = winding.reconstruct(
+            Mesh('/r', '/r', Kind.BINARY_STL, len(faces), True, None,
+                 Geometry(verts, faces)), h, 1)
+        result = decimate(rebuilt, max_faces=len(faces))
+        self.assertIs(result.rung, Rung.MESHLAB)
+        g = result.mesh.geometry
+        tip = np.array([[0.0, 0.0, 18.0]])
+        d = np.sqrt(igl.point_mesh_squared_distance(
+            tip, g.verts.astype(np.float64), g.faces.astype(np.int64))[0][0])
+        self.assertLessEqual(d, 2 * h)
 
 
 if __name__ == '__main__':

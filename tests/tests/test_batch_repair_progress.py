@@ -85,7 +85,8 @@ class TestSourceIdentity(unittest.TestCase):
 
     def _fake_process(self, mesh, max_faces, part_steps=None, step_logger=None,
                       source_name='', nested_process_group=False, *,
-                      skip_clean=False, reconstruct_budget_bytes=None):
+                      skip_clean=False, reconstruct_budget_bytes=None,
+                      min_shell_faces=None):
         # A trivial stand-in for `processor.process` that still drives the
         # step_logger once, so these tests exercise the real
         # `source_name`/`step_logger` plumbing in `_process_one_file`
@@ -295,6 +296,7 @@ class TestReportingWriteFailure(unittest.TestCase):
             parser.add_argument('--result-file', required=True)
             parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
+            parser.add_argument('--min-shell-faces')
             args = parser.parse_args()
             result = {'path': args.one_file, 'category': 'published', 'indicator': 'PROCESS',
                      'stage': 'process', 'reason': 'ok', 'written_path': args.destination}
@@ -384,6 +386,7 @@ class TestSigkillRetention(unittest.TestCase):
             parser.add_argument('--result-file', required=True)
             parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
+            parser.add_argument('--min-shell-faces')
             args = parser.parse_args()
             name = os.path.basename(args.one_file)
             if name.startswith('slow_'):
@@ -489,6 +492,7 @@ class TestRealRunProgressLog(unittest.TestCase):
             parser.add_argument('--result-file', required=True)
             parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
+            parser.add_argument('--min-shell-faces')
             args = parser.parse_args()
             result = {'path': args.one_file, 'category': 'published', 'indicator': 'PROCESS',
                      'stage': 'process', 'reason': 'fake ok', 'written_path': args.destination}

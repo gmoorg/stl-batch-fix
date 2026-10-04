@@ -21,7 +21,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import batch_repair                                                       # noqa: E402
-from libs import childresult, modellog, steplog                           # noqa: E402
+from libs import childresult, modellog, splitter, steplog                 # noqa: E402
 
 
 def run_one_file(args) -> int:
@@ -48,7 +48,8 @@ def run_one_file(args) -> int:
     result = batch_repair._process_one_file(
         args.one_file, args.destination, args.max_faces, step_logger,
         nested_process_group=args.managed_child, skip_clean=args.skip_clean,
-        reconstruct_budget_bytes=args.reconstruct_budget_bytes)
+        reconstruct_budget_bytes=args.reconstruct_budget_bytes,
+        min_shell_faces=args.min_shell_faces)
     childresult.write(args.result_file, result)
     return 0
 
@@ -107,6 +108,8 @@ def main(argv=None) -> int:
     parser.add_argument('--skip-clean', action='store_true')
     parser.add_argument('--reconstruct-budget-bytes', type=_positive_int, metavar='BYTES',
                         default=batch_repair.pipeconfig.StepConfig.reconstruct_memory_budget_bytes)
+    parser.add_argument('--min-shell-faces', type=_non_negative_int, metavar='N',
+                        default=splitter.MIN_SHELL_FACES)
     return run_one_file(parser.parse_args(argv))
 
 

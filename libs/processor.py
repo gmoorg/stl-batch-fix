@@ -7,7 +7,7 @@ import os
 import shutil
 from dataclasses import dataclass
 
-from . import decimator, execstep, indicators, mesh_io, pipeconfig, repairer, scanner, steplog
+from . import decimator, execstep, indicators, mesh_io, pipeconfig, repairer, scanner, splitter, steplog
 from .execstep import Step
 from .indicators import Indicator
 from .mesh_io import Mesh
@@ -176,10 +176,8 @@ def _decimate_logged(mesh: Mesh, max_faces: int, step_name: str,
                      step_logger: steplog.StepLogger, source_name: str) -> decimator.Result:
     """The initial whole-mesh decimation pass, run through the SAME shared
     executor and the SAME `decimator.make_step` implementation that
-    `repairer.repair` uses for each part's post-wrap `decimate` and
-    `decimate_again` entries — one decimator step implementation in every
-    position (docs/refactor/TODO.md's "Uniform-step refactor" section).
-    This initial pass is a single round; only parts get a second one.
+    `repairer.repair` uses for each part's post-reconstruction `decimate`
+    entry — one decimator step implementation in every position (docs/refactor/TODO.md's "Uniform-step refactor" section).
 
     `evidence` is a fresh local list owned entirely by this call: nothing
     else reads or writes it, and it goes out of scope when this function
@@ -220,7 +218,8 @@ def process(mesh: Mesh, max_faces: int,
             nested_process_group: bool = False,
             *,
             skip_clean: bool = False,
-            reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes
+            reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
+            min_shell_faces: int = splitter.MIN_SHELL_FACES
             ) -> Outcome:
     """Decimate, repair and judge one loaded mesh.  Nothing is written.
 
@@ -263,7 +262,8 @@ def process(mesh: Mesh, max_faces: int,
     actually consume.
 
     `skip_clean` is passed straight to `repairer.repair` (opt-in
-    `is_already_clean` gate; see its docstring).
+    `is_already_clean` gate; see its docstring), and so is `min_shell_faces`
+    (the shell split's debris floor, `batch_repair.toml` `min_shell_faces`).
     The initial decimation always runs, so the model gate inspects the
     decimated mesh, and a gated mesh is still judged here like any other.
     """
@@ -281,7 +281,8 @@ def process(mesh: Mesh, max_faces: int,
                                step_logger=step_logger, source_name=source_name,
                                nested_process_group=nested_process_group,
                                skip_clean=skip_clean,
-                               reconstruct_budget_bytes=reconstruct_budget_bytes)
+                               reconstruct_budget_bytes=reconstruct_budget_bytes,
+                               min_shell_faces=min_shell_faces)
     return _decide(mesh, decimated, repaired,
                    step_logger=step_logger, source_name=source_name)
 

@@ -40,17 +40,16 @@ Incomplete runs, diagnostics, and companion-copy failures return nonzero.
 
 | Order | Invocation | Condition / parameters |
 |---|---|---|
-| 1 | `decimator.make_step()` via `execstep.run_step` | CLI face target via `StepConfig.faceCount`; zero or already within target skips; failure → `UNDECIMATED`. Same step implementation as 5b. |
+| 1 | `decimator.make_step()` via `execstep.run_step` | CLI face target via `StepConfig.faceCount`; zero or already within target skips; failure → `UNDECIMATED`. PyMeshLab `meshing_decimation_quadric_edge_collapse` with default parameters, one call. Same step implementation as 5b. |
 | 2 | `repairer.repair` | Measure input component volume; compute `whole_model_diag` (`scanner.diagonal`) after decimation, before split; `WHOLE_MESH_STEPS` currently empty |
 | 2a | Model gate (opt-in `skip_clean = true`) | After `WHOLE_MESH_STEPS`: if `is_already_clean`, skip 3–6 and go to 7 with the decimated mesh; verdict logged as `clean_gate` |
-| 3 | `repairer._split_stage` → `splitter.make_shell_split_step` | Always present; default floor 100 faces; if all shells are below floor, retain original mesh |
+| 3 | `repairer._split_stage` → `splitter.make_shell_split_step` | Always present; shells with fewer than `min_shell_faces` faces are dropped (`batch_repair.toml`, default 100 = `splitter.MIN_SHELL_FACES`, 0 keeps all; passed child argv → `processor.process` → `repairer.repair`); if all shells are below floor, retain original mesh |
 | 4 | (seam split) | Absent from the default split composition; add a `collection_entry` in `_split_stage` to enable, not a flag |
 | 4a | Part gate (same `skip_clean`, model not clean) | Per retained part: if `is_already_clean`, merge it as split, bypassing 5 (default or custom `part_steps`); verdict logged as `clean_gate` with the part id |
-| 5 | Per-part `DEFAULT_PART_STEPS`, via `execstep.run_sequence` | `(winding, decimate, decimate_again, meshfix)` by default; caller may replace `part_steps` entirely — nothing appended |
+| 5 | Per-part `DEFAULT_PART_STEPS`, via `execstep.run_sequence` | `(winding, decimate, meshfix)` by default; caller may replace `part_steps` entirely — nothing appended |
 | 5a | `winding.step_winding_reconstruct` | Rebuilds the part as a solid: grid spacing `h = min(whole_model_diag/800, 0.15)` (alpha-wrap's alpha); block count from `StepConfig.reconstruct_memory_budget_bytes` (`batch_repair.toml` `reconstruct_memory_budget_gb`, default 10). A part that rebuilds to nothing (an open sheet such as debris, or a closed part thinner than the grid) is dropped, with `dropped` and the reason in the step detail; the model is merged without it, and the judge's retained-volume check still catches gross loss. Fails the part if no block count fits the estimate, or if the result is not closed/manifold/non-degenerate. Replaced `alphawrap.step_alpha_wrap` (2026-10-03), which remains available as an explicit entry |
-| 5b | `decimator.make_step()` | Reads `faceCount` (target captured after splitting, before wrapping) from `StepConfig`; same implementation as step 1. Missing the target is **never** a reason to fail the part or the mesh (owner decision, 2026-10-03): the other steps decide whether the model is repaired, and extra faces only make slicing and printing slower. |
-| 5c | `decimator.make_step()` again (`decimate_again`) | The same step as 5b, run once more on 5b's output: a single fast_simplification call can plateau short of target on reconstructed output. Already within target → `not_needed` (decimate's own guard), no library call. Still above target afterwards is not a failure; a decimator error fails the part like 5b. No loop. |
-| 5d | `execstep.ConditionStep(scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)` | MeshFix only if the decimated part has open or non-manifold edges (decimating any rebuilt surface adds a few); unavailable/failed tool fails the step |
+| 5b | `decimator.make_step()` | Reads `faceCount` (target captured after splitting, before wrapping) from `StepConfig`; same implementation as step 1, ONE call (PyMeshLab defaults; the former `decimate_again` round was removed with fast_simplification, 2026-10-04 — see [reconstruction](reconstruction.md#decimation-after-reconstruction-2026-10-04)). Missing the target is **never** a reason to fail the part or the mesh (owner decision, 2026-10-03): the other steps decide whether the model is repaired, and extra faces only make slicing and printing slower. |
+| 5c | `execstep.ConditionStep(scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)` | MeshFix only if the decimated part has open or non-manifold edges (decimating any rebuilt surface adds a few); unavailable/failed tool fails the step |
 | 6 | `execstep.run_merge_step` → `splitter.merge` | Concatenate successful parts; no welding or boolean union |
 | 7 | Closing repair checks | Finite coordinates, component volume, lost-vertex measurements; exceptions fail repair |
 | 8 | `processor._judge` | Ordered gates below |
@@ -61,8 +60,8 @@ uses that as alpha with `offset=min(diag/2000, 0.06)`); `diag` belongs to the
 whole mesh **after initial decimation**, not each part.
 The captured per-part target is best-effort, including when CLI max faces is
 zero. There is no post-merge decimation. Each entry in a part's sequence
-produces its own `Step.PART` record — four by default (winding, decimate,
-decimate_again, meshfix; a skipped step still records), one per entry in
+produces its own `Step.PART` record — three by default (winding, decimate,
+meshfix; a skipped step still records), one per entry in
 whatever sequence actually ran.
 
 Judge order: failed repair → `FAILED`; non-finite volume/ratio → `FAILED`;
@@ -89,7 +88,7 @@ contain the repaired mesh. Tool execution success alone is not acceptance.
   estimate sizes blocks per part but admission does not use it yet (TODO).
 - Process-group cleanup cannot cover descendants that deliberately leave the
   group. Conversion intake and direct Blender use have separate lifecycle limits.
-- Startup checks CGAL, fast_simplification, Blender, PyMeshFix, and
-  PyMeshLab at startup. Splitting itself uses NumPy/SciPy, not PyMeshLab.
+- Startup checks libigl, Blender, PyMeshFix, and PyMeshLab (also the
+  decimator). Splitting itself uses NumPy/SciPy, not PyMeshLab.
 - No refactor TUI is planned: runs are configured by editing `batch_repair.toml`.
   The existing TUI drives the legacy code only.

@@ -68,7 +68,7 @@ produce; they protect behaviour, not composition.
 
 - Missing library → result/step failure, not a crash: `test_alphawrap`
   (availability, missing CGAL, empty result), `test_decimator` (availability,
-  missing fast_simplification, failure recorded), `test_meshfix`
+  missing PyMeshLab, failure recorded), `test_meshfix`
   (missing library, returned failure), `test_meshlab` (filter exception),
   `test_blender` (returned failure / raised exception reported),
   `test_winding` (open result rejected, invalid input rejected before
@@ -98,7 +98,7 @@ the pipeline is assembled, so every refactor rewrites them:
 | `TestPartIdentity` (part ids, `-` for split/merge) | log attribution | end-to-end: `batch.log` lines carry `1/2`, `2/2` |
 | `TestBlenderBeforePymeshfix.test_production_sequence_is_winding_decimate_meshfix` | default step list | end-to-end outcome on defect fixtures (sequence names unnecessary) |
 | `TestAlphaWrapBinding` (whole-mesh spacing, caps, custom tool bypasses CGAL) | spacing from WHOLE mesh, not per part | per-step: two shells of different size rebuilt with the same `h` (equal bevel / face density) |
-| `TestSecondDecimationRound` (7) | second round runs only above target, fails like round one, never fails on a miss | per-step: alpha-wrap/winding-like output that plateaus → reaches target; on-target input untouched |
+| `TestPartDecimation` (7) | one pass per part with its own target, skipped within target, never fails on a miss, a decimator error fails before MeshFix | per-step: covered for shape by `test_decimator.TestShapeIsKept` (rebuilt rod tip, round sphere); end-to-end `c_multishell_rod` |
 | `TestContract` (no remove-T-vertices, no re-orient filter) | removed MeshLab filters stay out | none needed — those tools are out of the default pipeline; delete with the unwired-tool suites |
 | `TestFailure` (default tool / explicit alpha-wrap propagate failure; closing measurement failure) | a failed part fails the repair | keep the closing-measurement one (forced failure); the other two are covered by `test_winding`/`test_alphawrap` step-failure tests |
 | `TestCleanGates.test_model_skip_keeps_the_non_finite_guard` | NaN guard on the skip path | keep (forced failure) |

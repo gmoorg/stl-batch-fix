@@ -38,6 +38,7 @@ FAKE_CHILD = textwrap.dedent('''
     parser.add_argument('--result-file', required=True)
     parser.add_argument('--managed-child', action='store_true')
     parser.add_argument('--reconstruct-budget-bytes')
+    parser.add_argument('--min-shell-faces')
     args = parser.parse_args()
 
     name = os.path.basename(args.one_file)
@@ -159,6 +160,7 @@ class TestBasicDispatch(_PoolTestCase):
             parser.add_argument('--result-file', required=True)
             parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
+            parser.add_argument('--min-shell-faces')
             args = parser.parse_args()
             os.makedirs(os.path.dirname(args.destination), exist_ok=True)
             with open(args.destination, 'wb') as f:
@@ -204,6 +206,7 @@ class TestBasicDispatch(_PoolTestCase):
             parser.add_argument('--result-file', required=True)
             parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
+            parser.add_argument('--min-shell-faces')
             args = parser.parse_args()
             os.makedirs(os.path.dirname(args.destination), exist_ok=True)
             with open(args.destination, 'wb') as f:
@@ -322,6 +325,7 @@ class TestCancellation(_PoolTestCase):
             "p.add_argument('--result-file', required=True)\n"
             "p.add_argument('--managed-child', action='store_true')\n"
             "p.add_argument('--reconstruct-budget-bytes')\n"
+            "p.add_argument('--min-shell-faces')\n"
             'args = p.parse_args()\n'
             f'markers = {{"hang_a.stl": {str(marker_a)!r}, "hang_b.stl": {str(marker_b)!r}}}\n'
             'open(markers[os.path.basename(args.one_file)], "w").close()\n'
