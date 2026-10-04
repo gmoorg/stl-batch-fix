@@ -13,6 +13,12 @@ from .indicators import Indicator
 from .mesh_io import Kind, Mesh
 from .pool import Pool
 
+#: What the walk treats as a mesh, compared case-insensitively.  Content is
+#: never used to decide this: `mesh_io.kind` sniffs, and anything that does
+#: not look like ASCII STL sniffs as binary STL — a stray .zip or .3mf in the
+#: input tree would be parsed as one.
+MESH_EXTENSIONS = frozenset({'.stl', '.obj'})
+
 
 @dataclass
 class Summary:
@@ -26,6 +32,7 @@ class Summary:
     copy_failed: int = 0
     already_copied: int = 0
     skipped: int = 0          # already fixed, or a marker said do not retry
+    ignored: int = 0          # neither a mesh nor a companion; not touched
     emitted: int = 0          # handed to the consumer, valid or not
     converted: int = 0
     conversion_failed: int = 0
@@ -62,8 +69,16 @@ def prepare(source_root: str,
             emit: Callable[[Mesh], None],
             copy_extensions: Iterable[str] = (),
             convert: Callable[..., tuple[bool, str]] | None = None,
-            workers: int = 4) -> Summary:
+            workers: int = 4,
+            *,
+            mesh_extensions: Iterable[str] = MESH_EXTENSIONS) -> Summary:
     """Classify everything under `source_root`, then feed `emit`.
+
+    Only files whose extension (any letter case) is in `mesh_extensions` are
+    meshes, and only those in `copy_extensions` are companions.  Everything
+    else is counted as `ignored` and never looked at again — no probe, no
+    conversion, no copy, and no output, marker or export is consulted for it.
+    An extension may not be in both sets.
 
     `convert(source, export, *, model_destination) -> (ok, path)` does the
     format conversion, writing `export`. `model_destination` is the output
@@ -82,6 +97,10 @@ def prepare(source_root: str,
        result and emitting it.
     """
     copy_set = frozenset(e.lower() for e in copy_extensions)
+    mesh_set = frozenset(e.lower() for e in mesh_extensions)
+    if copy_set & mesh_set:
+        raise ValueError('extensions both copied and processed as meshes: '
+                         + ', '.join(sorted(copy_set & mesh_set)))
     summary = Summary()
     pending: list[tuple[str, str, str]] = []   # (source, export path, destination)
 
@@ -97,6 +116,10 @@ def prepare(source_root: str,
 
     for source in _walk(source_root):
         summary.scanned += 1
+        ext = os.path.splitext(source)[1].lower()
+        if ext not in copy_set and ext not in mesh_set:
+            summary.ignored += 1
+            continue
         destination = _output_for(source, source_root, output_root)
         found = indicators.check(source, source_root, destination,
                                  copy_extensions=copy_set or None)

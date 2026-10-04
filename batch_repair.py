@@ -990,10 +990,11 @@ def _run(config: RunConfig) -> int:
     try:
         summary = converter.prepare(
             config.input, config.output, collect,
-            copy_extensions={'.png', '.jpg', '.jpeg', '.gif', '.txt'},
+            copy_extensions={'.png', '.jpg', '.jpeg', '.gif', '.txt', ".pdf", ".tif", ".tiff", ".url", ".webp"},
             convert=functools.partial(_convert_logged, runner=intake_runner, run_id=run_id,
                                       reserved=_reserved_logs(config)),
             workers=1,
+            mesh_extensions=converter.MESH_EXTENSIONS,
         )
     except KeyboardInterrupt:
         # Reuses the EXISTING pattern the main dispatch loop below already

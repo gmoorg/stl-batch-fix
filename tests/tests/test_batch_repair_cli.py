@@ -189,6 +189,7 @@ class TestBatchRepairCLI(unittest.TestCase):
             code, text = self.invoke()
         self.assertEqual(code, 1, text)
         self.assertIn('copy_failed=1', text)
+        self.assertIn('ignored=0', text)
         self.assertIn('total=0, jobs=0', text)
 
     def test_intake_exception_is_incomplete(self):

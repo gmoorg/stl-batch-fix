@@ -426,5 +426,96 @@ class TestMixedTree(ConverterCase):
         self.assertTrue(all(m.is_valid for m in self.seen))
 
 
+class TestMeshFilter(ConverterCase):
+    """Only .stl/.obj, in any letter case, are meshes; the rest is ignored.
+
+    Content sniffing classifies anything that is not ASCII STL as binary STL,
+    so without the filter a stray archive in the input tree was parsed as a
+    mesh.  "Ignored" is checked at the calls that would touch the file, not by
+    the absence of output alone.
+    """
+
+    def run_traced(self, **kwargs):
+        checked, probed, converted = [], [], []
+        real_check, real_probe = converter.indicators.check, converter.mesh_io.probe
+
+        def check(source, *args, **kw):
+            checked.append(os.path.basename(source))
+            return real_check(source, *args, **kw)
+
+        def probe(path, destination):
+            probed.append(os.path.basename(path))
+            return real_probe(path, destination)
+
+        def convert(source, export, *, model_destination):
+            converted.append(os.path.basename(source))
+            _binary_stl(export)
+            return True, export
+
+        with mock.patch.object(converter.indicators, 'check', check), \
+                mock.patch.object(converter.mesh_io, 'probe', probe):
+            summary = prepare(self.src, self.out, self.emit, copy_extensions=COPY_EXTS,
+                              convert=convert, workers=1, **kwargs)
+        return summary, checked, probed, converted
+
+    def test_mesh_extensions_match_in_any_case(self):
+        _binary_stl(self.s('a.STL'))
+        _binary_stl(self.s('b.Stl'))
+        _binary_stl(self.s('d.stl'))
+        _touch(self.s('c.OBJ'), 'v 0 0 0\n')
+        summary, _, _, converted = self.run_traced()
+        self.assertEqual(converted, ['c.OBJ'])
+        self.assertEqual(sorted(os.path.basename(m.destination) for m in self.seen),
+                         ['a.STL', 'b.Stl', 'c.stl', 'd.stl'])
+        self.assertEqual(summary.ignored, 0)
+
+    def test_other_files_are_ignored_untouched_and_counted(self):
+        _binary_stl(self.s('keep.stl'))
+        for name in ('e.zip', 'f.3mf', 'g'):
+            _binary_stl(self.s(name))          # would sniff as binary STL
+        summary, checked, probed, converted = self.run_traced()
+        self.assertEqual(summary.ignored, 3)
+        self.assertEqual(summary.scanned, 4)
+        self.assertEqual(checked, ['keep.stl'])
+        self.assertEqual(probed, ['keep.stl'])
+        self.assertEqual(converted, [])
+        self.assertEqual([os.path.basename(m.path) for m in self.seen], ['keep.stl'])
+        self.assertEqual(os.listdir(self.out), [])
+
+    def test_stale_artifacts_of_ignored_files_are_not_consulted_or_changed(self):
+        _binary_stl(self.s('f.3mf'))
+        stale = {self.o('f.3mf'): 'output', self.o('f.failed.stl'): 'marker',
+                 export_path(self.s('f.3mf'), self.src): 'export'}
+        for path, text in stale.items():
+            _touch(path, text)
+        summary, checked, probed, _ = self.run_traced()
+        self.assertEqual((summary.ignored, summary.skipped, summary.emitted), (1, 0, 0))
+        self.assertEqual((checked, probed), ([], []))
+        for path, text in stale.items():
+            with open(path) as handle:
+                self.assertEqual(handle.read(), text)
+
+    def test_companions_still_copy_in_any_case(self):
+        _touch(self.s('render.PNG'))
+        summary, _, probed, _ = self.run_traced()
+        self.assertEqual((summary.copied, summary.ignored), (1, 0))
+        self.assertTrue(os.path.exists(self.o('render.PNG')))
+        self.assertEqual(probed, [])
+
+    def test_an_extension_cannot_be_both_copied_and_processed(self):
+        _touch(self.s('notes.txt'))
+        _binary_stl(self.s('a.stl'))
+        with self.assertRaises(ValueError):
+            prepare(self.src, self.out, self.emit, copy_extensions={'.STL', '.txt'})
+        self.assertEqual(self.seen, [])
+        self.assertEqual(os.listdir(self.out), [])
+
+    def test_empty_mesh_set_only_copies(self):
+        _touch(self.s('notes.txt'))
+        _binary_stl(self.s('a.stl'))
+        summary, _, _, _ = self.run_traced(mesh_extensions=())
+        self.assertEqual((summary.copied, summary.ignored, summary.emitted), (1, 1, 0))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

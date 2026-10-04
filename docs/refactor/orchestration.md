@@ -14,8 +14,11 @@ input/output folders and dependencies — all before any output or log is
 created — then:
 
 1. `converter.prepare`: walk input, check indicators, copy companions, convert
-   OBJ/ASCII STL with Blender, and collect probed binary meshes. Intake uses
-   one conversion worker; it precedes isolated repair dispatch.
+   OBJ/ASCII STL with Blender, and collect probed binary meshes. Only `.stl`
+   and `.obj` (any letter case, `converter.MESH_EXTENSIONS`) are meshes;
+   files that are neither a mesh nor a companion are counted as `ignored`
+   before any indicator check and never touched. Intake uses one conversion
+   worker; it precedes isolated repair dispatch.
 2. Preflight rejects invalid jobs, colliding destination/marker paths, and
    pre-existing publication paths among emitted jobs. Sort by triangle count.
 3. Two sequential passes over the same `_Runner` (same pool, timeouts,
