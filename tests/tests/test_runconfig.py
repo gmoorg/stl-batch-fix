@@ -2,6 +2,7 @@
 for the shipped batch_repair.example.toml that documents it."""
 
 import os
+import shutil
 import tempfile
 import tomllib
 import unittest
@@ -238,23 +239,46 @@ class TestResolve(unittest.TestCase):
         self.assertEqual((config.workers, config.log_file, config.memory_budget_bytes),
                          (2, '/l/x.log', 1000))
 
-    def test_budget_is_the_fraction_of_available_memory(self):
-        sysconf = {'SC_PAGE_SIZE': 4096, 'SC_AVPHYS_PAGES': 1000}
-        with mock.patch('os.sysconf', side_effect=sysconf.__getitem__):
+    def _meminfo(self, text):
+        path = os.path.join(tempfile.mkdtemp(), 'meminfo')
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        if text is not None:
+            with open(path, 'w') as f:
+                f.write(text)
+        return mock.patch.object(runconfig, 'MEMINFO_PATH', path)
+
+    def test_budget_is_the_fraction_of_memavailable(self):
+        """MemAvailable, not free pages: a warm page cache is reclaimable."""
+        sysconf = {'SC_PAGE_SIZE': 4096, 'SC_AVPHYS_PAGES': 1}
+        with self._meminfo('MemTotal: 9999 kB\nMemFree: 10 kB\nMemAvailable: 2000 kB\n'), \
+             mock.patch('os.sysconf', side_effect=sysconf.__getitem__):
             config = runconfig.resolve(self.base(memory_budget_fraction=0.5))
-        self.assertEqual(config.memory_budget_bytes, 4096 * 1000 // 2)
+        self.assertEqual(config.memory_budget_bytes, 2000 * 1024 // 2)
+
+    def test_free_pages_when_memavailable_is_unusable(self):
+        sysconf = {'SC_PAGE_SIZE': 4096, 'SC_AVPHYS_PAGES': 1000}
+        for text in (None, 'MemFree: 10 kB\n', 'MemAvailable: lots kB\n',
+                     'MemAvailable: 2000 MB\n', 'MemAvailable: 0 kB\n'):
+            with self.subTest(text=text), self._meminfo(text), \
+                 mock.patch('os.sysconf', side_effect=sysconf.__getitem__):
+                config = runconfig.resolve(self.base(memory_budget_fraction=0.5))
+                self.assertEqual(config.memory_budget_bytes, 4096 * 1000 // 2)
+
+    def test_explicit_budget_ignores_memavailable(self):
+        with self._meminfo('MemAvailable: 2000 kB\n'):
+            config = runconfig.resolve(self.base(memory_budget_bytes=1234))
+        self.assertEqual(config.memory_budget_bytes, 1234)
 
     def test_a_zero_derived_budget_is_an_error(self):
         sysconf = {'SC_PAGE_SIZE': 4096, 'SC_AVPHYS_PAGES': 0}
-        with mock.patch('os.sysconf', side_effect=sysconf.__getitem__), \
+        with self._meminfo(None), mock.patch('os.sysconf', side_effect=sysconf.__getitem__), \
              self.assertRaisesRegex(ConfigError, 'memory_budget_bytes'):
             runconfig.resolve(self.base())
 
-    def test_unavailable_sysconf_is_an_error(self):
-        with mock.patch('os.sysconf', side_effect=ValueError), \
+    def test_unavailable_memory_is_an_error(self):
+        with self._meminfo(None), mock.patch('os.sysconf', side_effect=ValueError), \
              self.assertRaisesRegex(ConfigError, 'memory_budget_bytes'):
             runconfig.resolve(self.base())
-
 
 if __name__ == '__main__':
     unittest.main()

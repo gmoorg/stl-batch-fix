@@ -111,8 +111,16 @@ reap_deadline = 10.0
 
 # Memory admission: a file is started only while the estimated memory of all
 # running files fits the budget. Large models therefore run fewer at a time.
+# Every file goes through two passes: first all files are PREPARED (initial
+# decimation, saved under <input>/stl-decimated/ with the face target in the
+# name and reused by later runs; then every part is planned), then all are
+# REPAIRED. Each pass reserves its own estimate; the repair estimate is
+# computed from the prepared model's real parts and surface area. Estimates
+# are fitted to measured runs, not hard limits. A file whose estimate exceeds
+# the whole budget still runs, alone, so it is never stuck.
 #
-# Share of the memory available when the run starts, between 0 and 1.
+# Share of the memory available when the run starts, between 0 and 1
+# ("available" is Linux's MemAvailable: free memory plus cache it can drop).
 # Used only when memory_budget_bytes is 0. Checked even when unused.
 # Default: 0.7
 memory_budget_fraction = 0.7

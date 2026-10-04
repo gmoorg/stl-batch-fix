@@ -4,56 +4,16 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
 [pipeline](orchestration.md). Historical review evidence and test results are
 [archived](../../archive/README.md). Remove completed tasks; update the owning reference.
 
-## Runner and concurrency
-
-- [ ] Replace the admission memory estimate. Today it is source triangles ×
-  890 B × an unvalidated factor 3 — but alpha-wrap's memory follows the
-  surface it wraps, not the input face count. Measured 2026-10-03: a
-  6,080-face sphere of radius 132 mm was estimated at 16 MB and peaked at
-  15.3 GB (alpha-wrap 23 min). With 4 workers, several such models could be
-  admitted together and exhaust RAM. The budget is also too small: it uses
-  free pages (`SC_AVPHYS_PAGES`), not `MemAvailable` (4.5 GB vs 23.5 GB here).
-
-  Measured prediction, A = surface area of the mesh being wrapped (mm²),
-  α = the alpha actually used (after the 0.15 cap):
-
-  - Output faces ≈ 1.39 · A / α² for a closed surface (open patches: ≈ 2.86,
-    both sides of the sheet).
-  - Peak memory of the wrapping process ≈ 1.6–2.0 KB · A / α², i.e. about
-    1.3 KB per output face, plus ~100 MB process baseline that dominates
-    small wraps.
-
-  | Wrap | A (mm²) | α | Faces out | faces / (A/α²) | Peak | bytes / (A/α²) | Time |
-  |---|---|---|---|---|---|---|---|
-  | Sphere r=13.2 (1,000-facet input) | 2,195 | 0.0572 | 930,942 | 1.39 | — | — | 53 s |
-  | Mirko_BodySFW, whole (300k faces) | 23,721 | 0.15 | 1,460,894 | 1.39 | 1,963 MB | 1,952 | 175 s |
-  | Sphere r=132 (6,080 faces) | 219,473 | 0.15 | not logged | — | 15,277 MB | 1,642 | 1,368 s |
-  | Mirko, 25 open region patches | 142–1,987 each | 0.15 | 18,786–250,564 | 2.80–2.97 | 119–337 MB | 4,002–9,608 | 1.5–19.6 s |
-
-  An input-area estimate is conservative for meshes with internal or
-  duplicate surfaces (only the outer envelope is wrapped). Two closed-model
-  memory points so far; measure a few more before relying on the constant.
-  Related option, not decided: choose α per part from its face budget
-  (faces ≈ 1.39 · A / α²), which bounds memory and time directly — needs a
-  visual check, since `diag/800` was chosen by inspection.
-  Tried and rejected (2026-10-03): wrapping a model in 3×3×3 spatial regions
-  and concatenating. Peak memory fell ~6× (337 MB vs 1,963 MB), but each
-  region is an open surface patch, so the wrap is a thin two-sided sheet and
-  the glued model was a hollow skin (2% of the original volume) with seams;
-  it also took longer (259 s vs 175 s). Making regions solid needs capped cuts,
-  which need the watertight input broken models lack. A solid tiled
-  alternative would be winding-number inside/outside (libigl) + marching
-  cubes on one global grid in blocks — a replacement for alpha-wrap, not a
-  patch.
-
 ## Reconstruction
 
 - [ ] Winding-number reconstruction (`libs/winding.py`, default part step
   since 2026-10-03) follow-ups, details in [reconstruction](reconstruction.md):
   more broken models (large holes); stream each block's output to lower the
   memory floor; avoid the per-block winding-number octree rebuild on large
-  inputs; have batch admission use `winding.estimate_bytes` (it still uses
-  source triangles × 890 B × 3, so concurrent workers can exceed RAM).
+  inputs. Post-reconstruction decimation is bounded by no budget (memory and
+  time follow ~3·A/h² rebuilt faces; sphere r 132: 29 M faces, 353 s,
+  13.9 GB) — admission reserves for it, reducing it needs an owner decision
+  (e.g. per-part spacing from area, or decimating blocks before the weld).
 
 ## Tests
 

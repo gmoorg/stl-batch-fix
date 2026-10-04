@@ -180,6 +180,14 @@ class TestSkipping(ConverterCase):
         self.assertEqual(self.seen, [])
         self.assertEqual(summary.scanned, 0)
 
+    def test_the_decimated_folder_is_not_walked(self):
+        """The prepare pass's decimated copies are intermediate input."""
+        from libs.indicators import DECIMATED_DIRNAME
+        _binary_stl(os.path.join(self.src, DECIMATED_DIRNAME, 'a.stl.900000.stl'))
+        summary = self.run_prepare()
+        self.assertEqual(self.seen, [])
+        self.assertEqual(summary.scanned, 0)
+
     def test_appledouble_sidecars_are_ignored(self):
         """macOS writes ._name next to every zipped file: no geometry."""
         _touch(self.s('._head.stl'))

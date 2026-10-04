@@ -17,6 +17,13 @@ _KNOWN_CATEGORIES = frozenset({
     'published', 'intake_failure', 'load_failure', 'process_failure', 'write_failure',
 })
 
+#: A prepare child that finished its work and hands the job to the repair
+#: pass. The only non-terminal category, and only valid in prepare mode.
+PREPARED = 'prepared'
+
+#: The two child modes; see libs/jobmemory.py and orchestration.md.
+MODES = ('prepare', 'repair')
+
 
 @dataclass(frozen=True)
 class ChildResult:
@@ -39,6 +46,19 @@ class ChildResult:
     #: parent's progress log, not the full `repairer.StepResult` objects
     #: (no scan/volume data serialized here; those stay in-process only).
     steps: tuple[str, ...] = ()
+    #: Which child wrote it. A prepare child either hands off (`category`
+    #: PREPARED, with `prepared_path` and `estimate_bytes`) or ends the job
+    #: with an ordinary terminal result, which carries neither.
+    mode: str = 'repair'
+    #: The mesh the repair pass loads: the decimation cache, or the source
+    #: itself when no decimation was needed.
+    prepared_path: str | None = None
+    #: The repair pass's reservation, from `jobmemory.repair_bytes`.
+    estimate_bytes: int | None = None
+
+    @property
+    def is_handoff(self) -> bool:
+        return self.category == PREPARED
 
     @property
     def clean(self) -> bool:
@@ -52,7 +72,8 @@ def write(path: str, result: ChildResult) -> None:
             json.dump(asdict(result), f)
 
 
-def read_and_validate(path: str, expected_source: str) -> ChildResult | None:
+def read_and_validate(path: str, expected_source: str, mode: str = 'repair',
+                      expected_prepared: str | None = None) -> ChildResult | None:
     """The parent's side: a bounded, strictly validated read.
 
     Returns `None` for anything that is not unambiguously a valid result —
@@ -60,7 +81,14 @@ def read_and_validate(path: str, expected_source: str) -> ChildResult | None:
     missing field, an unknown category, or an indicator name this project
     does not recognise.  `None` is the single signal that routes the caller
     into crash/timeout reconciliation; there is no partial trust.
+
+    `mode` is the mode the parent launched the child in; a result written by
+    the other mode is rejected. In prepare mode a handoff must name
+    `expected_prepared` exactly and carry a positive integer estimate; a
+    terminal result in either mode must carry neither.
     """
+    if mode not in MODES:
+        raise ValueError(f'unknown child mode {mode!r}')
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -80,7 +108,22 @@ def read_and_validate(path: str, expected_source: str) -> ChildResult | None:
         return None
     if not isinstance(raw['path'], str) or raw['path'] != expected_source:
         return None
-    if not isinstance(raw['category'], str) or raw['category'] not in _KNOWN_CATEGORIES:
+    if raw.get('mode', 'repair') != mode:
+        return None
+    category = raw['category']
+    handoff = mode == 'prepare' and category == PREPARED
+    if not isinstance(category, str) or not (handoff or category in _KNOWN_CATEGORIES):
+        return None
+    prepared_path = raw.get('prepared_path')
+    estimate = raw.get('estimate_bytes')
+    if handoff:
+        if prepared_path is None or prepared_path != expected_prepared:
+            return None
+        if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate <= 0:
+            return None
+        if raw['indicator'] is not None or raw['written_path'] is not None:
+            return None
+    elif prepared_path is not None or estimate is not None:
         return None
     indicator = raw['indicator']
     if indicator is not None:
@@ -95,6 +138,7 @@ def read_and_validate(path: str, expected_source: str) -> ChildResult | None:
     if not isinstance(steps, list) or not all(isinstance(s, str) for s in steps):
         return None
 
-    return ChildResult(path=raw['path'], category=raw['category'], indicator=indicator,
+    return ChildResult(path=raw['path'], category=category, indicator=indicator,
                        stage=raw['stage'], reason=raw['reason'], written_path=written_path,
-                       steps=tuple(steps))
+                       steps=tuple(steps), mode=mode, prepared_path=prepared_path,
+                       estimate_bytes=estimate)

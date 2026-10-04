@@ -299,6 +299,7 @@ class TestBatchRepairCLI(unittest.TestCase):
                 args.skip_clean = False
                 args.reconstruct_budget_bytes = 10 ** 10
                 args.min_shell_faces = 100
+                args.mode, args.cache_path, args.load_from = 'repair', None, None
                 with mock.patch.object(processor, 'process', fake_process):
                     batch_repair_child.run_one_file(args)
                 os.unlink(result_path)
@@ -369,6 +370,7 @@ class TestCleanGateFlags(unittest.TestCase):
             args.skip_clean = flag
             args.reconstruct_budget_bytes = 10 ** 10
             args.min_shell_faces = 100
+            args.mode, args.cache_path, args.load_from = 'repair', None, None
             with mock.patch.object(processor, 'process', spy):
                 batch_repair_child.run_one_file(args)
         self.assertEqual(captured, [False, True])
@@ -550,6 +552,7 @@ class TestMinShellFacesPlumbing(unittest.TestCase):
         args.managed_child, args.skip_clean = False, False
         args.reconstruct_budget_bytes = 10 ** 10
         args.min_shell_faces = 250
+        args.mode, args.cache_path, args.load_from = 'repair', None, None
         with mock.patch.object(processor, 'process', fake_process):
             batch_repair_child.run_one_file(args)
         self.assertEqual(captured['floor'], 250)

@@ -297,7 +297,19 @@ class TestReportingWriteFailure(unittest.TestCase):
             parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
+            parser.add_argument('--mode', default='repair')
+            parser.add_argument('--cache-path')
+            parser.add_argument('--load-from')
             args = parser.parse_args()
+            if args.mode == 'prepare':
+                import json as _json, os as _os
+                _r = {'path': args.one_file, 'category': 'prepared', 'indicator': None, 'stage': 'prepare',
+                      'reason': 'fake prepared', 'written_path': None, 'mode': 'prepare',
+                      'prepared_path': args.one_file, 'estimate_bytes': 1}
+                with open(args.result_file + '.p', 'w') as _f:
+                    _f.write(_json.dumps(_r))
+                _os.replace(args.result_file + '.p', args.result_file)
+                raise SystemExit(0)
             result = {'path': args.one_file, 'category': 'published', 'indicator': 'PROCESS',
                      'stage': 'process', 'reason': 'ok', 'written_path': args.destination}
             staged = args.result_file + '.tmp'
@@ -387,7 +399,19 @@ class TestSigkillRetention(unittest.TestCase):
             parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
+            parser.add_argument('--mode', default='repair')
+            parser.add_argument('--cache-path')
+            parser.add_argument('--load-from')
             args = parser.parse_args()
+            if args.mode == 'prepare':
+                import json as _json, os as _os
+                _r = {'path': args.one_file, 'category': 'prepared', 'indicator': None, 'stage': 'prepare',
+                      'reason': 'fake prepared', 'written_path': None, 'mode': 'prepare',
+                      'prepared_path': args.one_file, 'estimate_bytes': 1}
+                with open(args.result_file + '.p', 'w') as _f:
+                    _f.write(_json.dumps(_r))
+                _os.replace(args.result_file + '.p', args.result_file)
+                raise SystemExit(0)
             name = os.path.basename(args.one_file)
             if name.startswith('slow_'):
                 time.sleep(600)
@@ -493,7 +517,19 @@ class TestRealRunProgressLog(unittest.TestCase):
             parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
+            parser.add_argument('--mode', default='repair')
+            parser.add_argument('--cache-path')
+            parser.add_argument('--load-from')
             args = parser.parse_args()
+            if args.mode == 'prepare':
+                import json as _json, os as _os
+                _r = {'path': args.one_file, 'category': 'prepared', 'indicator': None, 'stage': 'prepare',
+                      'reason': 'fake prepared', 'written_path': None, 'mode': 'prepare',
+                      'prepared_path': args.one_file, 'estimate_bytes': 1}
+                with open(args.result_file + '.p', 'w') as _f:
+                    _f.write(_json.dumps(_r))
+                _os.replace(args.result_file + '.p', args.result_file)
+                raise SystemExit(0)
             result = {'path': args.one_file, 'category': 'published', 'indicator': 'PROCESS',
                      'stage': 'process', 'reason': 'fake ok', 'written_path': args.destination}
             staged = args.result_file + '.tmp'

@@ -211,6 +211,27 @@ def _decimate_logged(mesh: Mesh, max_faces: int, step_name: str,
     return result
 
 
+def decimate_initial(mesh: Mesh, max_faces: int,
+                     step_logger: steplog.StepLogger = steplog.null_logger,
+                     source_name: str = '') -> tuple[Outcome | None, decimator.Result]:
+    """The initial whole-mesh decimation, as `process` runs it.
+
+    Returns `(outcome, result)`: `outcome` is the UNDECIMATED outcome to
+    publish when the decimator failed, else None. Also the batch prepare
+    child's decimation (libs/jobmemory.py), so both run the same pass.
+    """
+    mesh_io.require_geometry(mesh)
+    decimated = _decimate_logged(mesh, max_faces, 'decimate', step_logger, source_name)
+    if decimated.rung is decimator.Rung.FAILED:
+        # Its own outcome, not a lesser repair failure.  A file that cannot be
+        # reduced will be reduced by the printer instead, which reintroduces
+        # exactly the defects this tool removes.
+        return (Outcome(Indicator.UNDECIMATED, None, 'source',
+                        _decimation_failure_reason(decimated),
+                        decimation=decimated), decimated)
+    return None, decimated
+
+
 def process(mesh: Mesh, max_faces: int,
             part_steps=None,
             step_logger: steplog.StepLogger = steplog.null_logger,
@@ -268,14 +289,9 @@ def process(mesh: Mesh, max_faces: int,
     decimated mesh, and a gated mesh is still judged here like any other.
     """
     mesh_io.require_geometry(mesh)
-    decimated = _decimate_logged(mesh, max_faces, 'decimate', step_logger, source_name)
-    if decimated.rung is decimator.Rung.FAILED:
-        # Its own outcome, not a lesser repair failure.  A file that cannot be
-        # reduced will be reduced by the printer instead, which reintroduces
-        # exactly the defects this tool removes.
-        return Outcome(Indicator.UNDECIMATED, None, 'source',
-                       _decimation_failure_reason(decimated),
-                       decimation=decimated)
+    failed, decimated = decimate_initial(mesh, max_faces, step_logger, source_name)
+    if failed is not None:
+        return failed
 
     repaired = repairer.repair(decimated.mesh, part_steps=part_steps,
                                step_logger=step_logger, source_name=source_name,

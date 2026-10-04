@@ -95,7 +95,19 @@ class TestRunSigint(unittest.TestCase):
             "p.add_argument('--managed-child', action='store_true')\n"
             "p.add_argument('--reconstruct-budget-bytes')\n"
             "p.add_argument('--min-shell-faces')\n"
+            "p.add_argument('--mode', default='repair')\n"
+            "p.add_argument('--cache-path')\n"
+            "p.add_argument('--load-from')\n"
             'args = p.parse_args()\n'
+            "if args.mode == 'prepare':\n"
+            "    import json as _json, os as _os\n"
+            "    _r = {'path': args.one_file, 'category': 'prepared', 'indicator': None, 'stage': 'prepare',\n"
+            "          'reason': 'fake prepared', 'written_path': None, 'mode': 'prepare',\n"
+            "          'prepared_path': args.one_file, 'estimate_bytes': 1}\n"
+            "    with open(args.result_file + '.p', 'w') as _f:\n"
+            "        _f.write(_json.dumps(_r))\n"
+            "    _os.replace(args.result_file + '.p', args.result_file)\n"
+            "    raise SystemExit(0)\n"
             f'open({str(child_running_marker)!r}, "w").close()\n'   # proves the child is really running
             'time.sleep(600)\n'   # never finishes on its own — must be killed
         )
@@ -205,7 +217,19 @@ class TestRunSigint(unittest.TestCase):
             "p.add_argument('--managed-child', action='store_true')\n"
             "p.add_argument('--reconstruct-budget-bytes')\n"
             "p.add_argument('--min-shell-faces')\n"
+            "p.add_argument('--mode', default='repair')\n"
+            "p.add_argument('--cache-path')\n"
+            "p.add_argument('--load-from')\n"
             'args = p.parse_args()\n'
+            "if args.mode == 'prepare':\n"
+            "    import json as _json, os as _os\n"
+            "    _r = {'path': args.one_file, 'category': 'prepared', 'indicator': None, 'stage': 'prepare',\n"
+            "          'reason': 'fake prepared', 'written_path': None, 'mode': 'prepare',\n"
+            "          'prepared_path': args.one_file, 'estimate_bytes': 1}\n"
+            "    with open(args.result_file + '.p', 'w') as _f:\n"
+            "        _f.write(_json.dumps(_r))\n"
+            "    _os.replace(args.result_file + '.p', args.result_file)\n"
+            "    raise SystemExit(0)\n"
             'os.makedirs(os.path.dirname(args.destination), exist_ok=True)\n'
             "with open(args.destination, 'wb') as f:\n"
             "    f.write(b'real published output')\n"

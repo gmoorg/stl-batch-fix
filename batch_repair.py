@@ -34,7 +34,7 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 from libs import blender, childresult, converter, decimator, pipeconfig, winding  # noqa: E402
 from libs import meshfix, meshlab, mesh_io, modellog, processor, publication, runconfig, runstate, steplog  # noqa: E402
-from libs import splitter                                                 # noqa: E402
+from libs import indicators, jobmemory, splitter                          # noqa: E402
 from libs.childresult import ChildResult                                  # noqa: E402
 from libs.indicators import Indicator                                     # noqa: E402
 from libs.mesh_io import Mesh                                             # noqa: E402
@@ -275,9 +275,14 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                        *,
                        skip_clean: bool = False,
                        reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
-                       min_shell_faces: int = splitter.MIN_SHELL_FACES
+                       min_shell_faces: int = splitter.MIN_SHELL_FACES,
+                       load_path: str | None = None
                        ) -> ChildResult:
     """The exact per-file body the old serial loop ran, now for one file only.
+
+    `load_path` is the mesh to repair when it is not `source_path` itself:
+    the repair pass loads what the prepare pass saved. Markers still copy
+    `source_path`, the job's own source.
 
     `nested_process_group` is threaded straight into `processor.process(...)` —
     see `batch_repair_child.run_one_file`'s docstring for where it comes from.
@@ -295,7 +300,7 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
     # path — a basename alone would make two same-named files in different
     # subfolders indistinguishable in a shared step log.
     source_name = os.path.abspath(source_path)
-    mesh = mesh_io.probe(source_path, destination)
+    mesh = mesh_io.probe(load_path or source_path, destination)
     if not mesh.is_valid:
         reason = mesh.problem or reason
     else:
@@ -331,6 +336,134 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
             reason = f'{type(exc).__name__}: {exc}'
     return ChildResult(path=source_path, category=category, indicator=indicator,
                        stage=stage, reason=reason, written_path=written_path, steps=steps)
+
+
+#: Decimated copies, kept between runs beside `indicators.EXPORT_DIRNAME`
+#: in the input tree; the face target is part of each file name.
+DECIMATED_DIRNAME = indicators.DECIMATED_DIRNAME
+
+
+def decimated_path(input_root: str, source: str, max_faces: int) -> str:
+    """Where the prepare pass keeps the decimated mesh of job `source`.
+
+    Keyed by the job's own source path relative to the input tree — the
+    file the job loads, so a converted model is keyed by its
+    `stl-exported/` copy and never shares a cache with a native STL bound
+    for the same output (`stl-decimated/stl-exported/a.stl.N.stl` vs
+    `stl-decimated/a.stl.N.stl`). Sources are never modified, so a cache
+    never goes stale; a new `max_faces` gets its own file.
+
+    The one clash left needs an input directory literally named like a cache
+    file (`a.stl.900000.stl/`); writing that cache then fails, and the job
+    fails with the reason rather than reading the wrong geometry.
+    """
+    rel = os.path.relpath(os.path.abspath(source), os.path.abspath(input_root))
+    return os.path.join(os.path.abspath(input_root), DECIMATED_DIRNAME,
+                        f'{rel}.{int(max_faces)}.stl')
+
+
+def expected_prepared_path(mesh: Mesh, cache_path: str, max_faces: int) -> str:
+    """The mesh the repair pass will load: the cache when the initial
+    decimation has work to do (the decimator's own guard), else the source."""
+    needs = max_faces > 0 and (mesh.triangles or 0) > max_faces
+    return cache_path if needs else mesh.path
+
+
+def _load_cache(cache_path: str, destination: str) -> Mesh | None:
+    """A usable cached decimation, or None to rebuild it."""
+    if not os.path.isfile(cache_path):
+        return None
+    try:
+        cached = mesh_io.probe(cache_path, destination)
+        if not cached.is_valid:
+            return None
+        loaded = mesh_io.load(cached)
+        return loaded if loaded.is_valid and loaded.triangles > 0 else None
+    except Exception:                                 # noqa: BLE001 — rebuild instead
+        return None
+
+
+def _prepare_one_file(source_path: str, destination: str, max_faces: int,
+                      cache_path: str,
+                      step_logger: steplog.StepLogger = steplog.null_logger,
+                      *,
+                      reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
+                      min_shell_faces: int = splitter.MIN_SHELL_FACES) -> ChildResult:
+    """The prepare pass for one file: initial decimation, cache, estimate.
+
+    Either hands the job to the repair pass (`childresult.PREPARED`, with the
+    mesh to load and its `jobmemory.repair_bytes` estimate) or ends it with
+    an ordinary terminal result: an unreadable file, or UNDECIMATED published
+    exactly as `processor.process` would publish it.
+
+    A fresh cache is reloaded from disk before estimating, through the same
+    path a cache hit takes, so the estimate is computed on exactly the mesh
+    the repair pass will load (binary STL keeps no vertex identity; loading
+    welds identical coordinates).
+    """
+    stage, category, reason = 'intake', 'intake_failure', 'invalid intake mesh'
+    source_name = os.path.abspath(source_path)
+    steps: list[str] = []
+
+    def terminal(**fields) -> ChildResult:
+        return ChildResult(path=source_path, mode='prepare', steps=tuple(steps),
+                           **{'category': category, 'indicator': None, 'stage': stage,
+                              'reason': reason, 'written_path': None, **fields})
+
+    probed = mesh_io.probe(source_path, destination)
+    if not probed.is_valid:
+        reason = probed.problem or reason
+        return terminal()
+    try:
+        prepared_path = expected_prepared_path(probed, cache_path, max_faces)
+        mesh = None
+        if prepared_path == cache_path:
+            mesh = _load_cache(cache_path, destination)
+            if mesh is not None:
+                steps.append(f'decimate: cached, {mesh.triangles} faces ({cache_path})')
+                step_logger(source_name, 'info', 'decimate', '-', 0.0,
+                            f'cached, {mesh.triangles} faces out ({cache_path})')
+        if mesh is None:
+            stage, category = 'load', 'load_failure'
+            loaded = mesh_io.load(probed)
+            if not loaded.is_valid:
+                reason = loaded.problem or 'invalid loaded mesh'
+                return terminal()
+            if prepared_path == source_path:
+                mesh = loaded
+            else:
+                stage, category = 'process', 'process_failure'
+                failed, decimated = processor.decimate_initial(
+                    loaded, max_faces, step_logger, source_name)
+                steps.append(f'decimate: {decimated.rung.value}, {decimated.faces_out} faces out')
+                if failed is not None:
+                    stage, category = 'write', 'write_failure'
+                    written = processor.write(failed, source_path, destination)
+                    if written is None:
+                        reason = 'processor.write returned None: no publication for UNDECIMATED'
+                        return terminal()
+                    category, stage, reason = 'published', 'process', failed.reason
+                    return terminal(indicator=failed.indicator.name, written_path=written)
+                stage, category = 'write', 'write_failure'
+                if os.path.isdir(cache_path):
+                    reason = (f'decimated cache {cache_path} is a directory in the input '
+                              f'tree; rename that directory to repair this file')
+                    return terminal()
+                mesh_io.write(decimated.mesh.with_destination(cache_path))
+                mesh = _load_cache(cache_path, destination)
+                if mesh is None:
+                    reason = f'decimated cache {cache_path} could not be read back'
+                    return terminal()
+        stage, category = 'process', 'process_failure'
+        estimate = jobmemory.repair_bytes(mesh, min_shell_faces, reconstruct_budget_bytes)
+    except Exception as exc:                          # noqa: BLE001 — reported, not raised
+        reason = f'{type(exc).__name__}: {exc}'
+        return terminal()
+    return ChildResult(path=source_path, category=childresult.PREPARED, indicator=None,
+                       stage='prepare', mode='prepare', written_path=None,
+                       reason=f'{mesh.triangles} faces, repair estimate {estimate / 1e9:.2f} GB',
+                       steps=tuple(steps), prepared_path=prepared_path,
+                       estimate_bytes=int(estimate))
 
 
 # ============================================================================
@@ -378,7 +511,10 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
                   skip_clean: bool = False,
                   output_log=None,
                   reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
-                  min_shell_faces: int = splitter.MIN_SHELL_FACES
+                  min_shell_faces: int = splitter.MIN_SHELL_FACES,
+                  mode: str = 'repair',
+                  cache_path: str | None = None,
+                  load_from: str | None = None
                   ) -> subprocess.Popen:
     """Start one child. `output_log`, when given, is an already-open binary
     file (the model log, opened for append by the caller) that receives the
@@ -395,6 +531,12 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
         argv.append('--skip-clean')
     argv += ['--reconstruct-budget-bytes', str(reconstruct_budget_bytes)]
     argv += ['--min-shell-faces', str(min_shell_faces)]
+    if mode != 'repair':
+        argv += ['--mode', mode]
+    if cache_path is not None:
+        argv += ['--cache-path', cache_path]
+    if load_from is not None:
+        argv += ['--load-from', load_from]
     output = subprocess.DEVNULL if output_log is None else output_log
     return subprocess.Popen(
         argv, start_new_session=True, stdout=output, stderr=output,
@@ -493,6 +635,36 @@ class _Runner:
         # the same `_results_lock` as everything else this class shares
         # across worker threads.
         self._started: dict[int, float] = {}
+        # Which child the next dispatch launches: 'prepare' (pass 1) or
+        # 'repair' (pass 2); `_run` switches it between the two passes.
+        # A runner used directly (tests) defaults to the single repair pass.
+        self.mode = 'repair'
+        # Pass-1 handoffs by job source path: prepared_path, estimate_bytes,
+        # steps and elapsed_seconds. A job present here has no terminal
+        # result yet; pass 2 gives it one.
+        self.prepared: dict[str, dict] = {}
+
+    def _cache_path(self, mesh: Mesh) -> str:
+        return decimated_path(self.config.input, mesh.path, self.config.max_faces)
+
+    def _estimate(self, mesh: Mesh) -> int:
+        """This pass's reservation for `mesh` (libs/jobmemory.py)."""
+        if self.mode == 'prepare':
+            return jobmemory.prepare_bytes(mesh.triangles or 0)
+        handoff = self.prepared.get(mesh.path)
+        if handoff is not None:
+            return handoff['estimate_bytes']
+        # A repair pass without a prepare pass (a runner driven directly):
+        # the same reservation a prepare child would get, at least.
+        return jobmemory.prepare_bytes(mesh.triangles or 0)
+
+    def _handoff(self, result: dict) -> None:
+        """`report_fn` for a successful prepare: record it for pass 2.
+        Not a job report — the job's one terminal result comes later."""
+        mesh = result['mesh']
+        with self._results_lock:
+            self.prepared[mesh.path] = result
+        self._log(f'[prepared] {mesh.path}: {result["reason"]}')
 
     def _log(self, message: str) -> None:
         # Under the same lock as `results`, so a dispatch/completion line
@@ -536,8 +708,7 @@ class _Runner:
         if not self.queue:
             return None
         mesh = self.queue[0]
-        estimate = int((mesh.triangles or 0) * runstate.BUDGET_BYTES_PER_TRIANGLE
-                       * runstate.ALPHA_WRAP_SAFETY_FACTOR_UNVALIDATED)
+        estimate = self._estimate(mesh)
         token = None
         try:
             token, refusal, override = self.run_state.start(estimate, self.config.memory_budget_bytes)
@@ -610,6 +781,12 @@ class _Runner:
         elapsed = self._elapsed(token)
         if elapsed is not None:
             result['elapsed_seconds'] = elapsed
+        handoff = self.prepared.get(result['mesh'].path) if self.mode == 'repair' else None
+        if handoff is not None:
+            # One terminal result per job: it carries both passes.
+            result['steps'] = tuple(handoff.get('steps', ())) + tuple(result.get('steps', ()))
+            if 'elapsed_seconds' in result and handoff.get('elapsed_seconds') is not None:
+                result['elapsed_seconds'] += handoff['elapsed_seconds']
         self.run_state.complete_once(token, self._report, result)
 
     def _start_model_log(self, mesh: Mesh):
@@ -631,14 +808,24 @@ class _Runner:
         os.close(fd)
         try:
             output_log = self._start_model_log(mesh)
+            mode = self.mode
+            cache_path = self._cache_path(mesh)
+            handoff = self.prepared.get(mesh.path) if mode == 'repair' else None
             try:
-                proc = _spawn_child(self.python, self.script, mesh, self.config.max_faces,
+                # The repair pass loads what prepare saved and gets
+                # max_faces 0: the initial decimation already ran there.
+                proc = _spawn_child(self.python, self.script, mesh,
+                                   0 if handoff is not None else self.config.max_faces,
                                    result_file, self.config.log_file or None,
                                    skip_clean=self.config.skip_clean,
                                    output_log=output_log,
                                    reconstruct_budget_bytes=runconfig.budget_bytes(
                                        self.config.reconstruct_memory_budget_gb),
-                                   min_shell_faces=self.config.min_shell_faces)
+                                   min_shell_faces=self.config.min_shell_faces,
+                                   mode=mode,
+                                   cache_path=cache_path if mode == 'prepare' else None,
+                                   load_from=(handoff['prepared_path']
+                                              if handoff is not None else None))
             except Exception as exc:
                 if output_log is not None:
                     output_log.close()
@@ -657,7 +844,7 @@ class _Runner:
                 self._complete(token, _build_cancelled_result(mesh))
                 return
 
-            self._log(f'[start] {mesh.path}')
+            self._log(f'[start] {mesh.path} ({mode})')
             cause = 'exited'
             try:
                 proc.communicate(timeout=self.config.per_file_timeout)
@@ -681,7 +868,16 @@ class _Runner:
             # legitimately publish successfully and then die during its own
             # shutdown, and its returncode carries no information the parent
             # should act on either way.
-            result = childresult.read_and_validate(result_file, mesh.path)
+            result = childresult.read_and_validate(
+                result_file, mesh.path, mode=mode,
+                expected_prepared=(expected_prepared_path(mesh, cache_path, self.config.max_faces)
+                                   if mode == 'prepare' else None))
+            if result is not None and result.is_handoff:
+                self.run_state.complete_once(token, self._handoff, {
+                    'mesh': mesh, 'prepared_path': result.prepared_path,
+                    'estimate_bytes': result.estimate_bytes, 'steps': result.steps,
+                    'reason': result.reason, 'elapsed_seconds': self._elapsed(token)})
+                return
             if result is not None:
                 self._complete(
                     token,
@@ -745,6 +941,25 @@ def _progress_log_path(config: RunConfig) -> str:
     default, or beside a customized `log_file` (spec 5d's Location note)."""
     log_dir = os.path.dirname(config.log_file) if config.log_file else config.output
     return os.path.join(log_dir or config.output, 'progress.log')
+
+
+def _dispatch(runner: "_Runner", config: RunConfig) -> bool:
+    """Run one pass of `runner.queue` through the pool; True if Ctrl+C
+    interrupted it (every child is cancelled and waited for, bounded)."""
+    old_handler = signal.getsignal(signal.SIGINT)
+    try:
+        Pool(config.workers, runner.selector, runner.handler).start()
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            runner.run_state.cancel('SIGINT')
+            deadline = time.monotonic() + 60.0
+            while runner.run_state.has_unresolved() and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            signal.signal(signal.SIGINT, old_handler)
+        return True
+    return False
 
 
 def _run(config: RunConfig) -> int:
@@ -866,20 +1081,25 @@ def _run(config: RunConfig) -> int:
     _log_line(f'Intake done: {len(dispatchable)} job(s) to process '
              f'({len(rejected)} rejected at intake), {config.workers} worker(s).')
 
-    old_handler = signal.getsignal(signal.SIGINT)
-    interrupted = False
-    try:
-        Pool(config.workers, runner.selector, runner.handler).start()
-    except KeyboardInterrupt:
-        interrupted = True
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        try:
-            runner.run_state.cancel('SIGINT')
-            deadline = time.monotonic() + 60.0
-            while runner.run_state.has_unresolved() and time.monotonic() < deadline:
-                time.sleep(0.05)
-        finally:
-            signal.signal(signal.SIGINT, old_handler)
+    # Two passes over the same runner (docs/refactor/orchestration.md):
+    # prepare (initial decimation, cache, exact estimate), then repair, each
+    # job reserved with its own pass's estimate. Sequential, so no child ever
+    # waits for a bigger reservation while holding one.
+    runner.mode = 'prepare'
+    interrupted = _dispatch(runner, config)
+    stopped = (interrupted or runner.run_state.is_cancelled()
+               or runner.run_state.has_incomplete_reason() or runner.run_state.has_unresolved())
+    if not stopped and runner.prepared:
+        runner.mode = 'repair'
+        runner.queue.extend(sorted((h['mesh'] for h in runner.prepared.values()),
+                                   key=lambda m: runner.prepared[m.path]['estimate_bytes']))
+        barrier = (f'Prepare done: {len(runner.prepared)} job(s) to repair, '
+                   f'{len(runner.results)} finished in prepare.')
+        _log_line(barrier)
+        reporter.write({'kind': 'progress', 'message': barrier})
+        interrupted = _dispatch(runner, config)
+    finished = {result['mesh'].path for result in runner.results}
+    left_prepared = [path for path in runner.prepared if path not in finished]
 
     terminal = Counter()
     published = Counter()
@@ -911,7 +1131,8 @@ def _run(config: RunConfig) -> int:
 
     total = sum(terminal.values())
     incomplete = (interrupted or runner.run_state.has_incomplete_reason()
-                  or runner.run_state.has_unresolved() or bool(runner.queue))
+                  or runner.run_state.has_unresolved() or bool(runner.queue)
+                  or bool(left_prepared))
     print('Intake: ' + ', '.join(
         f'{field.name}={getattr(summary, field.name)}' for field in fields(summary)))
     print('Terminal: ' + ', '.join(
@@ -925,11 +1146,15 @@ def _run(config: RunConfig) -> int:
         print(f'Diagnostic: path={path!r}, stage={stage}, reason={reason}')
     unresolved = runner.run_state.snapshot_unresolved()
     left_in_queue = len(runner.queue)
+    # A prepared job still queued for repair is already in `left_in_queue`.
+    queued = {mesh.path for mesh in runner.queue}
+    prepared_only = len([path for path in left_prepared if path not in queued])
     incomplete_reason = runner.run_state.incomplete_reason()
     if incomplete:
         print(f'Run INCOMPLETE: {cancelled_count} job(s) interrupted and cleanly '
               f'reaped, {len(unresolved)} unresolved job(s), '
-              f'{left_in_queue} still queued and undispatched — all are eligible '
+              f'{left_in_queue} still queued and undispatched, '
+              f'{prepared_only} prepared but never queued for repair — all are eligible '
               f'for a plain rerun. Reason: {incomplete_reason}')
         for token, state in unresolved.items():
             print(f'Unresolved: job {token} in state {state!r}')
@@ -954,6 +1179,7 @@ def _run(config: RunConfig) -> int:
         'cancelled_count': cancelled_count,
         'unresolved': unresolved,
         'left_in_queue': left_in_queue,
+        'prepared_not_repaired': prepared_only,
     })
     return int(incomplete or bool(diagnostics) or summary.copy_failed > 0)
 

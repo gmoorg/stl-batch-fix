@@ -45,11 +45,18 @@ def run_one_file(args) -> int:
     """
     step_logger = _with_separators(steplog.open_step_log(args.log_file) if args.log_file
                                    else steplog.null_logger)
-    result = batch_repair._process_one_file(
-        args.one_file, args.destination, args.max_faces, step_logger,
-        nested_process_group=args.managed_child, skip_clean=args.skip_clean,
-        reconstruct_budget_bytes=args.reconstruct_budget_bytes,
-        min_shell_faces=args.min_shell_faces)
+    if args.mode == 'prepare':
+        result = batch_repair._prepare_one_file(
+            args.one_file, args.destination, args.max_faces, args.cache_path, step_logger,
+            reconstruct_budget_bytes=args.reconstruct_budget_bytes,
+            min_shell_faces=args.min_shell_faces)
+    else:
+        result = batch_repair._process_one_file(
+            args.one_file, args.destination, args.max_faces, step_logger,
+            nested_process_group=args.managed_child, skip_clean=args.skip_clean,
+            reconstruct_budget_bytes=args.reconstruct_budget_bytes,
+            min_shell_faces=args.min_shell_faces,
+            load_path=args.load_from)
     childresult.write(args.result_file, result)
     return 0
 
@@ -110,7 +117,13 @@ def main(argv=None) -> int:
                         default=batch_repair.pipeconfig.StepConfig.reconstruct_memory_budget_bytes)
     parser.add_argument('--min-shell-faces', type=_non_negative_int, metavar='N',
                         default=splitter.MIN_SHELL_FACES)
-    return run_one_file(parser.parse_args(argv))
+    parser.add_argument('--mode', choices=('prepare', 'repair'), default='repair')
+    parser.add_argument('--cache-path', metavar='PATH')
+    parser.add_argument('--load-from', metavar='PATH')
+    args = parser.parse_args(argv)
+    if args.mode == 'prepare' and not args.cache_path:
+        parser.error('--mode prepare needs --cache-path')
+    return run_one_file(args)
 
 
 if __name__ == '__main__':

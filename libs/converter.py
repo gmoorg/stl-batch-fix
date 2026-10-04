@@ -33,7 +33,7 @@ class Summary:
 
 def _walk(root: str) -> Iterator[str]:
     """Every file under `root`, skipping the trees we write ourselves."""
-    skip = {indicators.EXPORT_DIRNAME, '~parts', '__MACOSX'}
+    skip = {indicators.EXPORT_DIRNAME, indicators.DECIMATED_DIRNAME, '~parts', '__MACOSX'}
     for base, dirs, names in os.walk(root):
         dirs[:] = [d for d in dirs if d not in skip]
         for name in names:

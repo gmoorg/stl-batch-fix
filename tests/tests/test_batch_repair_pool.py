@@ -18,6 +18,7 @@ import textwrap
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from libs import childresult, mesh_io
@@ -39,7 +40,26 @@ FAKE_CHILD = textwrap.dedent('''
     parser.add_argument('--managed-child', action='store_true')
     parser.add_argument('--reconstruct-budget-bytes')
     parser.add_argument('--min-shell-faces')
+    parser.add_argument('--mode', default='repair')
+    parser.add_argument('--cache-path')
+    parser.add_argument('--load-from')
     args = parser.parse_args()
+    if args.mode == 'prepare':
+        import json as _json, os as _os, re as _re
+        _name = _os.path.basename(args.one_file)
+        _est = _re.match(r'est(\d+)_', _name)
+        _r = {'path': args.one_file, 'category': 'prepared', 'indicator': None, 'stage': 'prepare',
+              'reason': 'fake prepared', 'written_path': None, 'mode': 'prepare',
+              'prepared_path': args.one_file, 'estimate_bytes': int(_est.group(1)) if _est else 1,
+              'steps': ['decimate: fake']}
+        if _name.startswith('pfail_'):
+            _r = {'path': args.one_file, 'category': 'load_failure', 'indicator': None,
+                  'stage': 'load', 'reason': 'fake prepare failure', 'written_path': None,
+                  'mode': 'prepare'}
+        with open(args.result_file + '.p', 'w') as _f:
+            _f.write(_json.dumps(_r))
+        _os.replace(args.result_file + '.p', args.result_file)
+        raise SystemExit(0)
 
     name = os.path.basename(args.one_file)
 
@@ -52,6 +72,7 @@ FAKE_CHILD = textwrap.dedent('''
 
     result = {
         'path': args.one_file,
+        'steps': ['winding: fake'],
         'category': 'published',
         'indicator': 'PROCESS',
         'stage': 'process',
@@ -161,7 +182,19 @@ class TestBasicDispatch(_PoolTestCase):
             parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
+            parser.add_argument('--mode', default='repair')
+            parser.add_argument('--cache-path')
+            parser.add_argument('--load-from')
             args = parser.parse_args()
+            if args.mode == 'prepare':
+                import json as _json, os as _os
+                _r = {'path': args.one_file, 'category': 'prepared', 'indicator': None, 'stage': 'prepare',
+                      'reason': 'fake prepared', 'written_path': None, 'mode': 'prepare',
+                      'prepared_path': args.one_file, 'estimate_bytes': 1}
+                with open(args.result_file + '.p', 'w') as _f:
+                    _f.write(_json.dumps(_r))
+                _os.replace(args.result_file + '.p', args.result_file)
+                raise SystemExit(0)
             os.makedirs(os.path.dirname(args.destination), exist_ok=True)
             with open(args.destination, 'wb') as f:
                 f.write(b'real published output')
@@ -207,7 +240,19 @@ class TestBasicDispatch(_PoolTestCase):
             parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
+            parser.add_argument('--mode', default='repair')
+            parser.add_argument('--cache-path')
+            parser.add_argument('--load-from')
             args = parser.parse_args()
+            if args.mode == 'prepare':
+                import json as _json, os as _os
+                _r = {'path': args.one_file, 'category': 'prepared', 'indicator': None, 'stage': 'prepare',
+                      'reason': 'fake prepared', 'written_path': None, 'mode': 'prepare',
+                      'prepared_path': args.one_file, 'estimate_bytes': 1}
+                with open(args.result_file + '.p', 'w') as _f:
+                    _f.write(_json.dumps(_r))
+                _os.replace(args.result_file + '.p', args.result_file)
+                raise SystemExit(0)
             os.makedirs(os.path.dirname(args.destination), exist_ok=True)
             with open(args.destination, 'wb') as f:
                 f.write(b'real published output')
@@ -263,8 +308,8 @@ class TestAdmission(_PoolTestCase):
     def test_shedding_forces_serial_execution_under_tight_budget(self):
         meshes = [self.mesh(f'slow_{i}.stl', triangles=1000) for i in range(3)]
         # Budget only fits one job's estimate at a time.
-        from libs.runstate import BUDGET_BYTES_PER_TRIANGLE, ALPHA_WRAP_SAFETY_FACTOR_UNVALIDATED
-        one_job = 1000 * BUDGET_BYTES_PER_TRIANGLE * ALPHA_WRAP_SAFETY_FACTOR_UNVALIDATED
+        from libs import jobmemory
+        one_job = jobmemory.prepare_bytes(1000)
         runner = self.make_runner(meshes, workers=4, memory_budget_bytes=one_job + 1)
         from libs.pool import Pool
         started = time.monotonic()
@@ -282,6 +327,94 @@ class TestAdmission(_PoolTestCase):
         Pool(1, runner.selector, runner.handler).start()
         self.assertEqual(len(runner.results), 1)
         self.assertEqual(runner.results[0]['category'], 'published')
+
+
+
+class TestTwoPasses(_PoolTestCase):
+    """Prepare then repair over one runner: each pass reserves its own
+    estimate, a prepare handoff is not a job result, and every job ends
+    with exactly one terminal result carrying both passes."""
+
+    def two_passes(self, runner):
+        from libs.pool import Pool
+        reserved = []
+        start = runner.run_state.start
+
+        def spy(estimate, budget):
+            reserved.append((runner.mode, estimate))
+            return start(estimate, budget)
+
+        runner.run_state.start = spy
+        runner.mode = 'prepare'
+        Pool(2, runner.selector, runner.handler).start()
+        after_prepare = list(runner.results)
+        runner.mode = 'repair'
+        runner.queue.extend(h['mesh'] for h in list(runner.prepared.values()))
+        Pool(2, runner.selector, runner.handler).start()
+        return reserved, after_prepare
+
+    def test_each_pass_reserves_its_own_estimate(self):
+        from libs import jobmemory
+        meshes = [self.mesh('est5000_a.stl', triangles=300), self.mesh('est7000_b.stl', triangles=300)]
+        runner = self.make_runner(meshes)
+        reserved, after_prepare = self.two_passes(runner)
+        self.assertEqual(after_prepare, [], 'a handoff is not a job result')
+        self.assertEqual(sorted(e for m, e in reserved if m == 'prepare'),
+                         [jobmemory.prepare_bytes(300)] * 2)
+        self.assertEqual(sorted(e for m, e in reserved if m == 'repair'), [5000, 7000])
+
+    def test_one_terminal_result_per_job_with_both_passes(self):
+        runner = self.make_runner([self.mesh('a.stl')])
+        self.two_passes(runner)
+        self.assertEqual(len(runner.results), 1)
+        result = runner.results[0]
+        self.assertEqual(result['category'], 'published')
+        self.assertEqual(tuple(result['steps']), ('decimate: fake', 'winding: fake'))
+
+    def test_a_job_that_ends_in_prepare_is_not_repaired(self):
+        runner = self.make_runner([self.mesh('pfail_a.stl'), self.mesh('b.stl')])
+        self.two_passes(runner)
+        by_name = {os.path.basename(r['mesh'].path): r for r in runner.results}
+        self.assertEqual(sorted(by_name), ['b.stl', 'pfail_a.stl'])
+        self.assertEqual(by_name['pfail_a.stl']['category'], 'load_failure')
+        self.assertNotIn(str(self.root / 'in' / 'pfail_a.stl'), runner.prepared)
+
+    def test_a_crash_in_prepare_gets_a_fallback_marker(self):
+        """A prepare child that dies without a result is reconciled like a
+        crashed repair child: a source-copy fallback marker, no handoff."""
+        script = self.root / 'dies.py'
+        script.write_text('import os\nos._exit(137)\n')
+        mesh = self.mesh('a.stl')
+        Path(mesh.path).parent.mkdir(parents=True, exist_ok=True)
+        Path(mesh.path).write_bytes(b'source bytes')
+        runner = self.make_runner([mesh])
+        runner.script = str(script)
+        runner.mode = 'prepare'
+        from libs.pool import Pool
+        Pool(1, runner.selector, runner.handler).start()
+        self.assertEqual(len(runner.results), 1)
+        self.assertEqual(runner.prepared, {})
+        self.assertEqual(runner.results[0]['indicator'], 'FAILED')
+
+    def test_no_repair_pass_after_cancellation(self):
+        """The barrier: `_run` does not start pass 2 once cancelled."""
+        import batch_repair
+        calls = []
+
+        def dispatch(runner, config):
+            calls.append(runner.mode)
+            runner.run_state.cancel('test')
+            return False
+
+        meshes = [self.mesh('a.stl')]
+        with mock.patch.object(batch_repair, '_dispatch', dispatch), \
+             mock.patch.object(batch_repair.converter, 'prepare',
+                               side_effect=lambda *a, **k: ([a[2](m) for m in meshes],
+                                                            batch_repair.converter.Summary())[1]), \
+             mock.patch('builtins.print'):
+            code = batch_repair._run(self.make_args(output=str(self.root / 'out')))
+        self.assertEqual(calls, ['prepare'])
+        self.assertEqual(code, 1)
 
 
 class TestCancellation(_PoolTestCase):
@@ -326,7 +459,19 @@ class TestCancellation(_PoolTestCase):
             "p.add_argument('--managed-child', action='store_true')\n"
             "p.add_argument('--reconstruct-budget-bytes')\n"
             "p.add_argument('--min-shell-faces')\n"
+            "p.add_argument('--mode', default='repair')\n"
+            "p.add_argument('--cache-path')\n"
+            "p.add_argument('--load-from')\n"
             'args = p.parse_args()\n'
+            "if args.mode == 'prepare':\n"
+            "    import json as _json, os as _os\n"
+            "    _r = {'path': args.one_file, 'category': 'prepared', 'indicator': None, 'stage': 'prepare',\n"
+            "          'reason': 'fake prepared', 'written_path': None, 'mode': 'prepare',\n"
+            "          'prepared_path': args.one_file, 'estimate_bytes': 1}\n"
+            "    with open(args.result_file + '.p', 'w') as _f:\n"
+            "        _f.write(_json.dumps(_r))\n"
+            "    _os.replace(args.result_file + '.p', args.result_file)\n"
+            "    raise SystemExit(0)\n"
             f'markers = {{"hang_a.stl": {str(marker_a)!r}, "hang_b.stl": {str(marker_b)!r}}}\n'
             'open(markers[os.path.basename(args.one_file)], "w").close()\n'
             'time.sleep(600)\n'

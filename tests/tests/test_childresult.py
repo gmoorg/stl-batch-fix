@@ -105,5 +105,65 @@ class TestChildResult(unittest.TestCase):
         self.assertIsNone(childresult.read_and_validate(self.path, '/a/b.stl'))
 
 
+
+class TestPrepareHandoff(unittest.TestCase):
+    """A prepare child either hands off (category PREPARED, the expected
+    path, a positive integer estimate) or ends the job with an ordinary
+    terminal result; anything in between is rejected."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = str(Path(self.temp.name) / 'result.json')
+
+    def handoff(self, **changes):
+        fields = dict(path='/a/b.stl', category=childresult.PREPARED, indicator=None,
+                      stage='prepare', reason='ok', written_path=None, mode='prepare',
+                      prepared_path='/cache/b.stl.9.stl', estimate_bytes=123)
+        fields.update(changes)
+        return fields
+
+    def read(self, raw, mode='prepare', expected='/cache/b.stl.9.stl'):
+        Path(self.path).write_text(json.dumps(raw))
+        return childresult.read_and_validate(self.path, '/a/b.stl', mode=mode,
+                                             expected_prepared=expected)
+
+    def test_a_valid_handoff_round_trips(self):
+        got = self.read(self.handoff())
+        self.assertTrue(got.is_handoff)
+        self.assertEqual((got.prepared_path, got.estimate_bytes), ('/cache/b.stl.9.stl', 123))
+
+    def test_a_handoff_must_match_the_expected_path(self):
+        self.assertIsNone(self.read(self.handoff(prepared_path='/elsewhere.stl')))
+        self.assertIsNone(self.read(self.handoff(prepared_path=None)))
+
+    def test_a_handoff_needs_a_positive_integer_estimate(self):
+        for bad in (0, -1, 1.5, True, '123', None):
+            with self.subTest(estimate=bad):
+                self.assertIsNone(self.read(self.handoff(estimate_bytes=bad)))
+
+    def test_a_handoff_cannot_also_publish(self):
+        self.assertIsNone(self.read(self.handoff(indicator='PROCESS')))
+        self.assertIsNone(self.read(self.handoff(written_path='/out/b.stl')))
+
+    def test_the_mode_must_match_the_launch(self):
+        self.assertIsNone(self.read(self.handoff(), mode='repair'))
+        terminal = dict(path='/a/b.stl', category='published', indicator='PROCESS',
+                        stage='process', reason='ok', written_path='/out/b.stl')
+        self.assertIsNone(self.read(terminal, mode='prepare'))       # no mode field = repair
+        self.assertIsNotNone(self.read({**terminal, 'mode': 'prepare'}, mode='prepare'))
+
+    def test_repair_mode_never_accepts_prepared(self):
+        self.assertIsNone(self.read(self.handoff(mode='repair'), mode='repair'))
+
+    def test_a_terminal_result_carries_no_handoff(self):
+        terminal = dict(path='/a/b.stl', category='published', indicator='UNDECIMATED',
+                        stage='process', reason='x', written_path='/out/b.undecimated.stl',
+                        mode='prepare')
+        self.assertIsNotNone(self.read(terminal))
+        self.assertIsNone(self.read({**terminal, 'estimate_bytes': 5}))
+        self.assertIsNone(self.read({**terminal, 'prepared_path': '/cache/b.stl.9.stl'}))
+
+
 if __name__ == '__main__':
     unittest.main()
