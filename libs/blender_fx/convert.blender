@@ -1,0 +1,61 @@
+# Executed by Blender in --background mode, launched by libs/blender.py.
+# NOT meant to be run directly — it requires variables injected via str.format()
+# before it is written to a temp file and passed to Blender's --python argument.
+#
+#   src — input file path (str): OBJ, or STL in either encoding
+#   dst — output file path (str): always binary STL
+#
+# Prints BLENDER_CONVERT_OK on success, BLENDER_CONVERT_EMPTY when the file holds
+# no geometry.  Exit code 0 on success, 1 on failure.
+#
+# A lossless container change and nothing else: same triangles, same
+# coordinates, binary instead of text.  No repair, no decimation, no merging of
+# vertices — anything that alters geometry belongs in the pipeline's own
+# scripts, not here.
+
+import bpy, sys, os
+
+src = {src!r}
+dst = {dst!r}
+
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+
+ext = os.path.splitext(src)[1].lower()
+if ext == '.obj':
+    bpy.ops.wm.obj_import(filepath=src)
+else:
+    bpy.ops.import_mesh.stl(filepath=src)
+
+imported = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+if not imported:
+    print("BLENDER_CONVERT_EMPTY: no mesh objects imported")
+    sys.exit(1)
+
+# An OBJ may carry several objects; an STL never does.  Join them so the export
+# is one mesh, which is what every downstream step assumes.
+bpy.ops.object.select_all(action='DESELECT')
+for obj in imported:
+    obj.select_set(True)
+bpy.context.view_layer.objects.active = imported[0]
+if len(imported) > 1:
+    bpy.ops.object.join()
+
+total = sum(len(o.data.polygons) for o in bpy.context.scene.objects
+            if o.type == 'MESH')
+if total == 0:
+    print("BLENDER_CONVERT_EMPTY: imported objects have no faces")
+    sys.exit(1)
+
+os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+# Write to a partial first and rename, so an interrupted export never leaves a
+# file that the next run would mistake for a finished one — existence is what
+# decides whether an export is reused.
+partial = dst + '.partial'
+bpy.ops.export_mesh.stl(filepath=partial, use_selection=False,
+                        ascii=False, use_mesh_modifiers=True)
+os.replace(partial, dst)
+
+print("Exported faces: " + str(total))
+print("BLENDER_CONVERT_OK")

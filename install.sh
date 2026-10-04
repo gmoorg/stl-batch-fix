@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# install.sh — check and install dependencies for stl_batch_fix.py
+# install.sh — check and install dependencies for batch_repair.py
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Prefer the venv Python (same logic as run.sh).
+# Prefer the project venv (the one tools/project_python.sh runs).
 VENV_PYTHON="$SCRIPT_DIR/../.venv/bin/python"
 if [ -z "${PYTHON:-}" ] && [ -x "$VENV_PYTHON" ]; then
     PYTHON="$VENV_PYTHON"
@@ -48,7 +48,7 @@ if "$PYTHON" -c "import pymeshlab" 2>/dev/null; then
 else
     warn "pymeshlab not found — installing..."
     "$PYTHON" -m pip install pymeshlab && ok "pymeshlab installed" || {
-        fail "pymeshlab install failed — it is REQUIRED (shell splitting and merging have no fallback)"
+        fail "pymeshlab install failed — it is REQUIRED (it is the decimator)"
         exit 1
     }
 fi
@@ -65,18 +65,56 @@ else
     }
 fi
 
-# ── fast-simplification ───────────────────────────────────────────────────────
-# Primary decimator. Same quadric edge collapse as PyMeshLab/Blender, but
-# operating on numpy arrays instead of a full mesh database: measured ~7.5s /
-# 1.1 GB where PyMeshLab needs 42s / 1.6 GB and Blender OOMs, on a 2.55M
-# triangle mesh. Without it the pipeline falls back to PyMeshLab, then Blender.
-echo "→ fast-simplification"
-if "$PYTHON" -c "import fast_simplification" 2>/dev/null; then
-    ok "fast-simplification already installed"
+# ── libigl ────────────────────────────────────────────────────────────────────
+# Default part reconstruction (libs/winding.py): exact distance (AABB), fast
+# winding number, marching cubes, patch orientation.
+echo "→ libigl (reconstruction)"
+if "$PYTHON" -c "import igl; igl.fast_winding_number; igl.marching_cubes; igl.AABB" 2>/dev/null; then
+    ok "libigl already installed"
 else
-    warn "fast-simplification not found — installing..."
-    "$PYTHON" -m pip install fast-simplification && ok "fast-simplification installed" || {
-        warn "fast-simplification install failed — decimation falls back to PyMeshLab/Blender (slower, more memory)"
+    warn "libigl not found — installing..."
+    "$PYTHON" -m pip install libigl || {
+        fail "libigl install failed — it is REQUIRED for default repair"
+        exit 1
+    }
+    "$PYTHON" -c "import igl; igl.fast_winding_number; igl.marching_cubes; igl.AABB" 2>/dev/null || {
+        fail "libigl import failed — it is REQUIRED for default repair"
+        exit 1
+    }
+    ok "libigl installed"
+fi
+
+# ── CGAL Alpha Wrapping (optional) ────────────────────────────────────────────
+# Alpha-wrap is no longer the default reconstruction (libs/winding.py replaced
+# it); it stays available as an explicit step, so CGAL is optional.
+echo "→ cgal (Alpha Wrapping, optional)"
+if "$PYTHON" -c "from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3" 2>/dev/null; then
+    ok "cgal Alpha Wrapping already installed"
+else
+    warn "cgal Alpha Wrapping not found — installing (optional)..."
+    if "$PYTHON" -m pip install cgal && "$PYTHON" -c "from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3" 2>/dev/null; then
+        ok "cgal Alpha Wrapping installed"
+    else
+        warn "cgal not available — only the optional explicit alpha-wrap step is affected"
+    fi
+fi
+
+# ── scipy ─────────────────────────────────────────────────────────────────────
+# Connected-component analysis (shell detection) via scipy.sparse.csgraph.
+# Measured on Mandy_Body_Dinamuuu3D.stl against the per-face Python union-find
+# it replaced: 12.75s -> 2.52s raw (2.06M faces), 5.72s -> 0.92s decimated.
+# At 0.92s shell counting costs less than the edge scan itself (2.58s), so it
+# can be asked on every file. A pure-numpy replacement was tried and was SLOWER on
+# real geometry -- see D20 in REFACTOR_DECISIONS.md before attempting one.
+echo "→ scipy"
+if "$PYTHON" -c "import scipy" 2>/dev/null; then
+    ver=$("$PYTHON" -c "import scipy; print(scipy.__version__)" 2>/dev/null || echo "unknown")
+    ok "scipy $ver already installed"
+else
+    warn "scipy not found — installing..."
+    "$PYTHON" -m pip install scipy && ok "scipy installed" || {
+        fail "scipy install failed — it is REQUIRED (shell detection has no fallback)"
+        exit 1
     }
 fi
 
@@ -89,29 +127,18 @@ else
     "$PYTHON" -m pip install numpy && ok "numpy installed" || fail "numpy install failed"
 fi
 
-# ── rich (required by the TUI) ────────────────────────────────────────────────
-echo "→ rich"
-if "$PYTHON" -c "from rich.console import Console" 2>/dev/null; then
-    ok "rich already installed"
-else
-    warn "rich not found — installing..."
-    "$PYTHON" -m pip install rich && ok "rich installed" || fail "rich install failed"
-fi
-
 # ── Blender ───────────────────────────────────────────────────────────────────
 echo "→ Blender"
-BLENDER_BIN="${BLENDER_BIN:-blender}"
-if command -v "$BLENDER_BIN" &>/dev/null; then
-    ver=$("$BLENDER_BIN" --version 2>&1 | head -1 || echo "unknown")
+if command -v blender &>/dev/null; then
+    ver=$(blender --version 2>&1 | head -1 || echo "unknown")
     ok "$ver"
 else
-    warn "Blender not found on PATH."
-    echo "   Blender is the fallback repair tool (used when pymeshlab/pymeshfix cannot fully fix a mesh)."
-    echo "   Download: https://www.blender.org/download/"
-    echo "   After installing, either:"
-    echo "     • Add Blender to your PATH, or"
-    echo "     • Set BLENDER_BIN=/path/to/blender before running run.sh"
+    fail "Blender not found on PATH — it is REQUIRED: batch_repair.py converts OBJ and"
+    echo "   ASCII STL with it and will not start without it."
+    echo "   Download: https://www.blender.org/download/ and put 'blender' on your PATH."
+    exit 1
 fi
 
 echo
-echo "=== Done. Run: bash run.sh  (or  INPUT_FOLDER=/path/to/stls  bash run.sh) ==="
+echo "=== Done. First run: cp batch_repair.example.toml batch_repair.toml, edit it,"
+echo "    then: tools/project_python.sh batch_repair.py ==="

@@ -1,0 +1,131 @@
+# STL batch repair configuration
+# ===============================
+#
+# batch_repair.py takes no command-line arguments. It reads every option from
+# `batch_repair.toml` in the same folder as the script. To start:
+#
+#     cp batch_repair.example.toml batch_repair.toml
+#     # edit batch_repair.toml
+#     tools/project_python.sh batch_repair.py
+#
+# `batch_repair.toml` is git-ignored, so your paths stay local. This example
+# is the documentation: every option is listed with its default.
+#
+# The whole file is checked before anything is written. A misspelled or
+# unknown key, a missing required key, a wrong type (e.g. `workers = "4"` or
+# `skip_clean = 1`) or an out-of-range value stops the run with a message
+# naming the key. Nothing silently falls back to a default.
+#
+# Relative paths resolve against THIS file's folder, not the folder you run
+# the script from.
+
+
+# --- Folders (required) ------------------------------------------------------
+
+# Source folder. Every STL/OBJ beneath it, in all subfolders, is processed;
+# subfolder structure is kept in the output.
+input = "/path/to/input"
+
+# Destination folder. Created if absent. Must not be inside `input`, and
+# `input` must not be inside it.
+# A file that already has an output (repaired file or marker) is skipped on
+# the next run, so an interrupted batch can be resumed by running again.
+output = "/path/to/output"
+
+
+# --- Geometry (required) -----------------------------------------------------
+
+# Face budget for the INITIAL whole-model decimation, before any repair.
+# A model above this many triangles is reduced to it; 0 disables that pass.
+# Keep it below your slicer's limit (Bambu Studio re-decimates large meshes
+# itself, and that reintroduces the defects this tool removes).
+# This does NOT turn off the per-part decimation after alpha-wrap: each part
+# is always brought back to its own pre-wrap size. Face targets are
+# best-effort, never a reason to reject a model.
+max_faces = 900000
+
+
+# --- Repair ------------------------------------------------------------------
+
+# Skip repair for geometry that is already clean: no non-manifold edges, no
+# open edges and consistent winding (repairer.is_already_clean).
+#   * A clean model (checked after the initial decimation) skips split,
+#     alpha-wrap, part steps and merge; it is still judged and written.
+#   * Otherwise each clean split part is merged as is, and only the defective
+#     parts are repaired.
+# NOT YET VALIDATED on real models. A model that is consistently wound but
+# inside-out, or self-intersecting, passes the check and is not repaired.
+# Default: false
+skip_clean = false
+
+
+# Memory sizing target for rebuilding each PART (decimal GB). The repair
+# rebuilds every part as a solid on a grid (spacing = min(diagonal/800,
+# 0.15 mm)); larger parts are processed in more blocks to stay within this
+# estimate. It is an ESTIMATE, not a hard cap, and it is per part and per
+# worker: with several workers, each can use up to this much at once. If even
+# the finest split cannot fit, the part fails with the estimate in the log
+# (e.g. a physically very large model) — raise this or lower `workers`.
+# Default: 10.0
+reconstruct_memory_budget_gb = 10.0
+
+
+# Debris floor for the shell split. After the initial decimation the model is
+# split into shells (surfaces connected by shared edges); a shell with FEWER
+# faces than this is dropped as debris, and each remaining shell is repaired
+# as its own part. A shell with exactly this many faces is kept. It counts
+# faces, so it does not depend on the model's units (mm or inch). If every
+# shell is below the floor, the whole model is kept as one part. 0 keeps
+# every shell. With `skip_clean = true`, a model that is already clean is not
+# split at all, so nothing is dropped.
+# Default: 100
+min_shell_faces = 100
+
+
+# --- Logging -----------------------------------------------------------------
+
+# Step log: one line before and after every step of every file.
+# "" means <output>/batch.log. A relative path resolves against this file's
+# folder. Run progress (progress.log) is always written beside it.
+# Default: ""
+log_file = ""
+
+
+# --- Concurrency and limits --------------------------------------------------
+
+# Number of files repaired in parallel, each in its own child process.
+# 0 means automatic: min(4, CPU count).
+# Default: 0
+workers = 0
+
+# Seconds one file may take before its child process is killed and the file
+# gets a `.timeout` marker (a full copy of the source, printable as a fallback).
+# Must be a finite positive number.
+# Default: 3600.0
+per_file_timeout = 3600.0
+
+# Seconds to wait for a killed child (and anything it started, e.g. Blender)
+# to be confirmed gone. Must be a finite positive number.
+# Default: 10.0
+reap_deadline = 10.0
+
+# Memory admission: a file is started only while the estimated memory of all
+# running files fits the budget. Large models therefore run fewer at a time.
+# Every file goes through two passes: first all files are PREPARED (initial
+# decimation, saved under <input>/stl-decimated/ with the face target in the
+# name and reused by later runs; then every part is planned), then all are
+# REPAIRED. Each pass reserves its own estimate; the repair estimate is
+# computed from the prepared model's real parts and surface area. Estimates
+# are fitted to measured runs, not hard limits. A file whose estimate exceeds
+# the whole budget still runs, alone, so it is never stuck.
+#
+# Share of the memory available when the run starts, between 0 and 1
+# ("available" is Linux's MemAvailable: free memory plus cache it can drop).
+# Used only when memory_budget_bytes is 0. Checked even when unused.
+# Default: 0.7
+memory_budget_fraction = 0.7
+
+# Explicit budget in bytes; overrides the fraction. 0 means derive it from
+# memory_budget_fraction. Example: 17179869184 is 16 GiB.
+# Default: 0
+memory_budget_bytes = 0
