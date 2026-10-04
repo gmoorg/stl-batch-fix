@@ -48,10 +48,12 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
 
 ## Reconstruction
 
-- [ ] Evaluate the winding-number + marching-cubes reconstruction as an
-  alpha-wrap replacement — algorithm, measurements and open questions in
-  [reconstruction](reconstruction.md). Next: broken models, memory streaming,
-  grid spacing, block size.
+- [ ] Winding-number reconstruction (`libs/winding.py`, default part step
+  since 2026-10-03) follow-ups, details in [reconstruction](reconstruction.md):
+  more broken models (large holes); stream each block's output to lower the
+  memory floor; avoid the per-block winding-number octree rebuild on large
+  inputs; have batch admission use `winding.estimate_bytes` (it still uses
+  source triangles × 890 B × 3, so concurrent workers can exceed RAM).
 
 ## Tests
 

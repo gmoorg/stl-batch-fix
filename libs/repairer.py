@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import alphawrap, decimator, execstep, meshfix, pipeconfig, scanner, splitter, steplog
+from . import decimator, execstep, meshfix, pipeconfig, scanner, splitter, steplog, winding
 from .execstep import Entry, Step, StepResult, collection_entry, mesh_entry
 from .mesh_io import Mesh, require_geometry
 from .steplog import StepLogger
@@ -46,7 +46,7 @@ WHOLE_MESH_STEPS: tuple[Entry, ...] = ()
 #: after it is never a failure; a decimator error fails like the first
 #: round. It sits before MeshFix so anything it changes is still repaired.
 DEFAULT_PART_STEPS: tuple[Entry, ...] = (
-    mesh_entry('alpha_wrap', alphawrap.step_alpha_wrap),
+    mesh_entry('winding', winding.step_winding_reconstruct),
     mesh_entry('decimate', decimator.make_step()),
     mesh_entry('decimate_again', decimator.make_step()),
     mesh_entry('meshfix', execstep.ConditionStep(
@@ -182,6 +182,7 @@ def repair(mesh: Mesh,
            nested_process_group: bool = False,
            *,
            skip_clean: bool = False,
+           reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
            ) -> Result:
     """Split, wrap each part, and merge; no file is written.
 
@@ -303,7 +304,8 @@ def repair(mesh: Mesh,
             target_faces = len(part.geometry.faces)
             part_config = pipeconfig.StepConfig(
                 faceCount=target_faces, whole_model_diag=whole_model_diag,
-                nested_process_group=nested_process_group)
+                nested_process_group=nested_process_group,
+                reconstruct_memory_budget_bytes=reconstruct_budget_bytes)
             part_id = f'{index + 1}/{len(parts)}'
 
             # Part gate (same `skip_clean` switch): a part that is already clean is merged

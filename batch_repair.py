@@ -32,7 +32,7 @@ from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
-from libs import alphawrap, blender, childresult, converter, decimator      # noqa: E402
+from libs import blender, childresult, converter, decimator, pipeconfig, winding  # noqa: E402
 from libs import meshfix, meshlab, mesh_io, modellog, processor, publication, runconfig, runstate, steplog  # noqa: E402
 from libs.childresult import ChildResult                                  # noqa: E402
 from libs.indicators import Indicator                                     # noqa: E402
@@ -44,7 +44,7 @@ from libs.runstate import RunState                                        # noqa
 
 
 DEPENDENCIES = (
-    ('CGAL', alphawrap),
+    ('libigl', winding),
     ('fast_simplification', decimator),
     ('Blender', blender),
     ('PyMeshFix', meshfix),
@@ -273,7 +273,9 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                        step_logger: steplog.StepLogger = steplog.null_logger,
                        nested_process_group: bool = False,
                        *,
-                       skip_clean: bool = False) -> ChildResult:
+                       skip_clean: bool = False,
+                       reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes
+                       ) -> ChildResult:
     """The exact per-file body the old serial loop ran, now for one file only.
 
     `nested_process_group` is threaded straight into `processor.process(...)` —
@@ -307,7 +309,8 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                 outcome = processor.process(loaded, max_faces,
                                            step_logger=step_logger, source_name=source_name,
                                            nested_process_group=nested_process_group,
-                                           skip_clean=skip_clean)
+                                           skip_clean=skip_clean,
+                                           reconstruct_budget_bytes=reconstruct_budget_bytes)
                 if outcome.repair is not None:
                     steps = tuple(f'{s.step.name}: {s.detail}' for s in outcome.repair.steps)
                 stage = 'write'
@@ -371,7 +374,9 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
                   result_file: str, log_file: str | None = None,
                   *,
                   skip_clean: bool = False,
-                  output_log=None) -> subprocess.Popen:
+                  output_log=None,
+                  reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes
+                  ) -> subprocess.Popen:
     """Start one child. `output_log`, when given, is an already-open binary
     file (the model log, opened for append by the caller) that receives the
     child's stdout and stderr directly, so every tool's output lands there as
@@ -385,6 +390,7 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
         argv += ['--log-file', log_file]
     if skip_clean:
         argv.append('--skip-clean')
+    argv += ['--reconstruct-budget-bytes', str(reconstruct_budget_bytes)]
     output = subprocess.DEVNULL if output_log is None else output_log
     return subprocess.Popen(
         argv, start_new_session=True, stdout=output, stderr=output,
@@ -625,7 +631,9 @@ class _Runner:
                 proc = _spawn_child(self.python, self.script, mesh, self.config.max_faces,
                                    result_file, self.config.log_file or None,
                                    skip_clean=self.config.skip_clean,
-                                   output_log=output_log)
+                                   output_log=output_log,
+                                   reconstruct_budget_bytes=runconfig.budget_bytes(
+                                       self.config.reconstruct_memory_budget_gb))
             except Exception as exc:
                 if output_log is not None:
                     output_log.close()

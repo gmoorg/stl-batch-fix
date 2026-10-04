@@ -156,6 +156,24 @@ class TestLoad(_TempDir):
             self.load_text(REQUIRED + f'per_file_timeout = {10 ** 400}\n')
 
 
+class TestReconstructBudget(_TempDir):
+    def test_default_is_10_gb(self):
+        config = self.load_text(REQUIRED)
+        self.assertEqual(config.reconstruct_memory_budget_gb, 10.0)
+        self.assertEqual(runconfig.budget_bytes(config.reconstruct_memory_budget_gb), 10_000_000_000)
+
+    def test_accepts_int_and_float(self):
+        for text, gb in (('20', 20.0), ('2.5', 2.5)):
+            with self.subTest(text=text):
+                self.assertEqual(self.load_text(REQUIRED + f'reconstruct_memory_budget_gb = {text}\n')
+                                 .reconstruct_memory_budget_gb, gb)
+
+    def test_rejects_values_that_are_not_a_usable_byte_count(self):
+        for text in ('0', '-1', '1e-12', '1e300', 'inf', 'true', '"10"'):
+            with self.subTest(text=text), self.assertRaisesRegex(ConfigError, 'reconstruct_memory_budget_gb'):
+                self.load_text(REQUIRED + f'reconstruct_memory_budget_gb = {text}\n')
+
+
 class TestUnreadableFiles(_TempDir):
     def test_missing_file(self):
         with self.assertRaisesRegex(ConfigError, 'not found'):

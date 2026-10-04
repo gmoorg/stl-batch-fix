@@ -39,6 +39,8 @@ class RunConfig:
     memory_budget_fraction share of currently available RAM to admit work
                            against, used when memory_budget_bytes is 0
     memory_budget_bytes    explicit budget in bytes; 0 derives it from the fraction
+    reconstruct_memory_budget_gb  per-part memory sizing target (decimal GB)
+                           for the winding-number reconstruction's block count
     """
 
     input: str
@@ -51,6 +53,7 @@ class RunConfig:
     reap_deadline: float = 10.0
     memory_budget_fraction: float = 0.7
     memory_budget_bytes: int = 0
+    reconstruct_memory_budget_gb: float = 10.0
 
 
 #: Keys that hold paths, resolved against the config file's folder.
@@ -138,6 +141,8 @@ def _check(key: str, value, type_name: str):
             raise ConfigError(f'{key} is too large, got {value}') from None
         if not math.isfinite(value) or value <= 0:
             raise ConfigError(f'{key} must be a finite positive number, got {value}')
+        if key == 'reconstruct_memory_budget_gb' and not 1 <= value * 1e9 < 2 ** 63:
+            raise ConfigError(f'{key} must be between 1e-9 and 9.2e9 GB, got {value}')
         if key == 'memory_budget_fraction' and value > 1:
             raise ConfigError(f'{key} must be at most 1, got {value}')
         return value
@@ -170,3 +175,8 @@ def resolve(config: RunConfig) -> RunConfig:
                               'set memory_budget_bytes explicitly')
     return replace(config, workers=workers, log_file=log_file,
                    memory_budget_bytes=budget)
+
+
+def budget_bytes(gb: float) -> int:
+    """`reconstruct_memory_budget_gb` in bytes (decimal GB)."""
+    return int(gb * 1e9)

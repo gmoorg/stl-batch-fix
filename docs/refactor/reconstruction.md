@@ -1,11 +1,23 @@
-# Winding-number reconstruction (experiment)
+# Winding-number reconstruction
 
-A candidate replacement for alpha-wrap: rebuild each model as a solid from a
-signed-distance field whose sign comes from the generalized winding number,
-then extract the surface with marching cubes on one global grid processed in
-blocks. Not wired into the pipeline. Script:
-[`tools/experiments/wnmc_band.py`](../../tools/experiments/wnmc_band.py).
-Block size is an open parameter; nothing here fixes it.
+Rebuild each part as a solid from a signed-distance field whose sign comes
+from the generalized winding number, then extract the surface with marching
+cubes on one global grid processed in blocks. **Implemented as
+[`libs/winding.py`](../../libs/winding.py) and the default part step since
+2026-10-03**, replacing alpha-wrap (which stays available as an explicit
+entry); contract in [modules](modules.md). This page holds the evidence: the
+experiment ([`tools/experiments/wnmc_band.py`](../../tools/experiments/wnmc_band.py)),
+the measurements behind the design, and the memory model's calibration.
+
+Differences from the experiment, in the module: exact distances from one
+`igl.AABB` built per call and reused by every block (the experiment's
+`igl.signed_distance` rebuilt it per block and under-reported distances by
+up to ~0.03 mm); the band is marked from deterministic surface samples
+(rows ≤ h/2 apart across each triangle's height, points ≤ h/2 along its
+longest edge) instead of random ones, so coverage is guaranteed; the far-field
+lattice step is `K = 3` (the experiment's 4 exceeded the band margin); block
+count comes from a memory budget; the output is checked closed, manifold and
+non-degenerate.
 
 ## Why
 
@@ -160,14 +172,46 @@ decimate to 900k, decimate again, MeshFix (separate process).
 - The post timings of 1 and 8 blocks ran while the 729-block run was using
   ~3.5 threads, so they are slightly inflated.
 
+## Module memory model (calibration, 2026-10-03)
+
+`estimate_bytes = BASE + 800·faces_in + 10·samples_bound + 600·A/h² + 65·block_points`
+(+ a small padded-mask term). Fitted by least squares to the runs below
+(~100 MB + 710·faces + ~0·samples + 510·A/h² + 55·points), then each constant
+raised ~20 %. Peak is the reconstruction process's own maximum RSS. An
+empirical sizing estimate on these inputs, not a proven bound.
+
+| Model | Blocks | Faces in | A/h² | Block points | Time | Peak | Estimate |
+|---|---|---|---|---|---|---|---|
+| sphere r=20, h 0.5 | 1 | 5,120 | 20 k | 0.6 M | 0.5 s | 126 MB | 359 MB |
+| cube 100 mm (12 triangles), h 0.15 | 27 | 12 | 2.67 M | 11.4 M | 56.5 s | 1,986 MB | 2,854 MB |
+| Mirko, h 0.15 | 1 | 300,002 | 1.05 M | 171 M | 48.1 s | 9,996 MB | 12,456 MB |
+| Mirko, h 0.15 | 8 | | | 21.6 M | 48.0 s | 1,631 MB | 2,718 MB |
+| Mirko, h 0.15 | 27 | | | 6.4 M | 53.2 s | 1,141 MB | 1,731 MB |
+| join_complication, h 0.15 | 1 | 3,799,673 | 0.82 M | 107 M | 50.8 s | 7,773 MB | 11,097 MB |
+| join_complication, h 0.15 | 8 | | | 13.6 M | 79.0 s | 3,141 MB | 4,999 MB |
+| join_complication, h 0.15 | 27 | | | 4.0 M | 148.3 s | 3,215 MB | 4,380 MB |
+
+Re-check after adding part orientation (`bfs_orient` + `orient_outward`) and
+the half-cell grid offset (2026-10-03): Mirko 1 block 55.1 s / 10,051 MB
+(estimate 13,067); join_complication 1 block 63.7 s / 7,910 MB (11,486),
+8 blocks 96.1 s / 3,242 MB (5,049). Orientation adds ~7–17 s on these inputs;
+every estimate still exceeds the measured peak (≥ 1.30×).
+
+Block count barely changes time on a 300 k-face input (the distance tree is
+built once) but still does on a 3.8 M-face one: the mesh winding-number
+octree is rebuilt per block (~2–3 s each there). A 100 mm cube in ONE block
+(300 M grid points) was stopped at 12 GB and rising — the planner would
+estimate ~24 GB and split it.
+
 ## Open
 
-- **Block size** — not chosen. Fewer blocks are faster (less per-block
-  overhead), more blocks bound per-block memory.
-- **Memory does not yet fall with blocks.** Peak is dominated by holding all
-  output pieces until the final weld plus all surface samples (7.5 GB at
-  0.06 mm). Streaming each block's piece out and welding only shared seams
-  would keep it near one block's size.
+- **Block size** — chosen per part from `reconstruct_memory_budget_gb`
+  (default 10). The per-block winding-number octree rebuild still makes many
+  blocks slow on very large inputs.
+- **Memory floor.** In the module, memory falls with blocks (Mirko 10.0 →
+  1.1 GB) down to a floor set by the input's search trees and the output
+  held for the final weld (~3 GB for the 3.8 M-face join_complication).
+  Streaming each block's piece out would lower it.
 - **Band mask cost** — bucket the samples by block once instead of scanning
   them per block.
 - **Grid spacing** — 0.15 mm matched alpha-wrap's quality on Mirko by eye;

@@ -219,7 +219,9 @@ def process(mesh: Mesh, max_faces: int,
             source_name: str = '',
             nested_process_group: bool = False,
             *,
-            skip_clean: bool = False) -> Outcome:
+            skip_clean: bool = False,
+            reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes
+            ) -> Outcome:
     """Decimate, repair and judge one loaded mesh.  Nothing is written.
 
     Returns the decision and the mesh it applies to; `write` puts it on disk.
@@ -278,7 +280,8 @@ def process(mesh: Mesh, max_faces: int,
     repaired = repairer.repair(decimated.mesh, part_steps=part_steps,
                                step_logger=step_logger, source_name=source_name,
                                nested_process_group=nested_process_group,
-                               skip_clean=skip_clean)
+                               skip_clean=skip_clean,
+                               reconstruct_budget_bytes=reconstruct_budget_bytes)
     return _decide(mesh, decimated, repaired,
                    step_logger=step_logger, source_name=source_name)
 

@@ -59,6 +59,17 @@ max_faces = 900000
 skip_clean = false
 
 
+# Memory sizing target for rebuilding each PART (decimal GB). The repair
+# rebuilds every part as a solid on a grid (spacing = min(diagonal/800,
+# 0.15 mm)); larger parts are processed in more blocks to stay within this
+# estimate. It is an ESTIMATE, not a hard cap, and it is per part and per
+# worker: with several workers, each can use up to this much at once. If even
+# the finest split cannot fit, the part fails with the estimate in the log
+# (e.g. a physically very large model) — raise this or lower `workers`.
+# Default: 10.0
+reconstruct_memory_budget_gb = 10.0
+
+
 # --- Logging -----------------------------------------------------------------
 
 # Step log: one line before and after every step of every file.

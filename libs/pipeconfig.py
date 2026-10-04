@@ -54,8 +54,16 @@ class StepConfig:
                       it. Threaded in from `repairer.repair`/`processor.process`,
                       ultimately from `batch_repair.py`'s explicit
                       `--managed-child` marker.
+    reconstruct_memory_budget_bytes  per-part memory sizing target for
+                      `winding.step_winding_reconstruct`, which picks the
+                      fewest grid blocks whose ESTIMATED peak fits it
+                      (decimal bytes; default 10 GB). An estimate, not a cap,
+                      and not a batch-wide guarantee: concurrent workers each
+                      use their own. From `batch_repair.toml`'s
+                      `reconstruct_memory_budget_gb`.
     """
 
     faceCount: int = 0
     whole_model_diag: float | None = None
     nested_process_group: bool = False
+    reconstruct_memory_budget_bytes: int = 10_000_000_000

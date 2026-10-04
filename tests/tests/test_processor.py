@@ -226,7 +226,7 @@ class TestInitialDecimationIsOneRound(unittest.TestCase):
         inflated = mesh(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
                         TETRA_FACES + [[4, 6, 5], [4, 5, 7], [4, 7, 6], [5, 6, 7]])
         entries[0] = execstep.mesh_entry(
-            'alpha_wrap', lambda m, config=None: (True, m.with_geometry(inflated.geometry), 'wrapped'))
+            'winding', lambda m, config=None: (True, m.with_geometry(inflated.geometry), 'wrapped'))
         six = mesh(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
                    TETRA_FACES + [[4, 6, 5], [4, 5, 7]]).geometry
         with mock.patch.object(decimator, '_decimate_fastsimp',

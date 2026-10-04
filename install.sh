@@ -65,21 +65,38 @@ else
     }
 fi
 
-# ── CGAL Alpha Wrapping ───────────────────────────────────────────────────────
-echo "→ cgal (Alpha Wrapping)"
+# ── libigl ────────────────────────────────────────────────────────────────────
+# Default part reconstruction (libs/winding.py): exact distance (AABB), fast
+# winding number, marching cubes, patch orientation.
+echo "→ libigl (reconstruction)"
+if "$PYTHON" -c "import igl; igl.fast_winding_number; igl.marching_cubes; igl.AABB" 2>/dev/null; then
+    ok "libigl already installed"
+else
+    warn "libigl not found — installing..."
+    "$PYTHON" -m pip install libigl || {
+        fail "libigl install failed — it is REQUIRED for default repair"
+        exit 1
+    }
+    "$PYTHON" -c "import igl; igl.fast_winding_number; igl.marching_cubes; igl.AABB" 2>/dev/null || {
+        fail "libigl import failed — it is REQUIRED for default repair"
+        exit 1
+    }
+    ok "libigl installed"
+fi
+
+# ── CGAL Alpha Wrapping (optional) ────────────────────────────────────────────
+# Alpha-wrap is no longer the default reconstruction (libs/winding.py replaced
+# it); it stays available as an explicit step, so CGAL is optional.
+echo "→ cgal (Alpha Wrapping, optional)"
 if "$PYTHON" -c "from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3" 2>/dev/null; then
     ok "cgal Alpha Wrapping already installed"
 else
-    warn "cgal Alpha Wrapping not found — installing..."
-    "$PYTHON" -m pip install cgal || {
-        fail "cgal install failed — it is REQUIRED for default repair"
-        exit 1
-    }
-    "$PYTHON" -c "from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3" 2>/dev/null || {
-        fail "cgal Alpha Wrapping import failed — it is REQUIRED for default repair"
-        exit 1
-    }
-    ok "cgal Alpha Wrapping installed"
+    warn "cgal Alpha Wrapping not found — installing (optional)..."
+    if "$PYTHON" -m pip install cgal && "$PYTHON" -c "from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3" 2>/dev/null; then
+        ok "cgal Alpha Wrapping installed"
+    else
+        warn "cgal not available — only the optional explicit alpha-wrap step is affected"
+    fi
 fi
 
 # ── scipy ─────────────────────────────────────────────────────────────────────

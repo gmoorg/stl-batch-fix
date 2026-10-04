@@ -297,6 +297,7 @@ class TestBatchRepairCLI(unittest.TestCase):
                 args.result_file = result_path
                 args.managed_child = flag_present
                 args.skip_clean = False
+                args.reconstruct_budget_bytes = 10 ** 10
                 with mock.patch.object(processor, 'process', fake_process):
                     batch_repair_child.run_one_file(args)
                 os.unlink(result_path)
@@ -365,6 +366,7 @@ class TestCleanGateFlags(unittest.TestCase):
             args.result_file = str(self.root / 'result.json')
             args.managed_child = False
             args.skip_clean = flag
+            args.reconstruct_budget_bytes = 10 ** 10
             with mock.patch.object(processor, 'process', spy):
                 batch_repair_child.run_one_file(args)
         self.assertEqual(captured, [False, True])
@@ -387,6 +389,87 @@ class TestCleanGateFlags(unittest.TestCase):
         self.assertIn('clean_gate', text)
         self.assertIn('clean: steps skipped', text)
         self.assertTrue(dest.exists())
+
+
+class TestReconstructBudgetPlumbing(unittest.TestCase):
+    """`reconstruct_memory_budget_gb` -> child argv -> processor -> repairer
+    -> every part's StepConfig."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_spawn_child_passes_the_budget(self):
+        from libs.mesh_io import Kind, Mesh
+        mesh = Mesh(str(self.root / 'a.stl'), str(self.root / 'out' / 'a.stl'), Kind.BINARY_STL, 4, True)
+        captured = {}
+        real_popen = subprocess.Popen
+
+        def spy(argv, **kwargs):
+            captured['argv'] = argv
+            return real_popen([sys.executable, '-c', 'pass'])
+
+        with mock.patch('subprocess.Popen', spy):
+            batch_repair._spawn_child(sys.executable, 'c.py', mesh, 0, '/tmp/r.json',
+                                      reconstruct_budget_bytes=2_500_000_000).wait()
+        argv = captured['argv']
+        self.assertEqual(argv[argv.index('--reconstruct-budget-bytes') + 1], '2500000000')
+
+    def test_child_parses_the_budget_and_hands_it_to_processor(self):
+        from libs import processor
+        seen = {}
+
+        def fake_run(args):
+            seen['budget'] = args.reconstruct_budget_bytes
+            return 0
+
+        with mock.patch.object(batch_repair_child, 'run_one_file', fake_run):
+            batch_repair_child.main(['--one-file', 'a.stl', '--destination', 'b.stl',
+                                     '--result-file', 'r.json', '--max-faces', '0',
+                                     '--reconstruct-budget-bytes', '7000000000'])
+        self.assertEqual(seen['budget'], 7_000_000_000)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            batch_repair_child.main(['--one-file', 'a', '--destination', 'b', '--result-file', 'r',
+                                     '--max-faces', '0', '--reconstruct-budget-bytes', '0'])
+
+    def test_budget_reaches_every_part_step_config(self):
+        from libs import repairer
+        from libs.mesh_io import Geometry, Kind, Mesh
+        import numpy as np
+        verts = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1],
+                          [10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]], np.float32)
+        faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3],
+                          [4, 6, 5], [4, 5, 7], [4, 7, 6], [5, 6, 7]], np.int64)
+        m = Mesh('/a.stl', '/b.stl', Kind.BINARY_STL, 8, True, None, Geometry(verts, faces))
+        seen = []
+
+        def record(part, config=None):
+            seen.append(config.reconstruct_memory_budget_bytes)
+            return True, part, 'recorded'
+
+        repairer.repair(m, min_shell_faces=0, part_steps=(('record', record),),
+                        reconstruct_budget_bytes=3_000_000_000)
+        self.assertEqual(seen, [3_000_000_000, 3_000_000_000])
+
+    def test_runner_converts_the_configured_gb_for_each_child(self):
+        from libs.mesh_io import Kind, Mesh
+        mesh = Mesh(str(self.root / 'a.stl'), str(self.root / 'out' / 'a.stl'), Kind.BINARY_STL, 4, True)
+        Path(mesh.path).write_bytes(b'x')
+        config = RunConfig(input=str(self.root), output=str(self.root / 'out'), max_faces=0,
+                           workers=1, memory_budget_bytes=10 ** 15, reconstruct_memory_budget_gb=2.5)
+        captured = []
+
+        def refuse(*a, **kw):
+            captured.append(kw)
+            raise OSError('not launched in this test')
+
+        with mock.patch.object(converter, 'prepare',
+                               side_effect=lambda *a, **k: (a[2](mesh), converter.Summary())[1]), \
+             mock.patch.object(batch_repair, '_spawn_child', side_effect=refuse), \
+             mock.patch('builtins.print'):
+            batch_repair._run(config)
+        self.assertEqual(captured[0]['reconstruct_budget_bytes'], 2_500_000_000)
 
 
 class TestModelLog(unittest.TestCase):

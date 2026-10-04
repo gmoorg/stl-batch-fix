@@ -35,7 +35,7 @@ from unittest import mock
 
 import numpy as np
 
-from libs import alphawrap, decimator, execstep, meshfix, meshlab, pipeconfig, repairer, scanner, welder
+from libs import alphawrap, decimator, execstep, meshfix, meshlab, pipeconfig, repairer, scanner, welder, winding
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.pipeconfig import StepConfig
 from libs.repairer import Result, Step, StepResult, repair
@@ -524,9 +524,17 @@ class TestFailure(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("volume fell over", result.problem)
 
-    def test_the_default_tool_propagates_unsuccessful_alpha_wrap(self):
-        with mock.patch.object(alphawrap, 'wrap', side_effect=RuntimeError('wrap gave up')):
+    def test_the_default_tool_propagates_unsuccessful_reconstruction(self):
+        with mock.patch.object(winding, 'reconstruct', side_effect=RuntimeError('rebuild gave up')):
             result = repair(tetra(), min_shell_faces=0)
+        self.assertFalse(result.ok)
+        self.assertIn('rebuild gave up', result.problem)
+        self.assertNotIn(Step.MERGE, [s.step for s in result.steps])
+
+    def test_an_explicit_alpha_wrap_still_propagates_failure(self):
+        with mock.patch.object(alphawrap, 'wrap', side_effect=RuntimeError('wrap gave up')):
+            result = repair(tetra(), min_shell_faces=0,
+                            part_steps=(('alpha_wrap', alphawrap.step_alpha_wrap),))
         self.assertFalse(result.ok)
         self.assertIn('wrap gave up', result.problem)
         self.assertNotIn(Step.MERGE, [s.step for s in result.steps])
@@ -712,15 +720,12 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
     def setUp(self):
         self.calls = []
 
-    def test_production_sequence_is_alpha_wrap_decimate_meshfix(self):
-        """`DEFAULT_PART_STEPS` replaces the removed `PART_MESH_STEPS`
-        (renamed and recomposed in the uniform-step refactor): alpha-wrap,
-        then decimate, then conditional meshfix, as ordinary entries rather
-        than a `step_alpha_wrap`-only tuple plus a force-appended
-        `_decimate_to_target_and_fix` tail.
-        """
+    def test_production_sequence_is_winding_decimate_meshfix(self):
+        """`DEFAULT_PART_STEPS`: winding reconstruction (which replaced
+        alpha-wrap), decimate, decimate again, then conditional meshfix, as
+        ordinary entries."""
         names = [entry.name for entry in repairer.DEFAULT_PART_STEPS]
-        self.assertEqual(names, ['alpha_wrap', 'decimate', 'decimate_again', 'meshfix'])
+        self.assertEqual(names, ['winding', 'decimate', 'decimate_again', 'meshfix'])
 
     def _record(self, name, ok=True, note=None):
         def step(mesh, config=None):
@@ -811,10 +816,14 @@ class TestAlphaWrapBinding(unittest.TestCase):
             self.assertAlmostEqual(diagonal, np.sqrt(363) * (1 if i < 2 else 3))
             self.assertGreater(diagonal, part_diagonal * 5)
 
-    def test_default_step_uses_whole_mesh_recipe(self):
+    # Alpha-wrap is no longer the default part step (winding reconstruction
+    # replaced it) but stays available: these run it as an explicit entry.
+    ALPHA_WRAP = (('alpha_wrap', alphawrap.step_alpha_wrap),)
+
+    def test_alpha_wrap_step_uses_whole_mesh_recipe(self):
         whole = two_tetrahedra()
         with mock.patch.object(alphawrap, 'wrap', side_effect=lambda m, a, o: m) as wrapped:
-            result = repair(whole, min_shell_faces=0)
+            result = repair(whole, min_shell_faces=0, part_steps=self.ALPHA_WRAP)
         self.assertTrue(result.ok, result.problem)
         self.assertEqual(wrapped.call_count, 2)
         diagonal = np.sqrt(363)
@@ -822,17 +831,33 @@ class TestAlphaWrapBinding(unittest.TestCase):
             self.assertAlmostEqual(call.args[1], diagonal / 800)
             self.assertAlmostEqual(call.args[2], diagonal / 2000)
 
-    def test_default_step_caps_alpha_and_offset_on_a_large_mesh(self):
+    def test_alpha_wrap_step_caps_alpha_and_offset_on_a_large_mesh(self):
         original = two_tetrahedra()
         large = original.with_geometry(Geometry(
             original.geometry.verts * 50, original.geometry.faces))
         with mock.patch.object(alphawrap, 'wrap', side_effect=lambda m, a, o: m) as wrapped:
-            result = repair(large, min_shell_faces=0)
+            result = repair(large, min_shell_faces=0, part_steps=self.ALPHA_WRAP)
         self.assertTrue(result.ok, result.problem)
         self.assertEqual(wrapped.call_count, 2)
         for call in wrapped.call_args_list:
             self.assertAlmostEqual(call.args[1], 0.15)
             self.assertAlmostEqual(call.args[2], 0.06)
+
+    def test_default_step_uses_the_whole_mesh_grid_spacing(self):
+        """The default part step is winding reconstruction; its grid
+        spacing comes from the WHOLE mesh's diagonal, like alpha-wrap's alpha,
+        and is capped at 0.15 on a large mesh."""
+        for scale, expected in ((1, np.sqrt(363) / 800), (50, 0.15)):
+            original = two_tetrahedra()
+            whole = original.with_geometry(Geometry(
+                original.geometry.verts * scale, original.geometry.faces))
+            with mock.patch.object(winding, 'reconstruct',
+                                   side_effect=lambda m, h, b: m) as rebuilt:
+                result = repair(whole, min_shell_faces=0)
+            self.assertTrue(result.ok, result.problem)
+            self.assertEqual(rebuilt.call_count, 2)
+            for call in rebuilt.call_args_list:
+                self.assertAlmostEqual(call.args[1], expected)
 
     def test_custom_tool_bypasses_cgal(self):
         """A custom `part_steps` that never mentions `step_alpha_wrap` never
@@ -998,7 +1023,7 @@ class TestSecondDecimationRound(unittest.TestCase):
     def sequence(self, seen_by_meshfix):
         entries = list(repairer.DEFAULT_PART_STEPS)
         names = [e.name for e in entries]
-        self.assertEqual(names, ['alpha_wrap', 'decimate', 'decimate_again', 'meshfix'])
+        self.assertEqual(names, ['winding', 'decimate', 'decimate_again', 'meshfix'])
 
         def fake_wrap(part, config=None):            # wrap inflates the part
             return True, self.BIG, 'wrapped'
@@ -1007,7 +1032,7 @@ class TestSecondDecimationRound(unittest.TestCase):
             seen_by_meshfix.append(part)
             return True, part, 'meshfix spy'
 
-        entries[0] = execstep.mesh_entry('alpha_wrap', fake_wrap)
+        entries[0] = execstep.mesh_entry('winding', fake_wrap)
         entries[3] = execstep.mesh_entry('meshfix', spy_meshfix)
         return tuple(entries)
 
@@ -1029,7 +1054,7 @@ class TestSecondDecimationRound(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertIs(seen[0].geometry, second)
         names = [s.detail.split(':')[0] for s in result.steps if s.step is Step.PART]
-        self.assertEqual(names, ['alpha_wrap', 'decimate', 'decimate_again', 'meshfix'])
+        self.assertEqual(names, ['winding', 'decimate', 'decimate_again', 'meshfix'])
 
     def test_first_round_on_target_skips_the_second(self):
         seen = []

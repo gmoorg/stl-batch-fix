@@ -44,6 +44,9 @@ best-effort. Every model also gets a raw log beside its output
 every tool's own output, step separators and any crash message.
 Steps append to `<output>/batch.log` by default (`log_file`
 overrides it). Run summary/progress also goes to the terminal.
+Each part is rebuilt as a solid by winding-number reconstruction
+(`libs/winding.py`; alpha-wrap stays available but is no longer the default);
+`reconstruct_memory_budget_gb` (default 10) sizes it per part and worker.
 `skip_clean = true` (opt-in, not yet validated) skips repair for an
 already-clean decimated model, or otherwise for its individual clean parts.
 

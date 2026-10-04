@@ -47,7 +47,8 @@ def run_one_file(args) -> int:
                                    else steplog.null_logger)
     result = batch_repair._process_one_file(
         args.one_file, args.destination, args.max_faces, step_logger,
-        nested_process_group=args.managed_child, skip_clean=args.skip_clean)
+        nested_process_group=args.managed_child, skip_clean=args.skip_clean,
+        reconstruct_budget_bytes=args.reconstruct_budget_bytes)
     childresult.write(args.result_file, result)
     return 0
 
@@ -74,6 +75,16 @@ def _with_separators(step_logger: steplog.StepLogger) -> steplog.StepLogger:
     return log
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError('must be a positive integer') from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return value
+
+
 def _non_negative_int(text: str) -> int:
     try:
         value = int(text)
@@ -85,7 +96,7 @@ def _non_negative_int(text: str) -> int:
 
 
 def main(argv=None) -> int:
-    faulthandler.enable()            # a native crash leaves a traceback on fd 2
+    faulthandler.enable(file=2)      # fd 2 itself (the model log), whatever sys.stderr is
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--one-file', required=True, metavar='SRC')
     parser.add_argument('--destination', required=True, metavar='DST')
@@ -94,6 +105,8 @@ def main(argv=None) -> int:
     parser.add_argument('--managed-child', action='store_true')
     parser.add_argument('--log-file', metavar='PATH')
     parser.add_argument('--skip-clean', action='store_true')
+    parser.add_argument('--reconstruct-budget-bytes', type=_positive_int, metavar='BYTES',
+                        default=batch_repair.pipeconfig.StepConfig.reconstruct_memory_budget_bytes)
     return run_one_file(parser.parse_args(argv))
 
 
