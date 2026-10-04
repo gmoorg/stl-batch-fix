@@ -28,6 +28,32 @@ tools/project_python.sh tests/tests/make_fixtures.py --check
 
 High-priority probes are `small_valid_shell.stl`, `opposite_volume_shells.stl`, `decimation_lost_appendage.stl`, and `reversed_tjunction_chain.stl`. Their construction is tested; pipeline verdict tests remain missing.
 
+## Defect-sphere fixtures
+
+`tests/tests/defect_spheres.py` is the single source of defect meshes with a
+known true shape (`fixtures()`, 19 fixtures). The single-defect probe
+builders moved there from `tools/make_probe_meshes.py`, which re-exports
+them; committed `tests/probes/sphere_*.stl` stay byte-reproducible (tested).
+
+Each `Fixture` carries `truth`: the clean, closed, outward shells whose
+UNION is the intended printable shape. Shape tests compare against the
+union's BOUNDARY — buried faces of overlapping or touching shells excluded
+— via `union_boundary_samples`, against the clean polyhedron (the UV sphere
+sags ~0.12 mm), with `truth_volume` (union volume, computed numerically) and
+`vanish_boxes` that must end up empty (debris).
+
+Fixtures: control `correct`; winding `inverted`, `inverted_third`, `seam`;
+open edges `tjunction`, `tjunction_many`, `hole`; non-manifold `fin`;
+`degenerate`; duplicated `doubles`; multi-shell `two_shells`,
+`shell_inverted`, `overlapping_shells` (union), `touching_shells` (boxes
+sharing a plane); debris `debris_sheet` (open), `debris_speck` (closed,
+below the splitter floor — intent, not a splitter rule); `thin_rod` (ONE
+shell: sphere + attached rod r 0.75); `inch_scale`; and `allbad`.
+`test_defect_spheres.py` checks each declares-and-has its defects, truths
+are clean, volumes and the union boundary are right (analytic boxes), and
+geometric facts hold. A decimation-plateau fixture is deferred to the
+per-step tests (item 9).
+
 ## Inventory for the outcome-test rework (2026-10-04)
 
 Goal (TODO "Tests"): end-to-end runs of `batch_repair.py` on defect-sphere
