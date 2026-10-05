@@ -14,6 +14,23 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
   time follow ~3·A/h² rebuilt faces; sphere r 132: 29 M faces, 353 s,
   13.9 GB) — admission reserves for it, reducing it needs an owner decision
   (e.g. per-part spacing from area, or decimating blocks before the weld).
+- [ ] NM-only fast path in the clean gate (owner idea, 2026-10-05). Today
+  `repairer.is_already_clean` (with `skip_clean`) skips repair only when a
+  part has no NM edges, no open edges and no winding seams; anything else
+  goes through winding → decimate → conditional MeshFix. Proposal: when NM
+  edges are the ONLY defect found, skip winding and the post decimation and
+  run MeshFix directly; any other defect still goes to winding. Cheaper and
+  keeps the original surface instead of a rebuilt one. To settle first:
+  - "Only NM" is limited by what the scan sees: self-intersections,
+    overlapping shells and a whole inverted shell are invisible to it, and
+    `winding_seams` cannot check winding across the NM edges themselves.
+  - MeshFix fixes NM by deleting faces around them and refilling. With many
+    NM edges it can run past the per-file timeout (the Aloy/Laura cases had
+    thousands), and on irreconcilable winding it can delete whole surfaces.
+    So: a shape check on its result (retained volume, open/NM left), and on
+    failure fall back to winding rather than failing the part.
+  - Possibly an NM-count limit for the fast path; measure MeshFix time
+    against NM count first.
 
 ## Print-risk check and rib supports
 
