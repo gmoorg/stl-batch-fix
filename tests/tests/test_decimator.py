@@ -10,6 +10,7 @@ import numpy as np
 
 import libs.decimator as decimator
 from libs.decimator import Result, Rung, decimate
+from libs import mesh_io
 from libs.mesh_io import Geometry, Kind, Mesh, load, probe
 
 

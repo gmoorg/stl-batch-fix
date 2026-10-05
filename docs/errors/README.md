@@ -32,7 +32,7 @@ is also out of scope: too big to process on this machine.
 | Winding output non-manifold | 8 (6 models) | **Fixed** (2026-10-05): weld by the grid edge marching cubes reports (no rounding); NM edges pass on to repair. All 6 models rebuild with 0 NM | [winding-non-manifold.md](winding-non-manifold.md) |
 | MeshFix timeout after post-wrap decimation | 2 | **Fixed** (2026-10-05): decimation with `planarquadric=True` (both passes, every parameter explicit; PyMeshLab keeps filter parameters between calls). Aloy 70 s, Laura 596 s, both PROCESS | [post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md) |
 | Volume-loss rejection (`DESTROYED`) | 12 (10 `_SUP`, 2 real) | `_SUP`: struts dropped as debris (out of scope). `arm2`/`fabric3`: **guard measures open shells meaninglessly**, and the shells are pieces of one surface split at unwelded seams | [volume-loss-rejected.md](volume-loss-rejected.md) |
-| STL with non-finite coordinates | 2 (`_SUP`) | Our loader rejects them; PyMeshLab's importer silently drops NaN faces (measured) | [non-finite-coordinates.md](non-finite-coordinates.md) |
+| STL with non-finite coordinates | 2 (`_SUP`) | **Policy changed** (owner, 2026-10-05): `mesh_io.load` drops triangles with NaN/inf coordinates instead of rejecting the file | [non-finite-coordinates.md](non-finite-coordinates.md) |
 
 Reference: [decimation-memory-path.md](decimation-memory-path.md) covers
 what the initial decimation allocates, measured PyMeshLab memory per face,
@@ -62,6 +62,7 @@ pipeline. Usage in each docstring. Some modes write to a path you pass
 | Script | Used for |
 |---|---|
 | `meshlab_file_decimate.py` | file-interface load + decimation memory/time; raw-STL NaN count |
+| `file_decimation_compare.py` | initial decimation, PyMeshLab reading the STL vs our loader: time, memory, output |
 | `meshlab_import_probe.py` | PyMeshLab import / PLY round trip on duplicate, degenerate, near-duplicate geometry |
 | `segfault_probe.py` (+ `tests/probes/segv_min16.stl`) | degenerate-face segfault: count, array vs clean, synthetic cases, crop |
 | `winding_nm_probe.py` | raw marching-cubes vs welded NM, NM edge locations |

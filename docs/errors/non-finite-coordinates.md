@@ -69,3 +69,17 @@ triangles only; partial NaNs and infinities weren't tested.
   decision to make deliberately, not a side effect of the switch.
 - Both are presupported `_SUP` exports from the same source as the
   [volume-loss](volume-loss-rejected.md) files, so the exporter may be at fault.
+
+## Policy (owner, 2026-10-05): drop, don't reject
+
+"Garbage in, garbage out": a NaN or infinite vertex has no position to
+recover, so `mesh_io.load` now drops every triangle with a non-finite vertex
+coordinate (even one bad coordinate) and loads the rest; the repair rebuilds
+the holes. A file with no finite triangle is invalid ("no finite
+triangles"). The step text reports the drop ("load: dropped N triangles
+with NaN/inf coordinates"). There is no pre-scan before PyMeshLab: every
+source now goes through our loader (decimate-from-file was not adopted, see
+[decimation-memory-path.md](decimation-memory-path.md)). Stored normals are
+not checked. `read_ply` still rejects non-finite coordinates: a malformed
+cache or Blender output is a fault, not source data.
+

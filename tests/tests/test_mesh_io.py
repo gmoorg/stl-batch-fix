@@ -13,10 +13,13 @@ import shutil
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
 import struct as _struct
 
 import numpy as np
+
+from libs import mesh_io
 
 from libs.mesh_io import (
     BYTES_PER_TRIANGLE, HEADER_BYTES, Geometry, Kind, Mesh, bounds, diagonal,
@@ -328,32 +331,40 @@ class TestLoad(MeshIOCase):
         self.assertIsNone(result.geometry)
         self.assertIsNotNone(result.problem)
 
-    def test_a_nan_coordinate_is_invalid_not_a_clean_mesh(self):
-        """A03: NaN geometry measures as flawless and is not a model.
+    def test_triangles_with_a_non_finite_coordinate_are_dropped(self):
+        """A03 / owner 2026-10-05, garbage in, garbage out: a NaN or infinite
+        vertex has no position, so its triangles are dropped (even for one
+        bad coordinate) and the rest load and weld as usual. A NaN that got
+        in would scan `open=0, nm=0` with NaN volume, which every `<` guard
+        downstream passes."""
+        nan, inf = float('nan'), float('inf')
+        triangles = list(_TETRA) + [[(nan, 0, 0), (1, 0, 0), (0, 1, 0)],
+                                    [(5, 5, 5), (6, 5, inf), (5, 6, 5)]]
+        path = _binary_stl(self.path('bad.stl'), triangles=triangles)
+        result = load(probe(path, self.path('out.stl')))
+        self.assertTrue(result.is_valid, result.problem)
+        self.assertEqual(result.triangles, len(_TETRA))
+        self.assertTrue(np.isfinite(result.geometry.verts).all())
+        clean = load(probe(_binary_stl(self.path('clean.stl')), self.path('o.stl')))
+        np.testing.assert_array_equal(result.geometry.verts, clean.geometry.verts)
+        np.testing.assert_array_equal(result.geometry.faces, clean.geometry.faces)
 
-        A NaN vertex loads, scans `open=0, nm=0`, and has NaN volume — and
-        `NaN < MIN_VOLUME_KEPT` is False, so every comparison that would have
-        caught it says "fine".  It cannot be judged downstream, so it is
-        refused here, where the coordinates first enter memory.
-        """
+    def test_a_file_with_no_finite_triangle_is_invalid(self):
         nan = float('nan')
-        poisoned = [[(nan, nan, nan), (1, 0, 0), (0, 1, 0)]]
-        path = _binary_stl(self.path('nan.stl'), triangles=poisoned)
-
+        path = _binary_stl(self.path('nan.stl'), triangles=[[(nan, nan, nan), (1, 0, 0), (0, 1, 0)]])
         result = load(probe(path, self.path('out.stl')))
         self.assertFalse(result.is_valid)
         self.assertIsNone(result.geometry)
-        self.assertIn('finite', result.problem)
+        self.assertIn('no finite triangles', result.problem)
 
-    def test_an_infinite_coordinate_is_invalid_too(self):
-        """Infinity breaks every same comparison NaN does."""
-        big = float('inf')
-        poisoned = [[(big, 0, 0), (1, 0, 0), (0, 1, 0)]]
-        path = _binary_stl(self.path('inf.stl'), triangles=poisoned)
-
+    def test_non_finite_stored_normals_are_ignored(self):
+        path = _binary_stl(self.path('n.stl'))
+        with open(path, 'r+b') as f:
+            f.seek(84)
+            f.write(struct.pack('<f', float('nan')))
         result = load(probe(path, self.path('out.stl')))
-        self.assertFalse(result.is_valid)
-        self.assertIsNone(result.geometry)
+        self.assertTrue(result.is_valid, result.problem)
+        self.assertEqual(result.triangles, len(_TETRA))
 
     def test_ordinary_coordinates_still_load(self):
         """The guard must not reject the models this tool exists for."""
@@ -767,6 +778,7 @@ class TestPlyLayouts(MeshIOCase):
         for name, data in cases.items():
             with self.subTest(name), self.assertRaises(ValueError):
                 self.read(data)
+
 
 
 if __name__ == '__main__':

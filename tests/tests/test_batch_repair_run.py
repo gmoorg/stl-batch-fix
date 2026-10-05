@@ -269,7 +269,7 @@ class TestCleanGateDispatch(unittest.TestCase):
 
         for flag in (False, True):
             config = replace(_BASE_CONFIG,
-                             output=str(root / 'out'),
+                             input=str(root), output=str(root / 'out'),
                              skip_clean=flag)
 
             captured = []

@@ -251,6 +251,14 @@ def load(mesh: Mesh) -> Mesh:
     Negative zero is normalised first: -0.0 and 0.0 compare equal as floats but
     have different bits, so without this a shared vertex would split in two and
     leave a crack that quadric edge collapse cannot close.
+
+    Triangles with a NaN or infinite vertex coordinate are dropped, not the
+    file (owner, 2026-10-05: garbage in, garbage out). Such a vertex has no
+    position to recover; dropping its triangles leaves a hole the repair
+    rebuilds. The returned `triangles` is the kept count, so a caller sees
+    the drop as `probe`'s count minus it (nothing else is dropped here:
+    degenerate triangles are kept and welding never removes one). A file
+    with no finite triangle is invalid. Stored normals are not checked.
     """
     if mesh.kind is not Kind.BINARY_STL:
         raise ValueError(
@@ -291,16 +299,23 @@ def load(mesh: Mesh) -> Mesh:
     coords = raw[:, 12:48].copy().reshape(-1, 12)
     del raw
     fview = coords.view(np.float32).reshape(-1, 3)
-    # Refuse NaN and infinity here, where the coordinates first become numbers.
-    # Nothing downstream can catch them: a NaN mesh scans as open=0, nm=0 and
-    # produces a NaN volume, and every comparison that guards the pipeline is
-    # `<` — which is False against NaN, so each one reports that all is well.
-    # The same input also reaches `cKDTree`, which raises from outside the
-    # repair sequence's own error handling.  There is no repair for a vertex
-    # that is not a position, so this is input validation, not a judgement.
-    if not np.isfinite(fview).all():
-        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
-                    "not finite: the file contains NaN or infinite coordinates")
+    # Drop triangles with NaN or infinity here, where the coordinates first
+    # become numbers. Nothing downstream could cope with them: a NaN mesh scans
+    # as open=0, nm=0 and produces a NaN volume, every comparison that guards
+    # the pipeline is `<` (False against NaN), and `cKDTree` raises from outside
+    # the repair sequence's own error handling. Clean input — nearly every
+    # file — is not copied: the mask is only applied when it drops something.
+    finite = np.isfinite(coords.view(np.float32).reshape(-1, 9)).all(axis=1)
+    if not finite.all():
+        # `coords` has a row per vertex (three per triangle); mask by triangle.
+        coords = coords.reshape(-1, 3 * 12)[finite].reshape(-1, 12)
+        count = int(finite.sum())
+        if count == 0:
+            return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
+                        "no finite triangles: every triangle has a NaN or "
+                        "infinite coordinate")
+        fview = coords.view(np.float32).reshape(-1, 3)
+    del finite
     # Fold -0.0 to 0.0 in place; adding 0.0 leaves every other value untouched.
     np.add(fview, np.float32(0.0), out=fview)
     del fview

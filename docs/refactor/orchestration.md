@@ -27,16 +27,28 @@ created — then:
    admitted mesh; the parent passes it every value it needs, and the child
    never reads the TOML file. An oversized job may run alone.
    - **Prepare** (`--mode prepare`), reserved by `jobmemory.prepare_bytes`
-     (source triangles): load, run the initial decimation (step 1 below) and
-     save it atomically to `<input>/stl-decimated/<job source path relative
-     to the input>.<max_faces>.<decimator.settings_tag()>.stl` (a converted
-     job is keyed by its `stl-exported/` copy; the tag changes with the
-     decimator's parameters, so a cache made with other settings is never
-     read) — reused by later runs, rebuilt if unreadable,
-     not written when no decimation is needed; reload it, then compute
-     `jobmemory.repair_bytes` on the reloaded mesh. A success is a handoff
-     (`childresult.PREPARED`: the mesh to load and the estimate), not a job
-     result. Decimator failure publishes `UNDECIMATED` here and ends the job.
+     (source triangles): load with `mesh_io.load` (it drops triangles with
+     NaN/inf coordinates; the step text says how many), run the initial
+     decimation (step 1 below) and save it atomically as a PLY
+     (`mesh_io.write_ply`) to `<input>.decimated/<job source path relative
+     to the input>.<max_faces>.<decimator.settings_tag()>.ply` — beside the
+     input folder, never inside it (a converted job is keyed by its
+     `stl-exported/` copy; the tag changes with the decimator's
+     parameters). The relative path is lexical: a source that is a symlink
+     to a file outside the input keeps its own name, so its cache stays
+     under `<input>.decimated` and inside the startup overlap checks. The PLY keeps the decimator's vertex table, so the repair
+     pass gets it without re-welding (float32 until `Geometry` moves to
+     float64). Our loader, not PyMeshLab's STL reader, which holds ~4.5x the
+     mesh's memory (docs/errors/decimation-memory-path.md). The cache is
+     reused by later runs (sources are assumed unmodified) and rebuilt if
+     unreadable; it is read back with `mesh_io.read_ply` and
+     `jobmemory.repair_bytes` computed on it. It is written whenever the
+     handoff names it, even if dropping non-finite triangles left nothing to
+     decimate. Decimator failure publishes `UNDECIMATED` (source copy) and
+     ends the job; a failed save is a write_failure; neither leaves a cache.
+     The old `<input>/stl-decimated/` STL caches are not read (the converter
+     still skips that folder). A success is a handoff (`childresult.PREPARED`:
+     the mesh to load and the estimate), not a job result.
    - **Repair**, only if pass 1 was not cancelled and left nothing
      unresolved, reserved by the handoff's estimate: the child loads the
      prepared mesh (`--load-from`) with `max_faces 0` (decimation already

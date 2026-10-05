@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import decimator, execstep, indicators, mesh_io, pipeconfig, repairer, scanner, splitter, steplog
 from .execstep import Step
@@ -165,11 +165,17 @@ def _judge(source: Mesh,
                    scan=scan, decimation=decimated, repair=repaired)
 
 
-def _decimation_failure_reason(result: decimator.Result) -> str:
+def _decimation_failure_reason(attempts) -> str:
     """Explain every failed decimation attempt for the undecimated marker."""
-    attempts = '; '.join(f"{rung.value}: {why}"
-                         for rung, why in result.attempts)
-    return f"every decimator failed ({attempts})"
+    listed = '; '.join(f"{rung.value}: {why}" for rung, why in attempts)
+    return f"every decimator failed ({listed})"
+
+
+def undecimated_outcome(attempts) -> Outcome:
+    """The UNDECIMATED outcome for an initial decimation that failed: the
+    marker is the source, untouched."""
+    return Outcome(Indicator.UNDECIMATED, None, 'source',
+                   _decimation_failure_reason(attempts))
 
 
 def _decimate_logged(mesh: Mesh, max_faces: int, step_name: str,
@@ -226,9 +232,8 @@ def decimate_initial(mesh: Mesh, max_faces: int,
         # Its own outcome, not a lesser repair failure.  A file that cannot be
         # reduced will be reduced by the printer instead, which reintroduces
         # exactly the defects this tool removes.
-        return (Outcome(Indicator.UNDECIMATED, None, 'source',
-                        _decimation_failure_reason(decimated),
-                        decimation=decimated), decimated)
+        return (replace(undecimated_outcome(decimated.attempts), decimation=decimated),
+                decimated)
     return None, decimated
 
 

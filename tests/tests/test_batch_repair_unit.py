@@ -43,15 +43,30 @@ class TestProcessOneFile(unittest.TestCase):
         self.assertIsNone(result.indicator)
         self.assertIsNone(result.written_path)
 
-    def test_nonfinite_is_load_failure(self):
+    def test_a_nonfinite_triangle_is_dropped_and_reported(self):
+        """Owner, 2026-10-05: garbage in, garbage out — the triangle with a
+        NaN coordinate is dropped, the rest is repaired, and the steps say so."""
         path = self.fixture()
         data = bytearray(path.read_bytes())
         struct.pack_into('<f', data, 84 + 12, float('nan'))
         path.write_bytes(data)
+        with mock.patch.object(processor, 'process', return_value=processor.Outcome(
+                Indicator.FAILED, None, 'source', 'forced')):
+            result = _process_one_file(str(path), str(self.root / 'out.stl'), 0)
+        self.assertEqual(result.category, 'published', result.reason)
+        self.assertIn('load: dropped 1 triangles with NaN/inf coordinates', result.steps)
+
+    def test_a_file_with_no_finite_triangle_is_a_load_failure(self):
+        path = self.fixture()
+        data = bytearray(path.read_bytes())
+        count = struct.unpack_from('<I', data, 80)[0]
+        for i in range(count):
+            struct.pack_into('<f', data, 84 + 50 * i + 12, float('nan'))
+        path.write_bytes(data)
         result = _process_one_file(str(path), str(self.root / 'out.stl'), 0)
         self.assertEqual(result.category, 'load_failure')
         self.assertEqual(result.stage, 'load')
-        self.assertIn('not finite', result.reason)
+        self.assertIn('no finite triangles', result.reason)
 
     def test_clean_publish(self):
         path = self.fixture()

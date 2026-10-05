@@ -293,14 +293,25 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
     # path — a basename alone would make two same-named files in different
     # subfolders indistinguishable in a shared step log.
     source_name = os.path.abspath(source_path)
-    mesh = mesh_io.probe(load_path or source_path, destination)
+    from_cache = load_path is not None and load_path.lower().endswith('.ply')
+    mesh = mesh_io.probe(source_path if from_cache else (load_path or source_path),
+                         destination)
     if not mesh.is_valid:
         reason = mesh.problem or reason
     else:
         try:
             stage = 'load'
             category = 'load_failure'
-            loaded = mesh_io.load(mesh)
+            if from_cache:
+                # The prepare pass's PLY cache, attached to the source's own
+                # identity (path, kind); markers still copy the source. A
+                # malformed cache raises ValueError: a load_failure below.
+                loaded = mesh_io.read_ply(load_path, mesh)
+            else:
+                loaded = mesh_io.load(mesh)
+                # Only after an STL load: a PLY cache's lower count is decimation.
+                if loaded.is_valid:
+                    steps = tuple(_dropped_note(mesh, loaded))
             reason = loaded.problem or 'invalid loaded mesh'
             if loaded.is_valid:
                 stage = 'process'
@@ -312,7 +323,7 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                                            reconstruct_budget_bytes=reconstruct_budget_bytes,
                                            min_shell_faces=min_shell_faces)
                 if outcome.repair is not None:
-                    steps = tuple(f'{s.step.name}: {s.detail}' for s in outcome.repair.steps)
+                    steps += tuple(f'{s.step.name}: {s.detail}' for s in outcome.repair.steps)
                 stage = 'write'
                 category = 'write_failure'
                 path = processor.write(outcome, source_path, destination)
@@ -331,31 +342,50 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                        stage=stage, reason=reason, written_path=written_path, steps=steps)
 
 
-#: Decimated copies, kept between runs beside `indicators.EXPORT_DIRNAME`
-#: in the input tree; the face target is part of each file name.
+#: The input tree's old cache folder (decimated STL, before 2026-10-05). No
+#: longer read or written; the converter still skips it, so leftovers there
+#: are never taken for input.
 DECIMATED_DIRNAME = indicators.DECIMATED_DIRNAME
 
 
+def decimated_root(input_root: str) -> str:
+    """The cache folder for decimated sources: a sibling of the input folder,
+    `<input>.decimated` (owner, 2026-10-05), so the cache is never inside the
+    tree the batch scans."""
+    return str(Path(input_root).resolve()) + '.decimated'
+
+
 def decimated_path(input_root: str, source: str, max_faces: int) -> str:
-    """Where the prepare pass keeps the decimated mesh of job `source`.
+    """Where the prepare pass keeps the decimated mesh of job `source`: a PLY
+    written by `mesh_io.write_ply`, so the decimator's vertex table is handed
+    to the repair pass as is, never re-welded from STL triangles. It holds
+    float32 coordinates until `Geometry` moves to float64.
 
     Keyed by the job's own source path relative to the input tree — the
     file the job loads, so a converted model is keyed by its
     `stl-exported/` copy and never shares a cache with a native STL bound
-    for the same output (`stl-decimated/stl-exported/a.stl.N.stl` vs
-    `stl-decimated/a.stl.N.T.stl`). A new `max_faces` gets its own file, and
-    so do new decimator settings: `T` is `decimator.settings_tag()`, so a
-    cache made with other parameters is never read (files from before the
-    tag, `a.stl.N.stl`, are left on disk unread). Sources are assumed
-    unmodified; a changed source or PyMeshLab version is not detected.
+    for the same output (`<input>.decimated/stl-exported/a.stl.N.T.ply` vs
+    `<input>.decimated/a.stl.N.T.ply`). A new `max_faces` gets its own file,
+    and so do new decimator settings: `T` is `decimator.settings_tag()`.
+    Sources are assumed unmodified: a changed source or PyMeshLab version is
+    not detected. Caches from before (`<input>/stl-decimated/*.stl`) are not read.
 
-    The one clash left needs an input directory literally named like a cache
-    file (`a.stl.900000.T.stl/`); writing that cache then fails, and the job
+    The one clash left needs a directory named like a cache file
+    (`a.stl.900000.T.ply/`); writing that cache then fails, and the job
     fails with the reason rather than reading the wrong geometry.
+
+    The relative path is lexical, as in `converter._output_for`: a source
+    that is a symlink keeps its own name in the input tree. Resolving it
+    would key `/in/link.stl -> /outside/m.stl` as `../outside/m.stl` and
+    put the cache beside the target, outside the cache root and its
+    overlap checks (Codex review, 2026-10-05). A source outside the input
+    tree raises ValueError rather than escaping.
     """
     rel = os.path.relpath(os.path.abspath(source), os.path.abspath(input_root))
-    return os.path.join(os.path.abspath(input_root), DECIMATED_DIRNAME,
-                        f'{rel}.{int(max_faces)}.{decimator.settings_tag()}.stl')
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        raise ValueError(f'{source} is not inside the input folder {input_root}')
+    return os.path.join(decimated_root(input_root),
+                        f'{rel}.{int(max_faces)}.{decimator.settings_tag()}.ply')
 
 
 def expected_prepared_path(mesh: Mesh, cache_path: str, max_faces: int) -> str:
@@ -365,18 +395,23 @@ def expected_prepared_path(mesh: Mesh, cache_path: str, max_faces: int) -> str:
     return cache_path if needs else mesh.path
 
 
-def _load_cache(cache_path: str, destination: str) -> Mesh | None:
-    """A usable cached decimation, or None to rebuild it."""
+def _load_cache(cache_path: str, source: Mesh) -> Mesh | None:
+    """A usable cached decimation attached to the probed `source` (path,
+    destination and kind stay the source's), or None to rebuild it."""
     if not os.path.isfile(cache_path):
         return None
     try:
-        cached = mesh_io.probe(cache_path, destination)
-        if not cached.is_valid:
-            return None
-        loaded = mesh_io.load(cached)
-        return loaded if loaded.is_valid and loaded.triangles > 0 else None
-    except Exception:                                 # noqa: BLE001 — rebuild instead
+        loaded = mesh_io.read_ply(cache_path, source)
+    except (OSError, ValueError):                     # rebuild instead
         return None
+    return loaded if loaded.triangles > 0 else None
+
+
+def _dropped_note(probed: Mesh, loaded: Mesh) -> list[str]:
+    """A step line when `mesh_io.load` dropped triangles with NaN/inf
+    coordinates — the only triangles it drops — else nothing."""
+    dropped = (probed.triangles or 0) - loaded.triangles
+    return [f'load: dropped {dropped} triangles with NaN/inf coordinates'] if dropped > 0 else []
 
 
 def _prepare_one_file(source_path: str, destination: str, max_faces: int,
@@ -392,10 +427,13 @@ def _prepare_one_file(source_path: str, destination: str, max_faces: int,
     an ordinary terminal result: an unreadable file, or UNDECIMATED published
     exactly as `processor.process` would publish it.
 
-    A fresh cache is reloaded from disk before estimating, through the same
-    path a cache hit takes, so the estimate is computed on exactly the mesh
-    the repair pass will load (binary STL keeps no vertex identity; loading
-    welds identical coordinates).
+    A source over `max_faces` is loaded with `mesh_io.load` (which drops
+    triangles with NaN/inf coordinates), decimated from arrays and saved as
+    a PLY cache. Our loader, not PyMeshLab's STL reader: that reader holds
+    ~4.5x the mesh's own memory (docs/errors/decimation-memory-path.md). The
+    cache is read back before estimating, through the same path a cache hit
+    takes, so the estimate is computed on exactly the mesh the repair pass
+    will load.
     """
     stage, category, reason = 'intake', 'intake_failure', 'invalid intake mesh'
     source_name = os.path.abspath(source_path)
@@ -414,7 +452,7 @@ def _prepare_one_file(source_path: str, destination: str, max_faces: int,
         prepared_path = expected_prepared_path(probed, cache_path, max_faces)
         mesh = None
         if prepared_path == cache_path:
-            mesh = _load_cache(cache_path, destination)
+            mesh = _load_cache(cache_path, probed)
             if mesh is not None:
                 steps.append(f'decimate: cached, {mesh.triangles} faces ({cache_path})')
                 step_logger(source_name, 'info', 'decimate', '-', 0.0,
@@ -425,12 +463,14 @@ def _prepare_one_file(source_path: str, destination: str, max_faces: int,
             if not loaded.is_valid:
                 reason = loaded.problem or 'invalid loaded mesh'
                 return terminal()
+            steps.extend(_dropped_note(probed, loaded))
             if prepared_path == source_path:
                 mesh = loaded
             else:
                 stage, category = 'process', 'process_failure'
                 failed, decimated = processor.decimate_initial(
                     loaded, max_faces, step_logger, source_name)
+                del loaded
                 steps.append(f'decimate: {decimated.rung.value}, {decimated.faces_out} faces out')
                 if failed is not None:
                     stage, category = 'write', 'write_failure'
@@ -442,11 +482,12 @@ def _prepare_one_file(source_path: str, destination: str, max_faces: int,
                     return terminal(indicator=failed.indicator.name, written_path=written)
                 stage, category = 'write', 'write_failure'
                 if os.path.isdir(cache_path):
-                    reason = (f'decimated cache {cache_path} is a directory in the input '
-                              f'tree; rename that directory to repair this file')
+                    reason = (f'decimated cache {cache_path} is a directory; '
+                              f'rename that directory to repair this file')
                     return terminal()
-                mesh_io.write(decimated.mesh.with_destination(cache_path))
-                mesh = _load_cache(cache_path, destination)
+                with mesh_io.staged_write(cache_path) as staged:
+                    mesh_io.write_ply(decimated.mesh, staged)
+                mesh = _load_cache(cache_path, probed)
                 if mesh is None:
                     reason = f'decimated cache {cache_path} could not be read back'
                     return terminal()
@@ -805,9 +846,11 @@ class _Runner:
         try:
             output_log = self._start_model_log(mesh)
             mode = self.mode
-            cache_path = self._cache_path(mesh)
             handoff = self.prepared.get(mesh.path) if mode == 'repair' else None
             try:
+                # Inside the try: a source outside the input tree (ValueError)
+                # is this job's launch failure, not a lost job.
+                cache_path = self._cache_path(mesh) if mode == 'prepare' else None
                 # The repair pass loads what prepare saved and gets
                 # max_faces 0: the initial decimation already ran there.
                 proc = _spawn_child(self.python, self.script, mesh,
@@ -819,7 +862,7 @@ class _Runner:
                                        self.config.reconstruct_memory_budget_gb),
                                    min_shell_faces=self.config.min_shell_faces,
                                    mode=mode,
-                                   cache_path=cache_path if mode == 'prepare' else None,
+                                   cache_path=cache_path,
                                    load_from=(handoff['prepared_path']
                                               if handoff is not None else None))
             except Exception as exc:
@@ -1199,11 +1242,16 @@ def _check_environment(config: RunConfig) -> str | None:
     try:
         source = Path(config.input).resolve()
         destination = Path(config.output).resolve()
+        cache = Path(decimated_root(config.input)).resolve()
     except (OSError, RuntimeError) as error:
-        return f'cannot resolve input/output paths: {error}'
+        return f'cannot resolve input/output/cache paths: {error}'
     if (source == destination or source in destination.parents
             or destination in source.parents):
         return 'input and output must not overlap in either direction'
+    if cache == source or source in cache.parents:
+        return f'the decimation cache {cache} resolves inside the input folder'
+    if cache == destination or cache in destination.parents or destination in cache.parents:
+        return f'output must not overlap the decimation cache {cache}'
 
     # Libraries: one line each (`libs.dependencies`); a missing required
     # package usually failed already when this module imported it.

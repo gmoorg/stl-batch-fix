@@ -104,7 +104,8 @@ class _PoolTestCase(unittest.TestCase):
                    Kind.BINARY_STL, triangles, True)
 
     def make_args(self, **overrides):
-        return replace(RunConfig(input='/in', output='/out', max_faces=0, workers=4,
+        return replace(RunConfig(input=str(self.root / 'in'), output=str(self.root / 'out'),
+                                 max_faces=0, workers=4,
                                  per_file_timeout=5.0, reap_deadline=5.0,
                                  memory_budget_bytes=10 ** 15), **overrides)
 

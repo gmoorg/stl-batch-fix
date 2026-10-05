@@ -79,6 +79,38 @@ class TestBatchRepairCLI(unittest.TestCase):
                     self.assertIn(message, text)
             prepare.assert_not_called()
 
+    def test_output_overlapping_the_decimation_cache_is_rejected(self):
+        """The cache is `<input>.decimated`, beside the input. (An output
+        that is an ancestor of it is an ancestor of the input too, so the
+        input check already rejects that case.)"""
+        cache = self.root / 'input.decimated'
+        with mock.patch.object(converter, 'prepare') as prepare:
+            for output in (cache, cache / 'out'):
+                with self.subTest(output=output):
+                    code, text = self.invoke(self.source, output)
+                    self.assertEqual(code, 2, text)
+                    self.assertIn('decimation cache', text)
+            prepare.assert_not_called()
+
+    def test_a_cache_folder_symlinked_into_the_input_is_rejected(self):
+        inside = self.source / 'cache'
+        inside.mkdir()
+        (self.root / 'input.decimated').symlink_to(inside, target_is_directory=True)
+        with mock.patch.object(converter, 'prepare') as prepare:
+            code, text = self.invoke()
+        self.assertEqual(code, 2, text)
+        self.assertIn('resolves inside the input folder', text)
+        prepare.assert_not_called()
+
+    def test_a_looping_cache_symlink_is_a_configuration_error(self):
+        cache = self.root / 'input.decimated'
+        cache.symlink_to(cache)
+        with mock.patch.object(converter, 'prepare') as prepare:
+            code, text = self.invoke()
+        self.assertEqual(code, 2, text)
+        self.assertIn('cannot resolve', text)
+        prepare.assert_not_called()
+
     def test_any_argument_is_rejected_before_anything_is_written(self):
         with mock.patch.object(converter, 'prepare') as prepare:
             for argv in (['--help'], ['--input', str(self.source)], ['x']):

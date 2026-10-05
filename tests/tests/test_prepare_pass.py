@@ -39,10 +39,11 @@ class _Case(unittest.TestCase):
 
 
 class TestCachePath(_Case):
-    def test_target_and_settings_are_in_the_name_under_the_input_tree(self):
+    def test_the_cache_is_a_ply_beside_the_input_folder_not_in_it(self):
         tag = decimator.settings_tag()
         self.assertEqual(self.cache(900000),
-                         str(self.inp / 'stl-decimated' / 'sub' / f'ball.stl.900000.{tag}.stl'))
+                         str(self.root.resolve() / 'in.decimated' / 'sub'
+                             / f'ball.stl.900000.{tag}.ply'))
 
     def test_new_decimator_settings_get_their_own_file(self):
         before = self.cache(1000)
@@ -55,11 +56,37 @@ class TestCachePath(_Case):
     def test_a_converted_source_never_shares_a_native_sources_cache(self):
         """Both bound for out/a.stl, possibly in different runs: the
         converted job loads stl-exported/a.stl, the native one a.stl."""
-        native = batch_repair.decimated_path('/in', '/in/a.stl', 9)
-        converted = batch_repair.decimated_path('/in', '/in/stl-exported/a.stl', 9)
+        inp = str(self.inp)
+        native = batch_repair.decimated_path(inp, os.path.join(inp, 'a.stl'), 9)
+        converted = batch_repair.decimated_path(inp, os.path.join(inp, 'stl-exported', 'a.stl'), 9)
         self.assertNotEqual(native, converted)
-        self.assertEqual(converted,
-                         f'/in/stl-decimated/stl-exported/a.stl.9.{decimator.settings_tag()}.stl')
+        self.assertEqual(converted, os.path.join(
+            batch_repair.decimated_root(inp), 'stl-exported', f'a.stl.9.{decimator.settings_tag()}.ply'))
+
+    def test_a_source_symlinked_outside_the_input_stays_inside_the_cache(self):
+        outside = self.root / 'elsewhere' / 'model.stl'
+        outside.parent.mkdir()
+        shutil.copy(self.source, outside)
+        link = self.inp / 'link.stl'
+        link.symlink_to(outside)
+        cache = batch_repair.decimated_path(str(self.inp), str(link), 9)
+        self.assertEqual(cache, os.path.join(
+            batch_repair.decimated_root(str(self.inp)), f'link.stl.9.{decimator.settings_tag()}.ply'))
+
+    def test_a_source_outside_the_input_is_refused(self):
+        with self.assertRaises(ValueError):
+            batch_repair.decimated_path(str(self.inp), str(self.root / 'other.stl'), 9)
+
+
+def _nan_source(path, faces):
+    """`faces` triangles, the last one entirely NaN."""
+    v, f = ds.sphere(10.0, 40)
+    tris = np.asarray(v, np.float32)[np.asarray(f)][:faces].copy()
+    tris[-1] = np.nan
+    rec = np.zeros(len(tris), dtype=[('n', '<f4', 3), ('v', '<f4', (3, 3)), ('a', '<u2')])
+    rec['v'] = tris
+    with open(path, 'wb') as fh:
+        fh.write(b'\0' * 80 + np.uint32(len(tris)).tobytes() + rec.tobytes())
 
 
 class TestPrepare(_Case):
@@ -71,14 +98,18 @@ class TestPrepare(_Case):
                 self.assertEqual(result.prepared_path, str(self.source))
                 self.assertFalse(os.path.exists(self.cache(max_faces)))
 
-    def test_decimation_is_cached_and_estimated_on_the_cache(self):
+    def test_a_source_over_target_is_decimated_into_a_ply_cache(self):
         result = self.prepare(1000)
         self.assertTrue(result.is_handoff, result.reason)
         self.assertEqual(result.prepared_path, self.cache(1000))
-        cached = mesh_io.load(mesh_io.probe(self.cache(1000), '/x'))
-        self.assertLessEqual(cached.triangles, 1000)
+        cached = mesh_io.read_ply(self.cache(1000), mesh_io.probe(str(self.source), '/x'))
+        self.assertGreater(cached.triangles, 0)
+        self.assertTrue(any(f'{cached.triangles} faces out' in step for step in result.steps),
+                        result.steps)
         self.assertGreater(result.estimate_bytes, 0)
         self.assertFalse(os.path.exists(self.destination), 'prepare publishes nothing')
+        self.assertEqual(os.listdir(os.path.dirname(self.cache(1000))),
+                         [os.path.basename(self.cache(1000))], 'no staging file left')
 
     def test_a_cached_decimation_is_reused(self):
         self.prepare(1000)
@@ -88,10 +119,9 @@ class TestPrepare(_Case):
         self.assertTrue(result.is_handoff, result.reason)
         self.assertTrue(any('cached' in step for step in result.steps), result.steps)
 
-    def test_a_cache_from_before_the_settings_tag_is_not_reused(self):
-        """Untagged files were decimated with other settings: the job
-        decimates again and writes the tagged file; the old one stays."""
-        old = Path(str(self.inp / 'stl-decimated' / 'sub' / 'ball.stl.1000.stl'))
+    def test_a_cache_from_the_old_in_tree_folder_is_not_read(self):
+        """`<input>/stl-decimated/*.stl` was made with other settings."""
+        old = self.inp / 'stl-decimated' / 'sub' / 'ball.stl.1000.stl'
         old.parent.mkdir(parents=True)
         old.write_bytes(b'stale cache, must not be read')
         result = self.prepare(1000)
@@ -102,21 +132,49 @@ class TestPrepare(_Case):
 
     def test_an_unreadable_cache_is_rebuilt(self):
         Path(self.cache(1000)).parent.mkdir(parents=True)
-        Path(self.cache(1000)).write_bytes(b'not an stl')
+        Path(self.cache(1000)).write_bytes(b'not a ply')
         result = self.prepare(1000)
         self.assertTrue(result.is_handoff, result.reason)
-        self.assertLessEqual(mesh_io.load(mesh_io.probe(self.cache(1000), '/x')).triangles, 1000)
+        mesh_io.read_ply(self.cache(1000), mesh_io.probe(str(self.source), '/x'))
 
-    def test_a_decimator_failure_publishes_undecimated_and_ends_the_job(self):
+    def test_a_decimation_failure_publishes_undecimated_and_caches_nothing(self):
         with mock.patch.object(decimator, '_decimate_meshlab', side_effect=RuntimeError('boom')):
             result = self.prepare(1000)
         self.assertFalse(result.is_handoff)
         self.assertEqual((result.category, result.indicator), ('published', 'UNDECIMATED'))
+        self.assertIn('boom', result.reason)
         self.assertEqual(Path(result.written_path).read_bytes(), self.source.read_bytes())
-        self.assertFalse(os.path.exists(self.cache(1000)))
+        self.assertFalse(os.path.exists(os.path.dirname(self.cache(1000))), 'nothing cached')
+
+    def test_a_failed_cache_write_is_a_write_failure_and_leaves_nothing(self):
+        with mock.patch.object(mesh_io, 'write_ply', side_effect=OSError('disk says no')):
+            result = self.prepare(1000)
+        self.assertFalse(result.is_handoff)
+        self.assertEqual(result.category, 'write_failure', result.reason)
+        self.assertIsNone(result.written_path)
+        self.assertEqual(os.listdir(os.path.dirname(self.cache(1000))), [],
+                         'no cache and no staging file')
+
+    def test_non_finite_triangles_are_dropped_and_reported(self):
+        _nan_source(self.source, 1500)
+        result = self.prepare(1000)
+        self.assertTrue(result.is_handoff, result.reason)
+        self.assertIn('load: dropped 1 triangles with NaN/inf coordinates', result.steps)
+
+    def test_dropping_below_the_target_still_writes_the_cache(self):
+        """The header is over target, the finite triangles are not: the
+        decimator has nothing to do, and the handoff path is still the
+        cache, so the cache must be written."""
+        _nan_source(self.source, 1001)
+        result = self.prepare(1000)
+        self.assertTrue(result.is_handoff, result.reason)
+        self.assertEqual(result.prepared_path, self.cache(1000))
+        self.assertTrue(any('not_needed' in step for step in result.steps), result.steps)
+        cached = mesh_io.read_ply(self.cache(1000), mesh_io.probe(str(self.source), '/x'))
+        self.assertEqual(cached.triangles, 1000)
 
     def test_a_directory_at_the_cache_path_fails_the_job_visibly(self):
-        """An input folder named like a cache file: never read as a cache,
+        """A folder named like a cache file: never read as a cache,
         never silently replaced; the job fails and says why."""
         os.makedirs(os.path.join(self.cache(1000), 'b.stl'))
         result = self.prepare(1000)
@@ -158,6 +216,15 @@ class TestRepairFromPrepared(_Case):
         self.assertEqual(seen['max_faces'], 0)
         self.assertEqual(result.indicator, 'FAILED')
         self.assertEqual(Path(result.written_path).read_bytes(), self.source.read_bytes())
+
+    def test_a_drop_on_the_direct_load_is_reported_in_the_repair_steps(self):
+        """A source within target is loaded by the repair pass itself."""
+        _nan_source(self.source, 600)
+        with mock.patch.object(processor, 'process',
+                               lambda mesh, max_faces, **kw: processor.Outcome(
+                                   Indicator.FAILED, None, 'source', 'forced')):
+            result = batch_repair._process_one_file(str(self.source), self.destination, 0)
+        self.assertIn('load: dropped 1 triangles with NaN/inf coordinates', result.steps)
 
 
 if __name__ == '__main__':

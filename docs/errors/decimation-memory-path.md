@@ -181,7 +181,13 @@ conversion happens either way, and int64 avoids it where it costs most.
 
 ## Decision: decimate from file, cache as PLY (owner, 2026-10-04)
 
-Not implemented. Planned for the initial decimation in the prepare pass, for
+> **Revised 2026-10-05 (owner, after measurement): our STL loader, PLY
+> cache.** The PLY cache and its location were implemented; reading the
+> source with PyMeshLab was not adopted. See
+> [Measured: file path vs array path](#measured-file-path-vs-array-path-2026-10-05)
+> below. The text of the original decision follows.
+
+Planned for the initial decimation in the prepare pass, for
 sources over `max_faces`:
 
 ```text
@@ -300,6 +306,44 @@ on the file path (option 2 above).
   no longer read. They stay on disk until removed by hand.
 - **Sources at or under `max_faces`** still load through `mesh_io.load`
   (no decimation). Unchanged.
+
+## Measured: file path vs array path (2026-10-05)
+
+Built and compared before deciding
+([tools/experiments/file_decimation_compare.py](../../tools/experiments/file_decimation_compare.py):
+each path in its own process, peak = VmHWM, distances point-to-triangle from
+all vertices, in model units). Both produce the same mesh; the file path is
+slower and needs more memory:
+
+| Source | Array path: time / peak | File path: time / peak | Output |
+|---|---|---|---|
+| Base_Pillar_R 1.0M → 0.9M | 5.3 s / 0.49 GiB | 7.8 s / 0.65 GiB | identical (0 distance) |
+| left_sword 2.1M → 0.9M | 25.6 s / 0.96 GiB | 30.3 s / 1.29 GiB | identical |
+| Bat Girl Merge 4.8M → 0.9M | 73.3 s / 2.18 GiB | 87.9 s / 2.95 GiB | max 0.006, p99 0 |
+
+The cost is PyMeshLab's STL reader, not the mesh or the library. In fresh
+processes, the same 1M-face mesh (Base_Pillar_R) adds 0.432 GiB loaded from
+STL but 0.097 GiB loaded from a PLY of it; the library and an empty MeshSet
+cost ~0.08 GiB either way; a tiny mesh adds nothing. `compact()` and
+`meshing_remove_unreferenced_vertices` free nothing after an STL import, and
+the imported mesh has no optional colour/quality/texture attributes switched
+on. Why the reader holds ~4.5× the mesh is not established.
+
+Stage by stage on Bat Girl (4.83M faces, 2.42M vertices), array path: our
+load peaks at 0.77 GiB (0.24 resident after; the 147·F estimate above,
+measured 0.67 GiB over baseline), casting + building the VCG mesh +
+`add_mesh` at 1.55 GiB (0.59 resident), decimation at 2.05 GiB. File path:
+import 2.30 GiB (2.19 resident), decimation 2.95 GiB. The float64/int32 casts
+are ~0.12 GB of that. A mesh built from arrays costs ~155 B/face, not the
+~430 B/face measured on STL imports above.
+
+So the prepare pass loads every source with `mesh_io.load`, decimates from
+arrays (`meshlab.to_mesh` drops index-degenerate faces, the segfault fix) and
+writes the PLY cache with `mesh_io.write_ply` to `<input>.decimated/` (owner:
+"Ok, let use our stl import"). The cache holds float32 until `Geometry`
+moves to float64. Non-finite triangles are dropped by `mesh_io.load`
+(owner: garbage in, garbage out); see
+[non-finite-coordinates.md](non-finite-coordinates.md).
 
 ## Decision: float64 internal vertex buffer (owner, 2026-10-04)
 

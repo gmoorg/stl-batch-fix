@@ -88,11 +88,15 @@ class Result:
         return self.rung not in (Rung.NOT_NEEDED, Rung.FAILED)
 
 
+def _quadric_filter(max_faces: int) -> tuple[str, dict]:
+    """The one quadric decimation call, for arrays and files alike."""
+    return ('meshing_decimation_quadric_edge_collapse',
+            {'targetfacenum': int(max_faces), **QUADRIC_PARAMS})
+
+
 def _decimate_meshlab(mesh: Mesh, max_faces: int) -> Geometry:
     """PyMeshLab quadric edge collapse to `max_faces` with `QUADRIC_PARAMS`."""
-    return meshlab.apply_filters(
-        mesh, (('meshing_decimation_quadric_edge_collapse',
-                {'targetfacenum': int(max_faces), **QUADRIC_PARAMS}),)).geometry
+    return meshlab.apply_filters(mesh, (_quadric_filter(max_faces),)).geometry
 
 
 def decimate(mesh: Mesh, max_faces: int) -> Result:
