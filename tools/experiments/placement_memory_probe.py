@@ -11,10 +11,13 @@ Modes (one process each, so every peak is that step's own):
                                10 GB plan); saves verts, faces, target (the
                                part's face count, the pipeline's decimation
                                target) and the source path
-    decimate IN.npz on|off OUT.npz
-                               quadric decimation to the target with
-                               optimalplacement on (PyMeshLab default, the
-                               batch) or off; saves the result
+    decimate IN.npz VARIANT OUT.npz
+                               quadric decimation to the target; VARIANT is
+                               defaults (the batch), placement-off
+                               (optimalplacement=False), planarquadric or
+                               preservetopology (each =True, else defaults);
+                               `on` / `off` are accepted for the first two.
+                               Saves the result
     meshfix IN.npz             meshfix.repair on IN; cap it with `timeout`
 
 Each mode prints RSS before the step, RSS every INTERVAL seconds while it
@@ -63,6 +66,13 @@ def measured(tag, fn):
               f"peak(VmHWM)={status_gib('VmHWM'):.2f} GiB", flush=True)
 
 
+#: Extra parameters per variant, on top of `targetfacenum`.
+VARIANTS = {'defaults': {}, 'on': {},
+            'placement-off': {'optimalplacement': False}, 'off': {'optimalplacement': False},
+            'planarquadric': {'planarquadric': True},
+            'preservetopology': {'preservetopology': True}}
+
+
 def load_npz(path):
     z = np.load(path)
     src = str(z['source'])
@@ -93,11 +103,11 @@ def main():
         report('winding', rec)
         save_npz(out, rec.geometry, len(part.geometry.faces), src)
     elif mode == 'decimate':
-        inp, placement, out = sys.argv[2], sys.argv[3], sys.argv[4]
+        inp, variant, out = sys.argv[2], sys.argv[3], sys.argv[4]
         mesh, target, src = load_npz(inp)
-        G = measured(f"decimate optimalplacement={placement}", lambda: meshlab.apply_filters(
+        G = measured(f"decimate {variant}", lambda: meshlab.apply_filters(
             mesh, (('meshing_decimation_quadric_edge_collapse',
-                    {'targetfacenum': target, 'optimalplacement': placement == 'on'}),)).geometry)
+                    {'targetfacenum': target, **VARIANTS[variant]}),)).geometry)
         report('decimated', mesh.with_geometry(G))
         save_npz(out, G, target, src)
     elif mode == 'meshfix':

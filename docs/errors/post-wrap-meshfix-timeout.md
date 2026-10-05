@@ -89,13 +89,44 @@ off-surface distance is point-to-triangle to the winding surface.
 | defaults (batch) | 438 / 320 / 285·h / 9.0 s | 7,740 / 1,566 / 2,749·h (412 mm) / 75 s |
 | defaults, short edges collapsed first | 428 / 314 / 285·h / 9.1 s | 7,780 / 1,519 / 2,747·h / 113 s |
 | `planarquadric=True` | 0 / 0 / 0.1·h / 7.6 s | 1 / 0 / 0.1·h / 52 s |
-| `preservetopology=True` | 0 / 0 / 0.1·h / 8.0 s | 0 / 0 / 0.1·h / 57 s |
+| ~~`preservetopology=True`~~ (invalid, see below) | ~~0 / 0 / 0.1·h / 8.0 s~~ | ~~0 / 0 / 0.1·h / 57 s~~ |
 
 One run each. So the slivers are not the trigger, and a field change to
-remove them is not motivated. Either PyMeshLab option, keeping optimal
-placement, stops the spikes and runs faster than the defaults. What does
-trigger them is still not known. Not yet measured for the two options:
-peak memory, accuracy on clean surfaces (rod check), and other models.
+remove them is not motivated. `planarquadric=True`, keeping optimal
+placement, stops the spikes. What does trigger them is still not known.
+
+**The `preservetopology` row is invalid: PyMeshLab keeps filter parameters
+between calls.** All four decimations ran in one process, and a parameter
+not passed keeps its value from the previous call of the same filter, even
+on a new `MeshSet`. That row ran right after `planarquadric=True`, so it had
+both flags. Checked on Aloy's winding output (2026-10-05): `preservetopology`
+alone in a fresh process gives NM 1,068; after a `planarquadric` call, it
+gives NM 0, and so does a following call with no flags at all. The other
+rows are valid: nothing before them set a parameter.
+
+This is also a pipeline risk: `decimator` passes only `targetfacenum`, so
+it inherits whatever an earlier call in the same process set (another
+step, a test, an experiment). Not yet fixed.
+
+Time and memory per variant, each decimation in its own process from the
+same post-fix winding output
+([tools/experiments/placement_memory_probe.py](../../tools/experiments/placement_memory_probe.py)
+`decimate IN.npz VARIANT OUT.npz`; peak = VmHWM):
+
+| Model | Variant | Time | Peak | RSS after | NM | Off > 1·h |
+|---|---|---|---|---|---|---|
+| Aloy | defaults (batch) | 9.5 s | 0.68 GiB | 0.40 GiB | 438 | 320 |
+| | `optimalplacement=False` | 13.5 s | 1.30 GiB | 0.92 GiB | 19 | 0 |
+| | `planarquadric=True` | 8.0 s | 0.73 GiB | 0.45 GiB | 0 | 0 |
+| | `preservetopology=True` | 10.0 s | 0.68 GiB | 0.40 GiB | 1,068 | not measured |
+| Laura | defaults (batch) | 75.7 s | 2.51 GiB | 1.39 GiB | 7,740 | 1,566 |
+| | `optimalplacement=False` | 75.8 s | 4.65 GiB | 3.05 GiB | 7 | 0 |
+| | `planarquadric=True` | 54.3 s | 2.49 GiB | 1.38 GiB | 1 | 0 |
+| | `preservetopology=True` | 190.0 s | 2.51 GiB | 1.40 GiB | 13,198 | not measured |
+
+Off-surface counts come from the four-variant table above (valid rows
+only). Not yet measured for `planarquadric`: accuracy on clean surfaces
+(rod check) and other models.
 
 **Possible silent damage:** a flung vertex is a spike in the printed part.
 Models where MeshFix finished in time may carry such spikes. Nothing in the
