@@ -19,12 +19,8 @@ import numpy as np
 from . import pipeconfig, scanner
 from .mesh_io import Geometry, Mesh, require_geometry
 
-try:
-    import igl as _igl
-    from scipy import ndimage as _ndimage
-    _AVAILABLE = True
-except ImportError:                                    # pragma: no cover
-    _AVAILABLE = False
+import igl as _igl
+from scipy import ndimage as _ndimage
 
 
 #: Grid spacing = the alpha alpha-wrap would use: diag / 800, capped at 0.15.
@@ -74,11 +70,6 @@ class Plan:
     blocks_per_axis: int
     samples_bound: int        # upper bound on surface samples
     estimate_bytes: int
-
-
-def is_available() -> bool:
-    """Whether libigl and scipy imported."""
-    return _AVAILABLE
 
 
 def grid_spacing(whole_model_diag: float) -> float:
@@ -262,8 +253,6 @@ def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
     Raises ValueError for invalid input and RuntimeError when the result is
     not a non-empty, finite, closed, non-degenerate surface.
     """
-    if not _AVAILABLE:
-        raise RuntimeError('libigl/scipy are not installed')
     _check_spacing(h)
     V, F = _validated(mesh)
     lo, shape = _grid(V, h)

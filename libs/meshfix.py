@@ -14,11 +14,7 @@ import numpy as np
 
 from .mesh_io import Geometry, Mesh, require_geometry
 
-try:
-    import pymeshfix as _pymeshfix
-    _AVAILABLE = True
-except ImportError:                                   # pragma: no cover
-    _AVAILABLE = False
+import pymeshfix as _pymeshfix
 
 
 @dataclass(frozen=True)
@@ -41,16 +37,6 @@ class Result:
     second_elapsed: float
 
 
-def is_available() -> bool:
-    """Whether PyMeshFix can be used on this machine.
-
-    For the startup check.  Repair has no in-process fallback — Blender is a
-    different tool with different failure modes rather than a substitute — so a
-    false here means the pipeline can only decimate.
-    """
-    return _AVAILABLE
-
-
 #: Arguments to `clean()`.  These match the library default (10, 3), passed
 #: explicitly rather than omitted.  `(1, 1)` keeps 13,300 more faces on
 #: Amidara base at 99.73% volume but leaves 6,187 self-intersections;
@@ -67,8 +53,6 @@ def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
     input mesh with `ok=False`; successful execution still needs a topology scan.
     """
     require_geometry(mesh)
-    if not _AVAILABLE:
-        return Result(mesh, False, "pymeshfix is not installed", 0.0)
 
     started = time.monotonic()
     try:

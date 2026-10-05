@@ -14,7 +14,6 @@ from libs import pipeconfig, scanner, winding
 from libs.mesh_io import Geometry, Kind, Mesh
 from tests.tests.test_decimator import _sphere
 
-needs_igl = unittest.skipUnless(winding.is_available(), 'libigl/scipy are needed')
 
 
 def mesh(verts, faces):
@@ -84,7 +83,6 @@ def assert_closed(test, m):
     test.assertEqual((s.open_edges, s.non_manifold, s.degenerate), (0, 0, 0))
 
 
-@needs_igl
 class TestGeometry(unittest.TestCase):
 
     def test_sphere_is_closed_keeps_volume_and_surface(self):
@@ -207,7 +205,6 @@ class TestGeometry(unittest.TestCase):
         self.assertTrue(np.array_equal(canonical(one, 0.5), canonical(two, 0.5)))
 
 
-@needs_igl
 class TestOrientation(unittest.TestCase):
     """Inside is decided by the winding number, which follows face
     orientation: parts are oriented consistently and outward first, so an
@@ -262,7 +259,6 @@ class TestOrientation(unittest.TestCase):
         self.assertLess(result.mesh.geometry.verts[:, 0].max(), 10.6)
 
 
-@needs_igl
 class TestPlan(unittest.TestCase):
 
     def setUp(self):
@@ -301,7 +297,6 @@ class TestPlan(unittest.TestCase):
                 winding.plan(self.m, 0.5, budget)
 
 
-@needs_igl
 class TestContract(unittest.TestCase):
 
     def test_distance_tree_is_built_once_and_winding_queried_per_block(self):
@@ -423,7 +418,6 @@ class TestWeld(unittest.TestCase):
         self.assertEqual(ids.tolist(), [[0, 11, 21, 31]])
 
 
-@needs_igl
 class TestStep(unittest.TestCase):
 
     def test_a_part_enclosing_no_volume_is_dropped_not_failed(self):
@@ -489,11 +483,6 @@ class TestStep(unittest.TestCase):
                 self.assertFalse(ok)
                 self.assertIs(out, m)
                 self.assertIn(expected, detail)
-        with mock.patch.object(winding, '_AVAILABLE', False):
-            ok, _, detail = winding.step_winding_reconstruct(
-                m, pipeconfig.StepConfig(whole_model_diag=40.0))
-        self.assertFalse(ok)
-        self.assertIn('not installed', detail)
 
 
 if __name__ == '__main__':

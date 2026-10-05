@@ -88,22 +88,6 @@ class Result:
         return self.rung not in (Rung.NOT_NEEDED, Rung.FAILED)
 
 
-def is_available() -> bool:
-    """Whether the required decimator is installed.
-
-    For the startup check.  Decimation is a deliverable rather than an
-    optimisation — a run that cannot decimate produces meshes the printer will
-    re-decimate on its own, reintroducing the defects this tool exists to
-    remove — so a false here is a reason not to start, not a reason to skip.
-    """
-    return meshlab.is_available()
-
-
-def available_rungs() -> tuple[Rung, ...]:
-    """Report whether the required decimator is available."""
-    return (Rung.MESHLAB,) if meshlab.is_available() else ()
-
-
 def _decimate_meshlab(mesh: Mesh, max_faces: int) -> Geometry:
     """PyMeshLab quadric edge collapse to `max_faces` with `QUADRIC_PARAMS`."""
     return meshlab.apply_filters(
@@ -129,11 +113,6 @@ def decimate(mesh: Mesh, max_faces: int) -> Result:
     faces_in = len(mesh.geometry.faces)
     if max_faces <= 0 or faces_in <= max_faces:
         return Result(mesh, Rung.NOT_NEEDED, faces_in, faces_in)
-
-    if not meshlab.is_available():
-        return Result(mesh, Rung.FAILED, faces_in, faces_in,
-                      ((Rung.MESHLAB,
-                        'PyMeshLab is not installed'),))
 
     try:
         geometry = _decimate_meshlab(mesh, max_faces)

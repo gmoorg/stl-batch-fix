@@ -35,7 +35,7 @@ from unittest import mock
 
 import numpy as np
 
-from libs import alphawrap, decimator, execstep, meshfix, meshlab, pipeconfig, repairer, scanner, welder, winding
+from libs import decimator, execstep, meshfix, meshlab, pipeconfig, repairer, scanner, welder, winding
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.pipeconfig import StepConfig
 from libs.repairer import Result, Step, StepResult, repair
@@ -52,10 +52,15 @@ def clean_filters_combined() -> tuple[tuple[str, dict], ...]:
         ('meshing_remove_unreferenced_vertices', {}),
     )
 
-#: Only tests that explicitly exercise these retained tools need them.
-HAVE_TOOLS = meshlab.is_available() and meshfix.is_available()
-needs_tools = unittest.skipUnless(
-    HAVE_TOOLS, "pymeshlab and pymeshfix are both needed")
+try:
+    from libs import alphawrap
+except ImportError as exc:
+    # CGAL is optional (alpha-wrap is explicit-use): only the tests that use
+    # it are skipped. Any other import error is a real failure.
+    if not (exc.name or '').startswith('CGAL'):
+        raise
+    alphawrap = None
+needs_cgal = unittest.skipIf(alphawrap is None, 'CGAL (optional) is not installed')
 
 
 def mesh(verts, faces, source='/in/body.stl', destination='/out/body.stl'):
@@ -276,7 +281,7 @@ class TestSequence(unittest.TestCase):
     # uniform-step refactor (docs/refactor/TODO.md) -- there is no on/off
     # flag any more, so this premise no longer applies.
 
-    @unittest.skipUnless(alphawrap.is_available(), "cgal is needed")
+    @needs_cgal
     def test_an_inverted_mesh_comes_back_outward(self):
         """Real alpha wrapping reconstructs outward-facing geometry."""
         result = repair(inverted_tetra(), min_shell_faces=0,
@@ -532,6 +537,7 @@ class TestFailure(unittest.TestCase):
         self.assertIn('rebuild gave up', result.problem)
         self.assertNotIn(Step.MERGE, [s.step for s in result.steps])
 
+    @needs_cgal
     def test_an_explicit_alpha_wrap_still_propagates_failure(self):
         with mock.patch.object(alphawrap, 'wrap', side_effect=RuntimeError('wrap gave up')):
             result = repair(tetra(), min_shell_faces=0,
@@ -541,7 +547,6 @@ class TestFailure(unittest.TestCase):
         self.assertNotIn(Step.MERGE, [s.step for s in result.steps])
 
 
-@needs_tools
 class TestWhyCleanIsAllFourFilters(unittest.TestCase):
     """The four filters are a set, and the reasons were prose until now.
 
@@ -633,7 +638,6 @@ class TestZeroThicknessSheets(unittest.TestCase):
         self.assertEqual(scanner.scan(masked).open_edges, 0,
                          "the sheet no longer masks the hole — fixture stale")
 
-    @needs_tools
     def test_removing_a_flap_from_a_sound_mesh_restores_it(self):
         """A flap on intact surface shows as non-manifold, and removing it
         returns the mesh to its control exactly."""
@@ -648,7 +652,6 @@ class TestZeroThicknessSheets(unittest.TestCase):
         self.assertAlmostEqual(scanner.volume(fixed), scanner.volume(sound),
                                places=5)
 
-    @needs_tools
     def test_removing_a_sheet_that_masked_a_hole_repairs_it(self):
         """The direction that matters: one face of the sheet becomes the
         missing surface and the redundant one goes, so the filter **repairs**
@@ -659,7 +662,6 @@ class TestZeroThicknessSheets(unittest.TestCase):
         self.assertTrue(scanner.scan(fixed).is_clean)
         self.assertEqual(len(fixed.geometry.faces), len(self.FACES))
 
-    @needs_tools
     def test_both_faces_are_never_deleted(self):
         """Deleting both is rejected, not untried: a sheet may be large and
         both faces may be the only surface in that region, so removing both
@@ -671,7 +673,7 @@ class TestZeroThicknessSheets(unittest.TestCase):
                          "a face of the sheet survives as real surface")
 
 
-@unittest.skipUnless(alphawrap.is_available(), "cgal is needed")
+@needs_cgal
 class TestRealTools(unittest.TestCase):
     """Real CGAL topology through part_steps= at a cheap explicit resolution.
 
@@ -819,8 +821,9 @@ class TestAlphaWrapBinding(unittest.TestCase):
 
     # Alpha-wrap is no longer the default part step (winding reconstruction
     # replaced it) but stays available: these run it as an explicit entry.
-    ALPHA_WRAP = (('alpha_wrap', alphawrap.step_alpha_wrap),)
+    ALPHA_WRAP = (('alpha_wrap', alphawrap.step_alpha_wrap),) if alphawrap else ()
 
+    @needs_cgal
     def test_alpha_wrap_step_uses_whole_mesh_recipe(self):
         whole = two_tetrahedra()
         with mock.patch.object(alphawrap, 'wrap', side_effect=lambda m, a, o: m) as wrapped:
@@ -832,6 +835,7 @@ class TestAlphaWrapBinding(unittest.TestCase):
             self.assertAlmostEqual(call.args[1], diagonal / 800)
             self.assertAlmostEqual(call.args[2], diagonal / 2000)
 
+    @needs_cgal
     def test_alpha_wrap_step_caps_alpha_and_offset_on_a_large_mesh(self):
         original = two_tetrahedra()
         large = original.with_geometry(Geometry(
@@ -860,6 +864,7 @@ class TestAlphaWrapBinding(unittest.TestCase):
             for call in rebuilt.call_args_list:
                 self.assertAlmostEqual(call.args[1], expected)
 
+    @needs_cgal
     def test_custom_tool_bypasses_cgal(self):
         """A custom `part_steps` that never mentions `step_alpha_wrap` never
         touches CGAL.
@@ -874,8 +879,7 @@ class TestAlphaWrapBinding(unittest.TestCase):
         still worth guarding, is that CGAL itself is never invoked when the
         supplied sequence has no step that calls it.
         """
-        with mock.patch.object(alphawrap, '_CGAL', False), \
-             mock.patch.object(alphawrap, '_alpha_wrap_3',
+        with mock.patch.object(alphawrap, '_alpha_wrap_3',
                                side_effect=AssertionError('CGAL touched')):
             result = repair(tetra(), min_shell_faces=0, part_steps=(('recorder', Recorder()),))
         self.assertTrue(result.ok, result.problem)

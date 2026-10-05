@@ -64,13 +64,17 @@ fall into three groups. Removal waits until the replacement exists.
 **1. Forced failure paths — keep.** Mocks force conditions no fixture can
 produce; they protect behaviour, not composition.
 
-- Missing library → result/step failure, not a crash: `test_alphawrap`
-  (availability, missing CGAL, empty result), `test_decimator` (availability,
-  missing PyMeshLab, failure recorded), `test_meshfix`
-  (missing library, returned failure), `test_meshlab` (filter exception),
-  `test_blender` (returned failure / raised exception reported),
-  `test_winding` (open result rejected, invalid input rejected before
-  native calls, failures are step results).
+- Tool failure → result/step failure, not a crash: `test_alphawrap`
+  (empty result), `test_decimator` (failure recorded), `test_meshfix`
+  (returned failure), `test_meshlab` (filter exception), `test_blender`
+  (returned failure / raised exception reported), `test_winding` (open
+  result rejected, invalid input rejected before native calls, failures are
+  step results).
+- Libraries are not tested (owner, 2026-10-05): they are checked once when a
+  run starts (`libs.dependencies`) and never break during development. No
+  test checks availability or a missing library; required libraries are not
+  skip-guarded. CGAL is optional, so `test_alphawrap` and the alpha-wrap
+  tests in `test_repairer` skip without it.
 - I/O and runner failures: `test_converter` (companion copy fails, is
   counted once, interrupted copy leaves nothing, each mesh emitted once),
   `test_batch_repair_cli` (config rejected before intake, malformed TOML,

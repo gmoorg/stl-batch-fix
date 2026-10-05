@@ -9,7 +9,7 @@ from unittest import mock
 import numpy as np
 
 import libs.decimator as decimator
-from libs.decimator import Result, Rung, available_rungs, decimate, is_available
+from libs.decimator import Result, Rung, decimate
 from libs.mesh_io import Geometry, Kind, Mesh, load, probe
 
 
@@ -93,28 +93,11 @@ class DecimatorCase(unittest.TestCase):
         return probe(path, path + '.out')
 
 
-class TestAvailability(DecimatorCase):
-
-    def test_is_available_when_a_library_is_present(self):
-        self.assertTrue(is_available())
-
-    def test_is_available_is_false_with_nothing_at_all(self):
-        """Decimation is a deliverable: a false here means do not start.
-
-        The required decimator missing means the run cannot produce its
-        deliverable at all.
-        """
-        with mock.patch.object(decimator.meshlab, 'is_available', return_value=False):
-            self.assertFalse(is_available())
-
-    def test_available_rungs_reports_what_is_missing(self):
-        with mock.patch.object(decimator.meshlab, 'is_available', return_value=False):
-            self.assertEqual(available_rungs(), ())
+class TestRungs(unittest.TestCase):
 
     def test_there_is_no_blender_rung(self):
         """There is no alternate decimation rung."""
         self.assertFalse(hasattr(Rung, 'BLENDER'))
-        self.assertNotIn('blender', [r.value for r in available_rungs()])
 
 
 class TestNotNeeded(DecimatorCase):
@@ -179,19 +162,6 @@ class TestMeshLab(DecimatorCase):
         before = set(os.listdir(self.dir))
         decimate(mesh, max_faces=1000)
         self.assertEqual(set(os.listdir(self.dir)), before)
-
-
-class TestMeshLabMissing(DecimatorCase):
-
-    def test_missing_pymeshlab_is_a_failure(self):
-        mesh = self.loaded()
-        with mock.patch.object(decimator.meshlab, 'is_available', return_value=False):
-            result = decimate(mesh, max_faces=1000)
-        self.assertIs(result.rung, Rung.FAILED)
-        self.assertIs(result.mesh, mesh)
-        self.assertIn('not installed', result.attempts[0][1])
-
-
 
 
 class TestMeshLabFailureResult(DecimatorCase):
@@ -400,8 +370,6 @@ class TestShapeIsKept(unittest.TestCase):
         7.8 units down. The tip must stay within 2h of the truth."""
         from libs import winding
         from tests.tests import defect_spheres as ds
-        if not winding.is_available():
-            self.skipTest('libigl is needed')
         import igl
         verts, faces = ds.sphere_with_rod()
         h = 0.2

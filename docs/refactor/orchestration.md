@@ -163,6 +163,12 @@ in the table.
   reserves for it; reducing it is an open owner decision.
 - Process-group cleanup cannot cover descendants that deliberately leave the
   group. Conversion intake and direct Blender use have separate lifecycle limits.
-- Startup checks libigl, Blender, PyMeshFix, and PyMeshLab (also the
-  decimator). Splitting itself uses NumPy/SciPy, not PyMeshLab.
+- Startup checks every library once (`libs.dependencies.check_all`, from
+  `_check_environment`): NumPy, SciPy, libigl, PyMeshLab, PyMeshFix and
+  Blender required, CGAL optional (alpha-wrap is explicit-use; its flag
+  flips when alpha-wrap is wired back in). One line each: `[debug]` when
+  available or an optional one is missing, `[error]` when a required one is,
+  and the run stops. Library modules import their packages plainly, so a
+  missing required package usually fails earlier, at import. No step
+  handles a missing library (owner, 2026-10-05).
 - No TUI is planned: runs are configured by editing `batch_repair.toml`.

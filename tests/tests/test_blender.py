@@ -7,7 +7,8 @@ with no Blender installed.
 
 A stand-in is a real subprocess, so `Popen`, `communicate`, the timeout and the
 kill are all genuinely tested; only the program on the other end is different.
-The handful of tests that need the real thing are guarded by `is_available()`.
+The handful of tests that need the real thing run it; Blender is a required
+library, checked once when a run starts (`libs.dependencies`).
 """
 
 import os
@@ -24,7 +25,7 @@ import numpy as np
 
 from libs import blender, proctree
 from libs.blender import (
-    CONVERT_SCRIPT, Result, RunCancelled, Runner, convert, is_available,
+    CONVERT_SCRIPT, Result, RunCancelled, Runner, convert,
 )
 from libs.mesh_io import Geometry, Kind, Mesh
 
@@ -294,7 +295,6 @@ class TestConvertScript(unittest.TestCase):
         ast.parse(rendered)          # would be a SyntaxError if not quoted
 
 
-@unittest.skipUnless(is_available(), "blender not installed")
 class TestConvertRealBlender(unittest.TestCase):
     """The only proof the script itself works."""
 
@@ -369,17 +369,6 @@ class TestConvertRealBlender(unittest.TestCase):
         self.assertFalse(os.path.exists(dst), "a file was written anyway")
 
 
-class TestAvailability(unittest.TestCase):
-
-    def test_missing_executable_is_not_available(self):
-        self.assertFalse(is_available('/nonexistent/blender'))
-
-    def test_non_blender_executable_is_still_reported_by_exit_code(self):
-        """It asks --version and trusts the exit code; that is all it claims."""
-        self.assertTrue(is_available('/bin/true'))
-
-
-@unittest.skipUnless(is_available(), "blender not installed")
 class TestRealBlender(unittest.TestCase):
     """The few things only the real thing can confirm."""
 

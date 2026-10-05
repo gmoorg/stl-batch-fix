@@ -9,17 +9,7 @@ import numpy as np
 from . import scanner
 from .mesh_io import Geometry, Mesh, require_geometry
 
-try:
-    import pymeshlab as _pymeshlab
-    _AVAILABLE = True
-except ImportError:                                   # pragma: no cover
-    _AVAILABLE = False
-
-
-def is_available() -> bool:
-    """Whether PyMeshLab is importable."""
-    return _AVAILABLE
-
+import pymeshlab as _pymeshlab
 
 def to_mesh(geometry: Geometry):
     """Convert project geometry to PyMeshLab's array contract, without

@@ -673,10 +673,7 @@ class TestPlyLayouts(MeshIOCase):
         return read_ply(path, self.mesh())
 
     def test_pymeshlab_bare_export_reads_back(self):
-        try:
-            import pymeshlab
-        except ImportError:
-            self.skipTest('pymeshlab is not installed')
+        import pymeshlab
         v = TETRA_V + [0.1, 0.2, 1e-9]           # a value float32 rounds
         ms = pymeshlab.MeshSet()
         ms.add_mesh(pymeshlab.Mesh(v, TETRA_F.astype(np.int32)))

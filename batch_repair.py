@@ -32,7 +32,7 @@ from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
-from libs import blender, childresult, converter, decimator, pipeconfig, winding  # noqa: E402
+from libs import blender, childresult, converter, decimator, dependencies, pipeconfig, winding  # noqa: E402
 from libs import meshfix, meshlab, mesh_io, modellog, processor, publication, runconfig, runstate, steplog  # noqa: E402
 from libs import indicators, jobmemory, splitter                          # noqa: E402
 from libs.childresult import ChildResult                                  # noqa: E402
@@ -43,13 +43,6 @@ from libs.proctree import terminate_and_confirm                           # noqa
 from libs.runconfig import ConfigError, RunConfig                         # noqa: E402
 from libs.runstate import RunState                                        # noqa: E402
 
-
-DEPENDENCIES = (
-    ('libigl', winding),
-    ('Blender', blender),
-    ('PyMeshFix', meshfix),
-    ('PyMeshLab', meshlab),                  # also the decimator
-)
 
 #: The run configuration: always beside the script, never chosen per run.
 CONFIG_PATH = os.path.join(SCRIPT_DIR, 'batch_repair.toml')
@@ -1212,17 +1205,11 @@ def _check_environment(config: RunConfig) -> str | None:
             or destination in source.parents):
         return 'input and output must not overlap in either direction'
 
-    missing = []
-    for name, module in DEPENDENCIES:
-        try:
-            available = module.is_available()
-        except Exception as error:
-            missing.append(f'{name} (check raised {type(error).__name__}: {error})')
-        else:
-            if not available:
-                missing.append(name)
+    # Libraries: one line each (`libs.dependencies`); a missing required
+    # package usually failed already when this module imported it.
+    missing = dependencies.check_all(_log_line)
     if missing:
-        return 'missing required dependencies: ' + ', '.join(missing)
+        return 'missing required libraries: ' + ', '.join(missing)
     return None
 
 

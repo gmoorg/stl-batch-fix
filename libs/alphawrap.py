@@ -13,18 +13,9 @@ import numpy as np
 from . import pipeconfig
 from .mesh_io import Geometry, Mesh, require_geometry
 
-try:
-    from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3 as _alpha_wrap_3
-    from CGAL.CGAL_Kernel import Point_3 as _Point_3
-    from CGAL.CGAL_Polyhedron_3 import Polyhedron_3 as _Polyhedron_3
-    _CGAL = True
-except ImportError:                                    # pragma: no cover
-    _CGAL = False
-
-
-def is_available() -> bool:
-    """Whether the `cgal` package's Alpha Wrapping bindings imported."""
-    return _CGAL
+from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3 as _alpha_wrap_3
+from CGAL.CGAL_Kernel import Point_3 as _Point_3
+from CGAL.CGAL_Polyhedron_3 import Polyhedron_3 as _Polyhedron_3
 
 
 def _mesh_to_cgal(mesh: Mesh):
@@ -97,10 +88,6 @@ def wrap(mesh: Mesh, alpha: float, offset: float) -> Mesh:
         raise ValueError(f"alpha must be a finite positive number, got {alpha!r}")
     if not (math.isfinite(offset) and offset > 0):
         raise ValueError(f"offset must be a finite positive number, got {offset!r}")
-    if not _CGAL:
-        raise ValueError(
-            "the cgal package is not installed — `pip install cgal` "
-            "(see the alphawrap module docstring)")
 
     points, polygons = _mesh_to_cgal(mesh)
     out = _Polyhedron_3()

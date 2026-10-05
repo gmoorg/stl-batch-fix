@@ -26,11 +26,7 @@ from libs import mesh_io, scanner
 from libs.mesh_io import Geometry, Kind, Mesh
 from tests.tests import defect_spheres as ds
 
-try:
-    import igl
-    HAVE_IGL = True
-except ImportError:                                     # pragma: no cover
-    HAVE_IGL = False
+import igl
 
 PROJECT = Path(__file__).resolve().parent.parent.parent
 
@@ -49,7 +45,6 @@ def _surface_samples(v, f, n, seed):
     return a[pick] + u[:, None] * (b - a)[pick] + w[:, None] * (c - a)[pick]
 
 
-@unittest.skipUnless(HAVE_IGL, 'libigl is needed')
 class TestEndToEnd(unittest.TestCase):
 
     @classmethod

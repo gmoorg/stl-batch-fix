@@ -11,8 +11,6 @@ from libs.mesh_io import Geometry, Kind, Mesh
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
 TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
 
-needs_meshlab = unittest.skipUnless(
-    meshlab.is_available(), "pymeshlab is not installed")
 
 def clean_filters_combined() -> tuple[tuple[str, dict], ...]:
     """The four CLEAN filters as one combined `apply_filters()` call — a
@@ -41,7 +39,6 @@ def tetra():
     return mesh(TETRA_VERTS, TETRA_FACES)
 
 
-@needs_meshlab
 class TestMeshLab(unittest.TestCase):
 
     def test_conversion_helpers_preserve_the_dtype_contract(self):
@@ -115,23 +112,6 @@ class TestMeshLab(unittest.TestCase):
             meshlab.apply_filters(unloaded, ())
 
 
-class TestWithoutPyMeshLab(unittest.TestCase):
-    """The steps report a failure, not an exception, when PyMeshLab is
-    missing — including merge_close, whose parameter is a percentage."""
-
-    def test_every_step_returns_a_failure(self):
-        m = tetra()
-        with mock.patch.object(meshlab, '_pymeshlab', None, create=True):
-            for step_fn in (meshlab.step_clean_null_faces, meshlab.step_clean_merge_close,
-                            meshlab.step_clean_duplicate_faces, meshlab.step_clean_unreferenced,
-                            meshlab.step_orient):
-                with self.subTest(step_fn.__name__):
-                    ok, result, detail = step_fn(m)
-                    self.assertFalse(ok)
-                    self.assertIs(result, m)
-
-
-@needs_meshlab
 class TestCleanAndOrientSteps(unittest.TestCase):
     """The five uniform steps built from a single PyMeshLab filter: the
     four CLEAN filters and orient, each its own `step(mesh) -> (ok, mesh,

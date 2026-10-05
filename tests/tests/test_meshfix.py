@@ -18,7 +18,7 @@ import numpy as np
 
 from libs import meshfix, scanner
 from libs.mesh_io import Geometry, Kind, Mesh
-from libs.meshfix import Result, is_available, repair
+from libs.meshfix import Result, repair
 
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
 TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
@@ -43,7 +43,6 @@ def two_tetrahedra():
     return mesh(verts, faces)
 
 
-@unittest.skipUnless(is_available(), "pymeshfix not installed")
 class TestRepair(unittest.TestCase):
 
     def test_a_hole_is_closed(self):
@@ -107,7 +106,6 @@ class TestRepair(unittest.TestCase):
                            "the hole was filled with fill_holes=False")
 
 
-@unittest.skipUnless(is_available(), "pymeshfix not installed")
 class TestShellsAreNotDeleted(unittest.TestCase):
     """The behaviour this module exists to avoid.
 
@@ -144,7 +142,6 @@ class TestShellsAreNotDeleted(unittest.TestCase):
                          str(inspect.signature(repair)))
 
 
-@unittest.skipUnless(is_available(), "pymeshfix not installed")
 class TestOutputReachesTheProcessStreams(unittest.TestCase):
     """PyMeshFix writes from C++ straight to fd 1/2. Nothing captures it any
     more: inside a repair child those descriptors are the model's log, so the
@@ -172,20 +169,6 @@ class TestOutputReachesTheProcessStreams(unittest.TestCase):
         self.assertEqual((os.fstat(1).st_ino, os.fstat(2).st_ino), before)
 
 
-class TestAvailability(unittest.TestCase):
-
-    def test_is_available_reports_a_bool(self):
-        self.assertIsInstance(is_available(), bool)
-
-    def test_a_missing_library_is_a_result_not_a_crash(self):
-        """Absence is a data condition; the caller marks the file."""
-        from unittest import mock
-        with mock.patch.object(meshfix, '_AVAILABLE', False):
-            result = repair(mesh(TETRA_VERTS, TETRA_FACES))
-        self.assertFalse(result.ok)
-        self.assertIn('not installed', result.problem)
-
-
 class TestResult(unittest.TestCase):
 
     def test_result_is_immutable(self):
@@ -196,18 +179,16 @@ class TestResult(unittest.TestCase):
     def test_ok_does_not_mean_clean(self):
         """PyMeshFix reports success on meshes that still have defects, which
         is why nothing is written out on a library's word alone."""
-        result = repair(holed()) if is_available() else None
-        if result is not None:
-            self.assertTrue(hasattr(result, 'ok'))
-            # The verdict belongs to scanner, not to this flag.
-            self.assertIsNotNone(scanner.scan(result.mesh))
+        result = repair(holed())
+        self.assertTrue(hasattr(result, 'ok'))
+        # The verdict belongs to scanner, not to this flag.
+        self.assertIsNotNone(scanner.scan(result.mesh))
 
 
 class TestStep(unittest.TestCase):
     """`step(mesh) -> (ok, mesh, detail)`, the pipeline's uniform entry
     point for this module."""
 
-    @unittest.skipUnless(is_available(), "pymeshfix is needed")
     def test_enabled_repairs_and_reports_ok(self):
         ok, result, detail = meshfix.step_meshfix_repair(mesh(TETRA_VERTS, TETRA_FACES))
         self.assertTrue(ok, detail)
@@ -215,7 +196,8 @@ class TestStep(unittest.TestCase):
 
     def test_a_returned_failure_is_reported_not_raised(self):
         m = mesh(TETRA_VERTS, TETRA_FACES)
-        with mock.patch.object(meshfix, '_AVAILABLE', False):
+        with mock.patch.object(meshfix, 'repair',
+                               return_value=Result(m, False, 'boom', 0.0)):
             ok, result, detail = meshfix.step_meshfix_repair(m)
         self.assertFalse(ok)
         self.assertIs(result, m)

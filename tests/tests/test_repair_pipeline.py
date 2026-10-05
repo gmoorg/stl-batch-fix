@@ -72,12 +72,6 @@ MULTI_SHELL = {
     'shell_inverted': CONTROL_VOLUME * 1.125,
 }
 
-#: This file explicitly configures the historical sequence (orient, Blender,
-#: PyMeshFix), so it needs all of PyMeshLab, PyMeshFix, and Blender — unlike
-#: `test_repairer.py`'s narrower `needs_tools`, which most of its tests
-#: don't need since they mock the tool-level steps directly.
-HAVE_TOOLS = (meshlab.is_available() and meshfix.is_available()
-              and blender.is_available())
 
 
 def load(name):
@@ -101,7 +95,6 @@ def tool_call_parts(result):
            if s.step is repairer.Step.PART and 'oriented' in s.detail]
 
 
-@unittest.skipUnless(HAVE_TOOLS, "pymeshlab and pymeshfix are both needed")
 class ProbeCase(unittest.TestCase):
     """Base: ensures the fixtures exist before anything runs."""
 

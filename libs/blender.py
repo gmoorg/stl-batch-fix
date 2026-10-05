@@ -717,17 +717,3 @@ def step_blender_repair(mesh: Mesh, config: object | None = None) -> tuple[bool,
     return (True, repaired,
             f"blender {faces_in}f -> {repaired.triangles}f "
             f"({marker.split(':')[0]})")
-
-
-def is_available(executable: str = 'blender') -> bool:
-    """True when `executable` can be found and reports a version.
-
-    Cheap enough for a startup check and does not launch a scene.
-    """
-    try:
-        done = subprocess.run([executable, '--version'],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, timeout=30)
-        return done.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False

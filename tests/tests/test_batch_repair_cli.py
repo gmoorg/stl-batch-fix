@@ -1,4 +1,4 @@
-"""Config-file validation, dependency checks, the top-level main() boundary,
+"""Config-file validation, the top-level main() boundary,
 and the internal per-file child script."""
 
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
@@ -32,10 +32,10 @@ class TestBatchRepairCLI(unittest.TestCase):
         self.output = self.root / 'output'
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.checks = {}
-        for name, module in batch_repair.DEPENDENCIES:
-            self.checks[name] = self.stack.enter_context(
-                mock.patch.object(module, 'is_available', return_value=True))
+        # Libraries are checked for real at startup, not under test (owner,
+        # 2026-10-05): bypass the check.
+        self.stack.enter_context(mock.patch.object(
+            batch_repair.dependencies, 'check_all', return_value=[]))
 
     def invoke(self, source=None, output=None, max_faces='0', extra=None, argv=()):
         """Write a TOML config (values are raw TOML literals), point
@@ -120,26 +120,6 @@ class TestBatchRepairCLI(unittest.TestCase):
         with mock.patch.object(converter, 'prepare', return_value=converter.Summary()):
             code, text = self.invoke(extra={'memory_budget_bytes': '1000'})
         self.assertEqual(code, 0, text)
-
-    def test_each_missing_dependency(self):
-        with mock.patch.object(converter, 'prepare') as prepare:
-            for name, check in self.checks.items():
-                with self.subTest(dependency=name):
-                    check.return_value = False
-                    code, text = self.invoke()
-                    self.assertEqual(code, 2, text)
-                    self.assertIn(name, text)
-                    self.assertFalse(self.output.exists())
-                    check.return_value = True
-            prepare.assert_not_called()
-
-    def test_all_missing_dependencies_reported(self):
-        for check in self.checks.values():
-            check.return_value = False
-        code, text = self.invoke()
-        self.assertEqual(code, 2)
-        for name in self.checks:
-            self.assertIn(name, text)
 
     def test_invalid_binary_is_intake_failure(self):
         import struct
@@ -743,9 +723,8 @@ class TestInterruptedIntakeIntegration(unittest.TestCase):
         self.output = self.root / 'output'
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        for name, module in batch_repair.DEPENDENCIES:
-            self.stack.enter_context(
-                mock.patch.object(module, 'is_available', return_value=True))
+        self.stack.enter_context(mock.patch.object(
+            batch_repair.dependencies, 'check_all', return_value=[]))
 
     def _slow_blender_stand_in(self, pidfile: str) -> str:
         fd, path = tempfile.mkstemp(suffix='.sh')
