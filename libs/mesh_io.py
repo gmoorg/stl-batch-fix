@@ -394,42 +394,56 @@ def write(mesh: Mesh) -> None:
             os.fsync(f.fileno())
 
 
-#: The PLY header this module writes, and the only dialect `read_ply` accepts.
+#: The PLY layouts this module writes and the only two `read_ply` accepts.
 #:
-#: Deliberately bare: `x, y, z` as float32 and a face list of uint32, nothing
-#: else.  No normals — `write` derives STL's from the winding, so they carry no
-#: information (measured: Blender's old normal vote reported "agree: 801,
-#: disagree: 0") — and no colour, UVs or custom properties.
+#: Deliberately bare: `x, y, z` and a triangle list, nothing else. No normals —
+#: `write` derives STL's from the winding, so they carry no information
+#: (measured: Blender's old normal vote reported "agree: 801, disagree: 0") —
+#: and no colour, UVs or custom properties.
 #:
-#: **This is not a general PLY reader and must not become one.**  It reads back
-#: what Blender's `wm.ply_export` writes at this one boundary, and that is a
-#: two-party agreement, not a format.  Supporting arbitrary dialects — ASCII,
-#: big-endian, double precision, per-vertex colour, variable property order —
-#: is the parsing burden the original PLY discussion explicitly ruled out of
-#: scope.  A file that does not match raises.
+#:   float32  `property float` x, y, z (extra float properties tolerated:
+#:            Blender may append them) and `list uchar uint` faces — what
+#:            `write_ply` writes for float32 geometry and Blender's
+#:            `wm.ply_export` writes back.
+#:   float64  exactly `property double` x, y, z, faces `list uchar int` or
+#:            `list uchar uint` — what PyMeshLab's `save_current_mesh` writes
+#:            with every extra turned off (VCG holds coordinates as float64),
+#:            and `write_ply` writes for float64 geometry.
+#:
+#: **This is not a general PLY reader and must not become one** (owner,
+#: 2026-10-05: narrow is enough). Two fixed agreements, not a format: ASCII,
+#: big-endian, other scalar types, colour or variable property order raise.
 _PLY_MAGIC = b'ply\n'
-_PLY_HEADER_END = b'end_header\n'
+_PLY_HEADER_END = b'\nend_header\n'
+_PLY_FACE_RECORD = 13                       # uchar count + three 4-byte indices
 
 
 def write_ply(mesh: Mesh, path: str) -> None:
-    """Write a narrow binary little-endian PLY for Blender scratch work.
+    """Write a narrow binary little-endian PLY.
 
-    Unlike deliverable STL, PLY preserves the welded vertex table across the
-    subprocess boundary. `path` is explicit because this is a temporary file,
-    not `mesh.destination`.
+    Unlike deliverable STL, PLY preserves the welded vertex table across a
+    boundary (the Blender subprocess today). Coordinates keep the geometry's
+    own precision: float64 is written as `double`, never cast down; anything
+    else as `float`, byte-identical to before. `path` is explicit because
+    this is a temporary file, not `mesh.destination`.
     """
     require_geometry(mesh)
 
-    verts = np.ascontiguousarray(mesh.geometry.verts, dtype=np.float32)
+    if mesh.geometry.verts.dtype.kind == 'f' and mesh.geometry.verts.dtype.itemsize == 8:
+        verts = np.ascontiguousarray(mesh.geometry.verts, dtype='<f8')
+        scalar = 'double'
+    else:
+        verts = np.ascontiguousarray(mesh.geometry.verts, dtype='<f4')
+        scalar = 'float'
     faces = np.ascontiguousarray(mesh.geometry.faces, dtype=np.uint32)
 
     header = (
         "ply\n"
         "format binary_little_endian 1.0\n"
         f"element vertex {len(verts)}\n"
-        "property float x\n"
-        "property float y\n"
-        "property float z\n"
+        f"property {scalar} x\n"
+        f"property {scalar} y\n"
+        f"property {scalar} z\n"
         f"element face {len(faces)}\n"
         "property list uchar uint vertex_indices\n"
         "end_header\n"
@@ -449,77 +463,124 @@ def write_ply(mesh: Mesh, path: str) -> None:
         f.write(records.tobytes())
 
 
-def read_ply(path: str, mesh: Mesh) -> Mesh:
-    """Read Blender's binary PLY and attach its geometry to `mesh`.
+@dataclass(frozen=True)
+class _PlyLayout:
+    """What `_ply_layout` read from a header: where the body starts and how
+    to read it."""
+    body: int                # offset of the first body byte
+    n_verts: int
+    n_faces: int
+    coord: str               # '<f4' or '<f8'
+    width: int               # vertex properties per vertex
+    index: str               # '<u4' or '<i4'
 
-    The vertex table is preserved, so no welding is needed. Reject other PLY
-    dialects instead of guessing inside a repair round trip.
+
+def _ply_layout(data: bytes, path: str) -> _PlyLayout:
+    """Parse and check a PLY header against the two accepted layouts (see
+    the module note above `write_ply`); raise ValueError on anything else."""
+    if not data.startswith(_PLY_MAGIC):
+        raise ValueError(f"{path} is not a PLY file")
+    # `end_header` must be a whole line: a comment may contain the words.
+    stop = data.find(_PLY_HEADER_END)
+    if stop < 0:
+        raise ValueError(f"{path} has no PLY header terminator")
+    body = stop + len(_PLY_HEADER_END)
+    lines = data[len(_PLY_MAGIC):stop].decode('ascii', 'replace').split('\n')
+
+    seen_format = False
+    elements: list[tuple[str, int, list[list[str]]]] = []
+    for line in lines:
+        words = line.split()
+        if not words or words[0] in ('comment', 'obj_info'):
+            continue
+        if words[0] == 'format':
+            if seen_format or elements:
+                raise ValueError(f"{path}: misplaced or repeated PLY format line")
+            if words[1:] != ['binary_little_endian', '1.0']:
+                raise ValueError(
+                    f"{path} is not binary little-endian PLY — this reader "
+                    f"handles only the two layouts write_ply documents")
+            seen_format = True
+        elif words[0] == 'element':
+            if not seen_format:
+                raise ValueError(f"{path}: PLY element before the format line")
+            if len(words) != 3 or not words[2].isdigit():
+                raise ValueError(f"{path}: bad PLY element line {line!r}")
+            elements.append((words[1], int(words[2]), []))
+        elif words[0] == 'property':
+            if not elements:
+                raise ValueError(f"{path}: PLY property before any element")
+            elements[-1][2].append(words[1:])
+        else:
+            raise ValueError(f"{path}: unexpected PLY header line {line!r}")
+    if [name for name, _, _ in elements] != ['vertex', 'face']:
+        raise ValueError(
+            f"{path} must declare exactly a vertex then a face element, "
+            f"not {[name for name, _, _ in elements]}")
+    (_, n_verts, vprops), (_, n_faces, fprops) = elements
+
+    if vprops and all(len(p) == 2 and p[0] == 'float' for p in vprops) \
+            and [p[1] for p in vprops[:3]] == ['x', 'y', 'z']:
+        coord, index_types = '<f4', ('uint',)
+    elif vprops == [['double', 'x'], ['double', 'y'], ['double', 'z']]:
+        coord, index_types = '<f8', ('uint', 'int')
+    else:
+        raise ValueError(
+            f"{path} vertex properties {vprops} match neither accepted "
+            f"layout (float x, y, z [+ float extras], or double x, y, z)")
+    face = fprops[0] if len(fprops) == 1 else []
+    if len(face) != 4 or face[:2] != ['list', 'uchar'] or face[2] not in index_types \
+            or face[3] != 'vertex_indices':
+        raise ValueError(f"{path} face properties {fprops} are not accepted "
+                         f"with {'double' if coord == '<f8' else 'float'} vertices")
+    width = len(vprops)
+    expected = body + n_verts * width * int(coord[-1]) + n_faces * _PLY_FACE_RECORD
+    if len(data) != expected:
+        raise ValueError(f"{path} is {len(data):,} bytes; its header declares "
+                         f"{expected:,} (truncated or trailing data)")
+    return _PlyLayout(body, n_verts, n_faces, coord, width,
+                      '<u4' if face[2] == 'uint' else '<i4')
+
+
+def read_ply(path: str, mesh: Mesh) -> Mesh:
+    """Read a PLY in one of the two accepted layouts and attach its geometry
+    to `mesh`.
+
+    The vertex table is preserved, so no welding is needed. Anything outside
+    the two layouts raises ValueError instead of being guessed at. Double
+    coordinates are rounded to float32, `Geometry`'s precision until it moves
+    to float64; a value finite in the file but beyond float32's range raises.
     """
     with open(path, 'rb') as f:
         data = f.read()
+    layout = _ply_layout(data, path)
 
-    if not data.startswith(_PLY_MAGIC):
-        raise ValueError(f"{path} is not a PLY file")
-    end = data.find(_PLY_HEADER_END)
-    if end < 0:
-        raise ValueError(f"{path} has no PLY header terminator")
-    end += len(_PLY_HEADER_END)
-    header = data[:end].decode('ascii', 'replace').splitlines()
-
-    if 'format binary_little_endian 1.0' not in header:
-        raise ValueError(
-            f"{path} is not binary little-endian PLY — this reader handles "
-            f"only what write_ply and Blender's exporter produce")
-
-    n_verts = n_faces = None
-    element = None
-    vertex_properties = []
-    for line in header:
-        if line.startswith('element vertex '):
-            element, n_verts = 'vertex', int(line.split()[-1])
-        elif line.startswith('element face '):
-            element, n_faces = 'face', int(line.split()[-1])
-        elif line.startswith('property ') and element == 'vertex':
-            vertex_properties.append(line.split()[-1])
-    if n_verts is None or n_faces is None:
-        raise ValueError(f"{path} declares no vertex or face element")
-
-    # Blender writes x, y, z first and may append nx/ny/nz or colour depending
-    # on export flags.  Extra float properties are tolerated and dropped; a
-    # non-float property in the vertex block would change the stride, so it is
-    # rejected rather than silently misread.
-    if vertex_properties[:3] != ['x', 'y', 'z']:
-        raise ValueError(
-            f"{path} vertex properties start with {vertex_properties[:3]}, "
-            f"expected ['x', 'y', 'z']")
-    if any(line.startswith('property ') and not line.startswith('property float')
-           for line in header
-           if ' vertex_indices' not in line and line != 'property list uchar uint vertex_indices'):
-        raise ValueError(f"{path} has a non-float vertex property")
-
-    width = len(vertex_properties)
-    block = np.frombuffer(data, dtype='<f4', count=n_verts * width, offset=end)
-    verts = np.ascontiguousarray(block.reshape(n_verts, width)[:, :3])
+    block = np.frombuffer(data, dtype=layout.coord, count=layout.n_verts * layout.width,
+                          offset=layout.body)
+    coords = block.reshape(layout.n_verts, layout.width)[:, :3]
+    # `load` guards the file entrance; this is the other one. A NaN arriving
+    # from Blender reaches `repairer._count_lost`, whose cKDTree raises from
+    # outside the repair sequence's own error handling, so the failure escapes
+    # as a crash instead of a failed result.
+    if not np.isfinite(coords).all():
+        raise ValueError(f"{path} contains NaN or infinite vertex coordinates")
+    with np.errstate(over='ignore'):
+        verts = np.ascontiguousarray(coords, dtype=np.float32)
     if not np.isfinite(verts).all():
-        # `load` guards the file entrance; this is the other one.  A NaN
-        # arriving from Blender reaches `repairer._count_lost`, whose cKDTree
-        # raises from outside the repair sequence's own error handling, so the
-        # failure escapes as a crash instead of a failed result.  Raising here
-        # matches this reader's contract: malformed input is a ValueError.
-        raise ValueError(
-            f"{path} contains NaN or infinite vertex coordinates")
+        raise ValueError(f"{path} has vertex coordinates beyond float32 range")
 
-    offset = end + n_verts * width * 4
-    records = np.frombuffer(data, dtype=[('n', 'u1'), ('v', '<u4', 3)],
-                            count=n_faces, offset=offset)
-    if n_faces and not np.all(records['n'] == 3):
+    offset = layout.body + layout.n_verts * layout.width * int(layout.coord[-1])
+    records = np.frombuffer(data, dtype=[('n', 'u1'), ('v', layout.index, 3)],
+                            count=layout.n_faces, offset=offset)
+    if layout.n_faces and not np.all(records['n'] == 3):
         raise ValueError(
             f"{path} contains a non-triangular face — this boundary carries "
             f"triangles only, and Blender triangulates before export")
+    faces = records['v'].astype(np.int64)
+    if layout.n_faces and (faces.min() < 0 or faces.max() >= layout.n_verts):
+        raise ValueError(f"{path} has face indices outside its {layout.n_verts} vertices")
 
-    return mesh.with_geometry(Geometry(
-        verts.astype(np.float32),
-        np.ascontiguousarray(records['v'], dtype=np.int64)))
+    return mesh.with_geometry(Geometry(verts, np.ascontiguousarray(faces)))
 
 
 def bounds(path: str) -> tuple[tuple[float, float, float],

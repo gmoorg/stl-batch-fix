@@ -242,6 +242,14 @@ on the file path (option 2 above).
   Rejected alternative: writing the cache ourselves through float32
   `write_ply`.
 
+  **Implemented 2026-10-05** (narrow, owner): `read_ply` accepts exactly the
+  float32 layout and PyMeshLab's float64 layout, with a strict header and
+  body-length check; `write_ply` writes float64 geometry as `double`. Until
+  `Geometry` is float64, `read_ply` rounds double coordinates to float32.
+  Checked on `Sword_and_head1.stl`: PyMeshLab import + bare save, then
+  `read_ply` gives exactly PyMeshLab's arrays (199,986 v / 399,759 f, float32),
+  in 0.01 s.
+
   Reproduce with
   [tools/experiments/meshlab_import_probe.py](../../tools/experiments/meshlab_import_probe.py)
   (synthetic defect table, or a real FILE for the save/re-read check).

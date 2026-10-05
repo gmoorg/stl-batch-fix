@@ -635,5 +635,142 @@ class TestPly(MeshIOCase):
             read_ply(path, mesh)
 
 
+
+TETRA_V = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], float)
+TETRA_F = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
+
+
+def ply_bytes(vertex_props, face_prop, verts, faces, *, coord='<f4', index='<u4',
+              comments=(), extra=b''):
+    """A PLY file assembled from its parts, for crafting both accepted
+    layouts and every way out of them."""
+    head = ['ply', 'format binary_little_endian 1.0', *comments,
+            f'element vertex {len(verts)}', *[f'property {p}' for p in vertex_props],
+            f'element face {len(faces)}', f'property {face_prop}', 'end_header']
+    rec = np.zeros(len(faces), dtype=[('n', 'u1'), ('v', index, 3)])
+    rec['n'] = 3
+    rec['v'] = faces
+    return ('\n'.join(head) + '\n').encode() + np.asarray(verts, coord).tobytes() \
+        + rec.tobytes() + extra
+
+
+DOUBLE_XYZ = ['double x', 'double y', 'double z']
+FLOAT_XYZ = ['float x', 'float y', 'float z']
+
+
+class TestPlyLayouts(MeshIOCase):
+    """The two accepted layouts (float32: write_ply/Blender; float64:
+    PyMeshLab/write_ply) and the strict rejection of everything else."""
+
+    def mesh(self, verts=TETRA_V, dtype=np.float32):
+        g = Geometry(np.asarray(verts, dtype), TETRA_F.astype(np.int64))
+        return Mesh(self.path('m.stl'), self.path('o.stl'), Kind.BINARY_STL, 4, True, None, g)
+
+    def read(self, data):
+        path = self.path('t.ply')
+        with open(path, 'wb') as f:
+            f.write(data)
+        return read_ply(path, self.mesh())
+
+    def test_pymeshlab_bare_export_reads_back(self):
+        try:
+            import pymeshlab
+        except ImportError:
+            self.skipTest('pymeshlab is not installed')
+        v = TETRA_V + [0.1, 0.2, 1e-9]           # a value float32 rounds
+        ms = pymeshlab.MeshSet()
+        ms.add_mesh(pymeshlab.Mesh(v, TETRA_F.astype(np.int32)))
+        path = self.path('pm.ply')
+        ms.save_current_mesh(path, binary=True, save_vertex_normal=False,
+                             save_vertex_color=False, save_vertex_quality=False,
+                             save_face_color=False, save_face_quality=False,
+                             save_wedge_texcoord=False, save_wedge_normal=False)
+        back = read_ply(path, self.mesh())
+        m = ms.current_mesh()
+        np.testing.assert_array_equal(back.geometry.verts, m.vertex_matrix().astype(np.float32))
+        np.testing.assert_array_equal(back.geometry.faces, m.face_matrix())
+        self.assertEqual(back.geometry.verts.dtype, np.float32)
+
+    def test_float32_output_is_byte_identical_to_the_documented_layout(self):
+        path = self.path('f.ply')
+        write_ply(self.mesh(), path)
+        expected = ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices',
+                             TETRA_V.astype(np.float32), TETRA_F)
+        self.assertEqual(open(path, 'rb').read(), expected)
+
+    def test_float64_is_written_as_double_without_loss(self):
+        v = TETRA_V + 0.1                         # 0.1 is not exact in float32
+        path = self.path('d.ply')
+        write_ply(self.mesh(v, np.float64), path)
+        data = open(path, 'rb').read()
+        self.assertIn(b'property double x', data)
+        body = data.index(b'end_header\n') + len(b'end_header\n')
+        self.assertEqual(data[body:body + 4 * 24], np.asarray(v, '<f8').tobytes())
+        back = read_ply(path, self.mesh())
+        np.testing.assert_array_equal(back.geometry.verts, v.astype(np.float32))
+
+    def test_a_big_endian_float64_array_is_still_written_as_little_endian_double(self):
+        v = (TETRA_V + 0.1).astype('>f8')
+        path = self.path('be.ply')
+        write_ply(self.mesh(v, '>f8'), path)
+        data = open(path, 'rb').read()
+        body = data.index(b'end_header\n') + len(b'end_header\n')
+        self.assertEqual(data[body:body + 4 * 24], np.asarray(v, '<f8').tobytes())
+
+    def test_comments_are_ignored_even_one_naming_end_header(self):
+        back = self.read(ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices', TETRA_V,
+                                   TETRA_F, coord='<f8', index='<i4',
+                                   comments=['comment VCGLIB generated',
+                                             'comment says end_header here']))
+        np.testing.assert_array_equal(back.geometry.faces, TETRA_F)
+
+    def test_everything_outside_the_two_layouts_is_rejected(self):
+        V, F = TETRA_V, TETRA_F
+        cases = {
+            'mixed vertex types': ply_bytes(['float x', 'float y', 'double z'],
+                                            'list uchar uint vertex_indices', V, F),
+            'double with an extra property': ply_bytes(DOUBLE_XYZ + ['double nx'],
+                                                       'list uchar uint vertex_indices',
+                                                       np.hstack([V, V[:, :1]]), F, coord='<f8'),
+            'list uint int': ply_bytes(DOUBLE_XYZ, 'list uint int vertex_indices', V, F,
+                                       coord='<f8', index='<i4'),
+            'list uchar short': ply_bytes(DOUBLE_XYZ, 'list uchar short vertex_indices', V, F,
+                                          coord='<f8', index='<i4'),
+            'int indices with float vertices': ply_bytes(FLOAT_XYZ, 'list uchar int vertex_indices',
+                                                         V, F, index='<i4'),
+            'negative index': ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices', V,
+                                        np.vstack([F[:3], [[0, 1, -1]]]), coord='<f8', index='<i4'),
+            'index past the vertices': ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', V,
+                                                 np.vstack([F[:3], [[0, 1, 4]]])),
+            'truncated': ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', V, F)[:-1],
+            'trailing byte': ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', V, F,
+                                       extra=b'\0'),
+            'NaN': ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices',
+                             np.vstack([V[:3], [[np.nan, 0, 0]]]), F, coord='<f8', index='<i4'),
+            'infinity': ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices',
+                                  np.vstack([V[:3], [[np.inf, 0, 0]]]), F, coord='<f8', index='<i4'),
+            'beyond float32': ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices',
+                                        np.vstack([V[:3], [[1e300, 0, 0]]]), F, coord='<f8',
+                                        index='<i4'),
+        }
+        good = ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', V, F)
+        header, body = good.split(b'end_header\n')
+        lines = header.split(b'\n')                       # ply, format, elem v, x, y, z, elem f, face, ''
+        def edited(new_lines):
+            return b'\n'.join(new_lines) + b'end_header\n' + body
+        cases.update({
+            'repeated format': edited(lines[:2] + [lines[1]] + lines[2:]),
+            'property before any element': edited(lines[:2] + [b'property float w'] + lines[2:]),
+            'extra element': edited(lines[:-1] + [b'element edge 0', b'']),
+            'face element first': edited(lines[:2] + lines[6:8] + lines[2:6] + [b'']),
+            'two face properties': edited(lines[:-1] + [b'property float q', b'']),
+            'negative count': edited([lines[0], lines[1], b'element vertex -4'] + lines[3:]),
+            'big-endian': edited([lines[0], b'format binary_big_endian 1.0'] + lines[2:]),
+        })
+        for name, data in cases.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                self.read(data)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
