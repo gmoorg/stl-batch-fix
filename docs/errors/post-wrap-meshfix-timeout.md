@@ -71,16 +71,31 @@ runs for an hour on it. With placement off, every vertex stays on the
 surface and only 15 NM edges remain (the "a few NM after decimation is
 normal" case).
 
-**Likely trigger (not proven):** the winding output already holds 284 distinct
-edges shorter than 0.001·h (the first count, 568, counted each edge once per
-face) and 120 faces under 1e-6·h² area. These are the
-grid-node vertex clusters behind
-[winding-non-manifold.md](winding-non-manifold.md). For such slivers the
-quadric error matrix is near-singular, and the "optimal" position solved from
-it can land anywhere. The weld fix (2026-10-05) does not remove these
-clusters: it only stops them being merged partially. Removing them would
-need a change to the field (e.g. a higher floor at grid nodes). Not yet shown: that the flung vertices originate at those
-clusters, or that the quadric matrix there is near-singular.
+**Suspected trigger, refuted (2026-10-05): the sliver clusters.** The
+winding output holds a few hundred edges shorter than 0.001·h (284 on Aloy
+before the weld fix, 306 after; 1,413 on Laura): the grid-node vertex
+clusters behind [winding-non-manifold.md](winding-non-manifold.md). The
+idea was that their near-singular quadrics send the "optimal" position
+anywhere. Collapsing every such edge first (each group of short edges
+merged to one vertex; output clean, NM 0) leaves the spikes as they were.
+
+Re-test after the grid-edge weld, and the causal test
+([tools/experiments/sliver_cause_probe.py](../../tools/experiments/sliver_cause_probe.py)):
+same winding output per model, decimated to the pipeline's target four ways;
+off-surface distance is point-to-triangle to the winding surface.
+
+| Decimation | Aloy: NM / off > 1·h / furthest / time | Laura: NM / off > 1·h / furthest / time |
+|---|---|---|
+| defaults (batch) | 438 / 320 / 285·h / 9.0 s | 7,740 / 1,566 / 2,749·h (412 mm) / 75 s |
+| defaults, short edges collapsed first | 428 / 314 / 285·h / 9.1 s | 7,780 / 1,519 / 2,747·h / 113 s |
+| `planarquadric=True` | 0 / 0 / 0.1·h / 7.6 s | 1 / 0 / 0.1·h / 52 s |
+| `preservetopology=True` | 0 / 0 / 0.1·h / 8.0 s | 0 / 0 / 0.1·h / 57 s |
+
+One run each. So the slivers are not the trigger, and a field change to
+remove them is not motivated. Either PyMeshLab option, keeping optimal
+placement, stops the spikes and runs faster than the defaults. What does
+trigger them is still not known. Not yet measured for the two options:
+peak memory, accuracy on clean surfaces (rod check), and other models.
 
 **Possible silent damage:** a flung vertex is a spike in the printed part.
 Models where MeshFix finished in time may carry such spikes. Nothing in the
@@ -129,16 +144,15 @@ slightly faster on Laura). Why it needs more memory is not known. "RSS after"
 may include memory the allocator kept rather than live data; not checked.
 Laura's rebuild matched the batch (5,171,046 faces, NM 0, 451 s), and its
 default decimation reproduced the batch's 6,968 NM edges. Its off-surface
-distances were not measured.
+distances were measured later (table above: up to 412 mm).
 
-Trade-off: defaults are more accurate on clean surfaces but fling vertices
-on near-singular slivers; placement off kept every vertex on the surface but
-is coarser and needs about twice the decimation memory. Vertices on the
+Trade-off (before `planarquadric` / `preservetopology` were tested):
+defaults are more accurate on clean surfaces but fling vertices; placement
+off kept every vertex on the surface but is coarser and needs about twice
+the decimation memory. Vertices on the
 surface don't make it safe in general: collapses can still bridge cavities,
 drop thin parts, flip faces or self-intersect. Shape checked on the rod
-fixture and Aloy only; Laura only by NM count. The weld fix keeps the
-slivers, so the next step is to re-test Aloy and Laura with it, then decide
-between the decimation setting and a field change.
+fixture and Aloy only; Laura only by NM count.
 
 Reproduce with
 [tools/experiments/decimation_sliver_probe.py](../../tools/experiments/decimation_sliver_probe.py)

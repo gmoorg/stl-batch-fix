@@ -166,10 +166,9 @@ at small and large scale, NM passed on with the step detail, residual NM
 flagged by the judge, and the remaining hard failures.
 
 **Not addressed here:** the near-node sliver clusters themselves remain
-(manifold, tiny triangles). They are the suspected trigger of the vertices
-thrown off the surface by post-wrap decimation
-([post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md)); re-testing
-Aloy and Laura is the next step. Float32 `Geometry` can still round two
+(manifold, tiny triangles). They were suspected of triggering the vertices
+post-wrap decimation throws off the surface; a causal test refuted that
+([post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md)). Float32 `Geometry` can still round two
 near-node vertices to the same point (distinct indices, zero area); that is
 not degenerate in `scanner`'s sense and not NM.
 
