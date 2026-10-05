@@ -86,7 +86,7 @@ def _edges_of(faces: np.ndarray) -> np.ndarray:
     return face_edges(faces)
 
 
-def _degenerate_mask(faces: np.ndarray) -> np.ndarray:
+def degenerate_mask(faces: np.ndarray) -> np.ndarray:
     """Faces with two or more identical corners — zero area, no normal."""
     return ((faces[:, 0] == faces[:, 1])
             | (faces[:, 1] == faces[:, 2])
@@ -104,7 +104,7 @@ def scan(mesh: Mesh) -> Scan:
     if len(faces) == 0:
         return Scan(0, 0, 0, 0)
 
-    degenerate = int(_degenerate_mask(faces).sum())
+    degenerate = int(degenerate_mask(faces).sum())
     _, counts = np.unique(face_edges(faces), axis=0, return_counts=True)
     return Scan(open_edges=int((counts == 1).sum()),
                 non_manifold=int((counts > 2).sum()),

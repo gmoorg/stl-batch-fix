@@ -58,6 +58,24 @@ class TestMeshLab(unittest.TestCase):
         np.testing.assert_array_equal(converted.verts, geometry.verts)
         np.testing.assert_array_equal(converted.faces, geometry.faces)
 
+    def test_to_mesh_drops_faces_with_a_repeated_corner(self):
+        """They segfault quadric decimation on this path
+        (docs/errors/decimation-segfault.md). Every other face keeps its
+        order, every vertex is kept, and the caller's arrays are untouched."""
+        verts = TETRA_VERTS + [[5, 5, 5], [6, 5, 5]]
+        faces = TETRA_FACES[:2] + [[4, 5, 4], [0, 0, 1]] + TETRA_FACES[2:] + [[2, 3, 3]]
+        geometry = Geometry(np.array(verts, dtype=np.float32),
+                            np.array(faces, dtype=np.int64))
+        verts_before, faces_before = geometry.verts.copy(), geometry.faces.copy()
+
+        native = meshlab.to_mesh(geometry)
+
+        np.testing.assert_array_equal(native.face_matrix(), TETRA_FACES)
+        np.testing.assert_array_equal(native.vertex_matrix(),
+                                      np.array(verts, dtype=np.float64))
+        np.testing.assert_array_equal(geometry.verts, verts_before)
+        np.testing.assert_array_equal(geometry.faces, faces_before)
+
     def test_apply_filters_wraps_float_parameters(self):
         doubled = mesh(TETRA_VERTS, TETRA_FACES + TETRA_FACES)
         filters = (

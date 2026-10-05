@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import scanner
 from .mesh_io import Geometry, Mesh, require_geometry
 
 try:
@@ -19,10 +20,28 @@ def is_available() -> bool:
 
 
 def to_mesh(geometry: Geometry):
-    """Convert project geometry to PyMeshLab's array contract."""
+    """Convert project geometry to PyMeshLab's array contract, without
+    index-degenerate faces.
+
+    A face with a repeated corner index (`[a, b, a]`) segfaults quadric edge
+    collapse when it arrives through this array path: seven models crashed
+    the batch run this way, and a 16-face crop of one
+    (`tests/probes/segv_min16.stl`) still does. PyMeshLab's own file importer
+    drops such faces, which is why the same files decimate fine when loaded
+    from disk. So they are dropped here, the one hand-off every array into
+    PyMeshLab passes (`apply_filters`, hence the decimator and every `step_*`
+    filter). Lossless: such a face has zero area.
+
+    Vertices are passed unchanged, even ones only a dropped face used, as the
+    importer does; unreferenced vertices were measured harmless to decimation.
+    Faces with three distinct indices but zero area (coincident vertices) are
+    not dropped: whether they crash is untested. Evidence:
+    docs/errors/decimation-segfault.md.
+    """
+    faces = geometry.faces[~scanner.degenerate_mask(geometry.faces)]
     return _pymeshlab.Mesh(
         vertex_matrix=np.ascontiguousarray(geometry.verts, dtype=np.float64),
-        face_matrix=np.ascontiguousarray(geometry.faces, dtype=np.int32),
+        face_matrix=np.ascontiguousarray(faces, dtype=np.int32),
     )
 
 

@@ -101,7 +101,7 @@ Reproduce with
 [tools/experiments/segfault_probe.py](../../tools/experiments/segfault_probe.py)
 (modes `count | array | clean | synth CASE | crop`, one process per run) and
 the 16-face real crop
-[tools/experiments/data/segv_min16.stl](../../tools/experiments/data/segv_min16.stl)
+[tests/probes/segv_min16.stl](../../tests/probes/segv_min16.stl)
 (`array` exits 139, `clean` decimates).
 
 ## Can winding or alpha-wrap produce this defect?
@@ -136,16 +136,34 @@ planned float64 `Geometry` removes this rounding.
 (clean/orient) receive split parts of the *source*, which can carry the
 source's degenerate faces. Not used by the default pipeline.
 
-## Fix direction (not implemented)
+## Fix (implemented 2026-10-05)
 
-Remove degenerate faces before the mesh reaches PyMeshLab's decimation. It's
+`meshlab.to_mesh` drops index-degenerate faces (`scanner.degenerate_mask`)
+before building the `pymeshlab.Mesh`. It is the one hand-off every array
+into PyMeshLab passes: `apply_filters`, so the initial and
+post-reconstruction decimation and every `meshlab.step_*` filter. It's
 lossless: a degenerate face has zero area and contributes nothing printable.
-Candidates are `mesh_io.load`, which would then match PyMeshLab's importer,
-or the decimator. The planned decimate-from-file path (see
-[decimation-memory-path.md](decimation-memory-path.md)) gets this for free
-from the importer. Arrays reaching PyMeshLab from other places
-(post-reconstruction decimation, `meshlab.step_*`) would still need it.
-Winding output is already checked for degenerate faces (`winding._check`).
+Vertices are kept, as PyMeshLab's importer keeps them.
 
-Regression fixture candidates: the 5-face synthetic case, and the 16-face real
-crop.
+Rejected location: `mesh_io.load`. It would change what every consumer sees
+(scanner counts, the skip_clean gate, the welder), far more than the crash
+needs. The planned decimate-from-file path (see
+[decimation-memory-path.md](decimation-memory-path.md)) would get this from
+the importer anyway, but post-reconstruction decimation and `step_*` still
+pass arrays.
+
+Behaviour: a mesh within budget is returned untouched, degenerate faces
+included (nothing reaches PyMeshLab). A mesh whose faces are all degenerate
+leaves PyMeshLab an empty mesh; it raises "does not have any faces", which
+the decimator reports as `failed`, no crash.
+
+Not covered: zero-area faces with three distinct indices (untested whether
+they crash, see above), and degenerate faces created inside PyMeshLab by
+later filters.
+
+Checks: `tests/tests/test_decimator.py` `TestDegenerateFacesDoNotCrash` runs
+each case in a child process (the 16-face crop, the 5-face synthetic,
+equivalence with removing the face by hand, all-degenerate input,
+within-budget input); without the fix the three crash cases die with
+SIGSEGV. `Base_Pillar_R` (999,969 faces) now decimates to 900,000 through
+the array path in 4.4 s.

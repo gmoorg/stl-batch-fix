@@ -21,7 +21,7 @@ a caught decimation failure exits 1):
                                write OUT, decimate it to half via the array path
 
 TARGET defaults to 900000 (synth: 10000; tetra-isolated: 2).
-`tools/experiments/data/segv_min16.stl` is the 16-face real crop of
+`tests/probes/segv_min16.stl` is the 16-face real crop of
 Base_Pillar_R (crop around face 330092, R = 0.1); decimating it to 8 faces
 through the array path segfaults.
 

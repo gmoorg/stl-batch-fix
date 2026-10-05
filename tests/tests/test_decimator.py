@@ -218,6 +218,125 @@ class TestMeshLabFailureResult(DecimatorCase):
         self.assertIn('boom', result.attempts[0][1])
 
 
+#: Runs in a child interpreter: a segfault there fails one test instead of
+#: killing the whole runner. `case` builds `mesh` and sets `target`; the
+#: child prints what the tests assert on as one JSON line.
+_CHILD = """
+import json, sys
+import numpy as np
+from libs import decimator, scanner
+from libs.mesh_io import Geometry, Kind, Mesh, load, probe
+
+def arrays(verts, faces):
+    g = Geometry(np.asarray(verts, np.float32), np.asarray(faces, np.int64))
+    return Mesh('/in/x.stl', '/out/x.stl', Kind.BINARY_STL, len(g.faces), True, None, g)
+
+def run(mesh, target):
+    verts, faces = mesh.geometry.verts.copy(), mesh.geometry.faces.copy()
+    r = decimator.decimate(mesh, target)
+    g = r.mesh.geometry
+    return dict(
+        faces_in=len(faces),
+        degenerate_in=int(scanner.degenerate_mask(faces).sum()),
+        rung=r.rung.value, faces_out=len(g.faces),
+        degenerate_out=int(scanner.degenerate_mask(g.faces).sum()),
+        input_unchanged=bool(np.array_equal(mesh.geometry.verts, verts)
+                             and np.array_equal(mesh.geometry.faces, faces)),
+        input_returned=r.mesh is mesh,
+        verts=g.verts.tolist(), faces=g.faces.tolist())
+
+{case}
+print(json.dumps(out))
+"""
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+#: Tetrahedron away from the origin plus one isolated [P, Q, P] face on two
+#: new vertices: the 5-face synthetic that segfaulted the array path.
+_TETRA_ISOLATED = """
+T = [[10, 0, 0], [11, 0, 0], [10, 1, 0], [10, 0, 1], [0, 0, 0], [0.05, 0, 0]]
+F = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3], [4, 5, 4]]
+"""
+
+
+class TestDegenerateFacesDoNotCrash(unittest.TestCase):
+    """Faces with a repeated corner index segfaulted PyMeshLab's quadric
+    decimation on the array path (seven batch models; evidence in
+    docs/errors/decimation-segfault.md). Every case runs in a child process,
+    so a regression shows up as a failed test, not a dead runner."""
+
+    def child(self, case):
+        import json
+        import subprocess
+        import sys
+        env = dict(os.environ, PYTHONPATH=_ROOT)
+        proc = subprocess.run(
+            [sys.executable, '-X', 'faulthandler', '-c', _CHILD.format(case=case)],
+            cwd=_ROOT, env=env, capture_output=True, text=True, timeout=300)
+        self.assertEqual(proc.returncode, 0,
+                         f"child exited {proc.returncode}:\n{proc.stderr[-2000:]}")
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+
+    def assert_decimated_cleanly(self, out):
+        self.assertEqual(out['rung'], 'meshlab')
+        self.assertEqual(out['degenerate_out'], 0)
+        self.assertTrue(out['input_unchanged'], 'the caller\'s arrays changed')
+
+    def test_the_real_crash_crop_decimates(self):
+        """16 faces cropped from Base_Pillar_R, one of them [6, 9, 6]."""
+        out = self.child(
+            "out = run(load(probe('tests/probes/segv_min16.stl', '/nonexistent/out.stl')), 8)")
+        # Guard the fixture: a cleaned copy would no longer test anything.
+        self.assertEqual(out['faces_in'], 16)
+        self.assertEqual(out['degenerate_in'], 1)
+        self.assert_decimated_cleanly(out)
+        self.assertLessEqual(out['faces_out'], 8)
+
+    def test_an_isolated_degenerate_face_decimates(self):
+        out = self.child(_TETRA_ISOLATED + "out = run(arrays(T, F), 2)")
+        self.assertEqual(out['degenerate_in'], 1)
+        self.assert_decimated_cleanly(out)
+
+    def test_the_result_matches_decimating_without_the_face(self):
+        """Dropping the face is lossless: the result is exactly what the same
+        mesh gives with that face removed by hand (its two vertices kept)."""
+        out = self.child("""
+from tests.tests.test_decimator import _sphere
+v, f = _sphere(subdivisions=4)
+n = len(v)
+V = np.vstack([v, [[0, 0, 0], [0.05, 0, 0]]])
+with_face = run(arrays(V, np.vstack([f, [[n, n + 1, n]]])), 1000)
+by_hand = run(arrays(V, f), 1000)
+out = dict(with_face, same=(with_face['verts'] == by_hand['verts']
+                            and with_face['faces'] == by_hand['faces']))
+""")
+        self.assert_decimated_cleanly(out)
+        self.assertEqual(out['faces_out'], 1000)
+        self.assertTrue(out['same'], 'dropping the face changed the result')
+
+    def test_an_all_degenerate_mesh_fails_without_crashing(self):
+        """Nothing is left once the faces are dropped; PyMeshLab refuses an
+        empty mesh, and that must come back as an ordinary failure."""
+        out = self.child("out = run(arrays([[0, 0, 0], [1, 0, 0], [0, 1, 0]],"
+                         " [[0, 1, 0], [1, 2, 2]]), 1)")
+        self.assertEqual(out['rung'], 'failed')
+        self.assertTrue(out['input_returned'])
+        self.assertTrue(out['input_unchanged'])
+
+    def test_a_mesh_within_budget_keeps_its_degenerate_faces(self):
+        """Dropping happens only on the way into PyMeshLab; a mesh that needs
+        no decimation is returned exactly as it came."""
+        verts = np.array([[10, 0, 0], [11, 0, 0], [10, 1, 0], [10, 0, 1],
+                          [0, 0, 0], [0.05, 0, 0]], np.float32)
+        faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3], [4, 5, 4]])
+        mesh = Mesh('/in/x.stl', '/out/x.stl', Kind.BINARY_STL, 5, True, None,
+                    Geometry(verts, faces))
+        result = decimate(mesh, max_faces=10)
+        self.assertIs(result.rung, Rung.NOT_NEEDED)
+        self.assertIs(result.mesh, mesh)
+        self.assertEqual(len(result.mesh.geometry.faces), 5)
+
+
 class TestShapeIsKept(unittest.TestCase):
     """Outcomes, not internals: the decimated surface stays on the input
     shape. fast_simplification failed both of these (owner decision

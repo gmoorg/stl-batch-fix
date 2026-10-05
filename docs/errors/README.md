@@ -27,7 +27,7 @@ is also out of scope: too big to process on this machine.
 
 | Kind | Files | Status | Doc |
 |---|---|---|---|
-| Segfault in PyMeshLab initial decimation | 7 | **Cause verified**: degenerate faces on the array path. Fix direction: remove them before PyMeshLab (decimate-from-file gets it free) | [decimation-segfault.md](decimation-segfault.md) |
+| Segfault in PyMeshLab initial decimation | 7 | **Fixed** (2026-10-05): `meshlab.to_mesh` drops index-degenerate faces before PyMeshLab | [decimation-segfault.md](decimation-segfault.md) |
 | Out-of-memory kill, nothing logged | 1 (Azula, 39.6M faces) | **Out of scope** (owner, 2026-10-05): too big for this machine, not pursued. Doc kept as reference | [oom-kill-silent.md](oom-kill-silent.md) |
 | Winding output non-manifold | 8 (6 models) | **Cause verified** (3 of 6): `winding._weld` partially merges grid-node vertex clusters. Decisions: loosen `_check` *and* fix the weld | [winding-non-manifold.md](winding-non-manifold.md) |
 | MeshFix timeout after post-wrap decimation | 2 | **Cause found** (Aloy): default decimation throws vertices up to 43 mm off the surface, likely triggered by winding's sliver clusters. Plan: fix winding first, re-test, then decide on decimation settings | [post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md) |
@@ -63,7 +63,7 @@ pipeline. Usage in each docstring. Some modes write to a path you pass
 |---|---|
 | `meshlab_file_decimate.py` | file-interface load + decimation memory/time; raw-STL NaN count |
 | `meshlab_import_probe.py` | PyMeshLab import / PLY round trip on duplicate, degenerate, near-duplicate geometry |
-| `segfault_probe.py` (+ `data/segv_min16.stl`) | degenerate-face segfault: count, array vs clean, synthetic cases, crop |
+| `segfault_probe.py` (+ `tests/probes/segv_min16.stl`) | degenerate-face segfault: count, array vs clean, synthetic cases, crop |
 | `winding_nm_probe.py` | raw marching-cubes vs welded NM, NM edge locations |
 | `winding_post_steps.py` | broken winding output through decimate / MeshFix |
 | `decimation_sliver_probe.py` | slivers in winding output; vertices thrown off the surface by decimation |
