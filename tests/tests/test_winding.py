@@ -57,6 +57,28 @@ def canonical(m, h):
     return np.sort(q.view(np.int64).reshape(len(q), 9), axis=0)
 
 
+def nm_pair(scale=0.5):
+    """Two tetrahedra sharing one edge: closed (no open edges), one
+    non-manifold edge (0-1, used by four faces), no degenerate faces. The
+    second is the first turned 180° about x, so both wind outward."""
+    v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [0, -1, 0], [0, 0, -1]],
+                 float) * scale
+    f = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3],
+         [0, 4, 1], [0, 1, 5], [0, 5, 4], [1, 4, 5]]
+    return v, np.asarray(f)
+
+
+def with_nm_pair(weld):
+    """`_weld` wrapped to add `nm_pair` (inside a radius-10 sphere) to its
+    output: a reconstruction that is closed but non-manifold."""
+    def wrapped(Vo, Fo, edges):
+        g = weld(Vo, Fo, edges)
+        pv, pf = nm_pair()
+        return Geometry(np.vstack([g.verts, pv.astype(np.float32)]),
+                        np.vstack([g.faces, pf + len(g.verts)]))
+    return wrapped
+
+
 def assert_closed(test, m):
     s = scanner.scan(m)
     test.assertEqual((s.open_edges, s.non_manifold, s.degenerate), (0, 0, 0))
@@ -77,6 +99,25 @@ class TestGeometry(unittest.TestCase):
         m = mesh(*sphere())
         one, many = winding.reconstruct(m, 0.5, 1), winding.reconstruct(m, 0.5, 3)
         self.assertTrue(np.array_equal(canonical(one, 0.5), canonical(many, 0.5)))
+
+    def test_seams_close_exactly_at_any_position_and_scale(self):
+        """Block seams are welded by grid edge, not by coordinate rounding:
+        the result is closed and manifold with the same face count for 1, 2
+        and 3 blocks, far from the origin and at small and large scales.
+        (Translation stays within float32 input precision: 1e5 units has a
+        float32 step of ~0.008, well under h.)"""
+        cases = {'far from origin': (sphere(10, (1e5, -1e5, 1e5)), 0.5),
+                 'tiny': (sphere(0.01), 0.0005),
+                 'huge': (sphere(1000), 50.0),
+                 'shifted box': (box((0.37, 0.11, 0.29), (10.37, 6.11, 8.29)), 0.2)}
+        for name, ((v, f), h) in cases.items():
+            with self.subTest(name):
+                counts = []
+                for blocks in (1, 2, 3):
+                    out = winding.reconstruct(mesh(v, f), h, blocks)
+                    assert_closed(self, out)
+                    counts.append(len(out.geometry.faces))
+                self.assertEqual(len(set(counts)), 1, counts)
 
     def test_large_triangles_are_covered_by_the_band(self):
         """A cube of 12 large triangles, also shifted off the grid: the band
@@ -280,11 +321,56 @@ class TestContract(unittest.TestCase):
         self.assertEqual(len(inits), 1)
         self.assertGreaterEqual(fwn.call_count, 27)
 
+    def welded_to(self, verts, faces):
+        """Patch `_weld` so a reconstruction comes out as the given arrays."""
+        g = Geometry(np.asarray(verts, np.float32), np.asarray(faces, np.int64).reshape(-1, 3))
+        return mock.patch.object(winding, '_weld', return_value=g)
+
     def test_an_open_result_is_rejected(self):
-        tri = (np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], float), np.array([[0, 1, 2]]), {})
-        with mock.patch.object(winding._igl, 'marching_cubes', return_value=tri), \
-             self.assertRaisesRegex(RuntimeError, 'not a closed manifold'):
+        with self.welded_to([[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 1, 2]]), \
+             self.assertRaisesRegex(RuntimeError, 'not closed: open=3'):
             winding.reconstruct(mesh(*sphere()), 0.5, 1)
+
+    def test_empty_non_finite_and_degenerate_results_are_rejected(self):
+        v, f = nm_pair()
+        nan = v.copy(); nan[0, 0] = np.nan
+        cases = {'no faces': (v, np.zeros((0, 3))),
+                 'non-finite': (nan, f),
+                 'degenerate=1': (v, np.vstack([f, [[2, 3, 2]]]))}
+        for message, (verts, faces) in cases.items():
+            with self.subTest(message), self.welded_to(verts, faces), \
+                 self.assertRaisesRegex(RuntimeError, message):
+                winding.reconstruct(mesh(*sphere()), 0.5, 1)
+
+    def test_non_manifold_edges_are_passed_on_not_rejected(self):
+        """Owner decision 2026-10-04: NM edges go on to decimation and the
+        conditional MeshFix instead of failing the part. The step says so."""
+        with mock.patch.object(winding, '_weld', with_nm_pair(winding._weld)):
+            out = winding.reconstruct(mesh(*sphere()), 0.5, 1)
+            ok, _, detail = winding.step_winding_reconstruct(
+                mesh(*sphere()), pipeconfig.StepConfig(whole_model_diag=40.0))
+        s = scanner.scan(out)
+        self.assertEqual((s.open_edges, s.non_manifold, s.degenerate), (0, 1, 0))
+        self.assertTrue(ok, detail)
+        self.assertIn('nm=1 passed on', detail)
+
+    def test_a_clean_result_does_not_mention_non_manifold_edges(self):
+        ok, _, detail = winding.step_winding_reconstruct(
+            mesh(*sphere()), pipeconfig.StepConfig(whole_model_diag=40.0))
+        self.assertTrue(ok, detail)
+        self.assertNotIn('nm=', detail)
+
+    def test_non_manifold_left_in_a_final_output_is_flagged(self):
+        """A custom sequence with no repair after winding: the judge, not
+        winding, catches the NM edges it passed on."""
+        from libs import processor
+        from libs.indicators import Indicator
+        with mock.patch.object(winding, '_weld', with_nm_pair(winding._weld)):
+            outcome = processor.process(
+                mesh(*sphere()), 0, min_shell_faces=0,
+                part_steps=(('winding', winding.step_winding_reconstruct),))
+        self.assertIs(outcome.indicator, Indicator.UNREPAIRED, outcome.reason)
+        self.assertIn('1 non-manifold edge(s) remain', outcome.reason)
 
     def test_invalid_input_is_rejected_before_native_calls(self):
         v, f = sphere()
@@ -298,6 +384,43 @@ class TestContract(unittest.TestCase):
         for blocks in (0, 999, True, 1.0):
             with self.subTest(blocks=blocks), self.assertRaises(ValueError):
                 winding.reconstruct(mesh(v, f), 0.5, blocks)
+
+
+class TestWeld(unittest.TestCase):
+    """The weld merges vertices on the same grid edge, never by distance."""
+
+    def test_seam_copies_merge_and_close_neighbours_stay_apart(self):
+        node = np.array([1.0, 1.0, 1.0])
+        # a and b: vertices on two different edges meeting at one grid node,
+        # 1e-12 apart; a2: a's copy from the neighbouring block, 1e-15 off.
+        a, b = node + [1e-12, 0, 0], node + [0, 1e-12, 0]
+        a2, c = a + [1e-15, 0, 0], node + [0, 0, 0.5]
+        verts = np.array([a, b, a2, c])
+        edges = np.array([[0, 1, 1, 1], [1, 1, 1, 1], [0, 1, 1, 1], [2, 1, 1, 1]])
+        g = winding._weld(verts, np.array([[0, 1, 3], [2, 3, 1]]), edges)
+        self.assertEqual(len(g.verts), 3, 'a and a2 merge; b stays separate')
+        self.assertEqual(len(g.faces), 2)
+        self.assertEqual(sorted(map(sorted, g.faces.tolist())), [[0, 1, 2], [0, 1, 2]])
+
+    def test_an_edge_map_that_is_not_one_unit_edge_per_vertex_is_rejected(self):
+        shape, r0 = (4, 4, 4), np.zeros(3, np.int64)
+        def key(i, j):
+            return (i << 32) | j
+        good = {key(0, 1): 0, key(0, 4): 1}            # +x and +y from corner 0
+        ids = winding._edge_ids(good, 2, shape, r0)
+        self.assertEqual(ids.tolist(), [[0, 0, 0, 0], [1, 0, 0, 0]])
+        bad = {'missing a vertex': ({key(0, 1): 0}, 2),
+               'vertex twice': ({key(0, 1): 0, key(0, 4): 0}, 2),
+               'not one step': ({key(0, 5): 0}, 1),
+               'outside the block': ({key(0, 64): 0}, 1)}
+        for name, (e2v, n) in bad.items():
+            with self.subTest(name), self.assertRaises(RuntimeError):
+                winding._edge_ids(e2v, n, shape, r0)
+
+    def test_corners_are_placed_by_block_offset(self):
+        key = (21 << 32) | 22                           # (1,1,1) -> (2,1,1) in a 4³ block
+        ids = winding._edge_ids({key: 0}, 1, (4, 4, 4), np.array([10, 20, 30]))
+        self.assertEqual(ids.tolist(), [[0, 11, 21, 31]])
 
 
 @needs_igl

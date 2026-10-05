@@ -29,8 +29,8 @@ is also out of scope: too big to process on this machine.
 |---|---|---|---|
 | Segfault in PyMeshLab initial decimation | 7 | **Fixed** (2026-10-05): `meshlab.to_mesh` drops index-degenerate faces before PyMeshLab | [decimation-segfault.md](decimation-segfault.md) |
 | Out-of-memory kill, nothing logged | 1 (Azula, 39.6M faces) | **Out of scope** (owner, 2026-10-05): too big for this machine, not pursued. Doc kept as reference | [oom-kill-silent.md](oom-kill-silent.md) |
-| Winding output non-manifold | 8 (6 models) | **Cause verified** (3 of 6): `winding._weld` partially merges grid-node vertex clusters. Decisions: loosen `_check` *and* fix the weld | [winding-non-manifold.md](winding-non-manifold.md) |
-| MeshFix timeout after post-wrap decimation | 2 | **Cause found** (Aloy): default decimation throws vertices up to 43 mm off the surface, likely triggered by winding's sliver clusters. Plan: fix winding first, re-test, then decide on decimation settings | [post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md) |
+| Winding output non-manifold | 8 (6 models) | **Fixed** (2026-10-05): weld by the grid edge marching cubes reports (no rounding); NM edges pass on to repair. All 6 models rebuild with 0 NM | [winding-non-manifold.md](winding-non-manifold.md) |
+| MeshFix timeout after post-wrap decimation | 2 | **Cause found** (Aloy): default decimation throws vertices up to 43 mm off the surface, likely triggered by winding's sliver clusters, which the weld fix keeps. Next: re-test Aloy and Laura, then decide between the decimation setting and a field change | [post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md) |
 | Volume-loss rejection (`DESTROYED`) | 12 (10 `_SUP`, 2 real) | `_SUP`: struts dropped as debris (out of scope). `arm2`/`fabric3`: **guard measures open shells meaninglessly**, and the shells are pieces of one surface split at unwelded seams | [volume-loss-rejected.md](volume-loss-rejected.md) |
 | STL with non-finite coordinates | 2 (`_SUP`) | Our loader rejects them; PyMeshLab's importer silently drops NaN faces (measured) | [non-finite-coordinates.md](non-finite-coordinates.md) |
 

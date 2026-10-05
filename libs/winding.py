@@ -250,12 +250,17 @@ def plan(mesh: Mesh, h: float, budget_bytes: int) -> Plan:
 
 
 def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
-    """Rebuild `mesh` as a closed, manifold surface on a grid of spacing `h`,
+    """Rebuild `mesh` as a closed surface on a grid of spacing `h`,
     processed in `blocks_per_axis`³ blocks (the result does not depend on the
     block count beyond float rounding at shared block faces).
 
+    The result may contain non-manifold edges: they are passed on for the
+    following repair steps rather than failing the part (owner decision
+    2026-10-04, docs/errors/winding-non-manifold.md). A direct caller must
+    expect them; `processor`'s judge flags any left in a final output.
+
     Raises ValueError for invalid input and RuntimeError when the result is
-    not a non-empty, finite, closed, manifold, non-degenerate surface.
+    not a non-empty, finite, closed, non-degenerate surface.
     """
     if not _AVAILABLE:
         raise RuntimeError('libigl/scipy are not installed')
@@ -282,24 +287,32 @@ def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
     tree.init(V, F)                                  # built once, reused by every block
     cuts = [_cuts(n, blocks_per_axis) for n in shape]
     far_value = (BAND + 1) * h
-    pieces_v, pieces_f, offset = [], [], 0
+    pieces_v, pieces_f, pieces_e, offset = [], [], [], 0
     for bx in range(blocks_per_axis):
         for by in range(blocks_per_axis):
             for bz in range(blocks_per_axis):
                 r0 = np.array([cuts[0][bx], cuts[1][by], cuts[2][bz]])
                 r1 = np.array([cuts[0][bx + 1], cuts[1][by + 1], cuts[2][bz + 1]])
+                block_shape = tuple(int(n) for n in r1 - r0 + 1)
+                if math.prod(block_shape) >= 2 ** 32:
+                    # Marching cubes packs an edge's two corner indices into
+                    # 32 bits each (see `_edge_ids`).
+                    raise RuntimeError(f'block {block_shape} has too many grid points '
+                                       'for marching cubes edge keys')
                 field = _block_field(V, F, tree, keys, r0, r1, lo, h, ny, nz, far_value)
                 axes = [lo[a] + h * np.arange(r0[a], r1[a] + 1) for a in range(3)]
                 grid = np.column_stack([g.ravel('F') for g in np.meshgrid(*axes, indexing='ij')])
-                mv, mf, _ = _igl.marching_cubes(field.ravel('F'), grid, *field.shape, 0.0)
+                mv, mf, e2v = _igl.marching_cubes(field.ravel('F'), grid, *field.shape, 0.0)
                 del grid, field
                 if len(mf):
                     pieces_v.append(mv)
                     pieces_f.append(mf + offset)
+                    pieces_e.append(_edge_ids(e2v, len(mv), block_shape, r0))
                     offset += len(mv)
     if not pieces_f:
         _raise_empty(mesh, V, F)
-    out = mesh.with_geometry(_weld(np.vstack(pieces_v), np.vstack(pieces_f), h))
+    out = mesh.with_geometry(_weld(np.vstack(pieces_v), np.vstack(pieces_f),
+                                   np.vstack(pieces_e)))
     _check(out)
     return out
 
@@ -391,28 +404,77 @@ def _raise_empty(mesh: Mesh, V: np.ndarray, F: np.ndarray) -> None:
     raise EmptyResult(f'closed part thinner than the grid (volume {enclosed:.4g})')
 
 
-def _weld(Vo: np.ndarray, Fo: np.ndarray, h: float) -> Geometry:
-    """Merge vertices that blocks computed on their shared faces — equal up
-    to float rounding — and drop faces that collapsed."""
-    key = np.rint(Vo / (h * 1e-4)).astype(np.int64)
-    _, first, inv = np.unique(key, axis=0, return_index=True, return_inverse=True)
+def _edge_ids(e2v: dict, n_verts: int, block_shape, r0) -> np.ndarray:
+    """The global grid edge of each vertex marching cubes made for one block:
+    rows of (axis, x, y, z), the edge's axis and its lower corner, in vertex
+    order.
+
+    Marching cubes places every vertex on one grid edge and reports which in
+    `e2v`: key `(i << 32) | j` for the edge's two corners, indexed
+    `x + y·nx + z·nx·ny` within the block, mapped to the vertex index. Edge
+    identity therefore comes as integers — no coordinates are rounded. Raises
+    RuntimeError if the map does not describe one unit grid edge per vertex.
+    """
+    if len(e2v) != n_verts:
+        raise RuntimeError(f'marching cubes reported {len(e2v)} edges for {n_verts} vertices')
+    keys = np.fromiter(e2v.keys(), dtype=np.uint64, count=n_verts)
+    verts = np.fromiter(e2v.values(), dtype=np.int64, count=n_verts)
+    if not np.array_equal(np.sort(verts), np.arange(n_verts)):
+        raise RuntimeError('marching cubes edge map does not cover every vertex once')
+    nx, ny, nz = block_shape
+    corners = []
+    for packed in (keys >> np.uint64(32), keys & np.uint64(0xFFFFFFFF)):
+        index = packed.astype(np.int64)
+        if (index >= nx * ny * nz).any():
+            raise RuntimeError('marching cubes edge corner outside its block')
+        z, rest = np.divmod(index, nx * ny)
+        y, x = np.divmod(rest, nx)
+        corners.append(np.column_stack([x, y, z]))
+    step = np.abs(corners[1] - corners[0])
+    if not (step.sum(axis=1) == 1).all():
+        raise RuntimeError('marching cubes edge is not one grid step on one axis')
+    ids = np.empty((n_verts, 4), np.int64)
+    ids[verts, 0] = np.argmax(step, axis=1)
+    ids[verts, 1:] = np.minimum(corners[0], corners[1]) + r0
+    return ids
+
+
+def _weld(Vo: np.ndarray, Fo: np.ndarray, edges: np.ndarray) -> Geometry:
+    """Merge the vertices that lie on the same grid edge and drop faces that
+    collapsed.
+
+    Neighbouring blocks share their boundary planes, so a vertex on a shared
+    edge is computed by both, equal up to float rounding (measured ≤ 4e-15).
+    Merging by the edge each vertex lies on (`_edge_ids`) joins those copies
+    exactly, and never merges two vertices on different edges however close
+    they are. The earlier weld rounded coordinates to h·1e-4; where the field
+    is ~0 at a grid node, the vertices of all edges meeting there cluster
+    within that distance, and a cluster split by a rounding boundary was
+    merged partially, pinching the surface into non-manifold edges
+    (docs/errors/winding-non-manifold.md).
+
+    One marching-cubes triangle never has two corners on one edge, so no face
+    should collapse; the filter is a guard.
+    """
+    _, first, inv = np.unique(edges, axis=0, return_index=True, return_inverse=True)
     Vo, Fo = Vo[first], inv.ravel()[Fo]
     Fo = Fo[(Fo[:, 0] != Fo[:, 1]) & (Fo[:, 1] != Fo[:, 2]) & (Fo[:, 0] != Fo[:, 2])]
     return Geometry(Vo.astype(np.float32), Fo.astype(np.int64))
 
 
 def _check(mesh: Mesh) -> None:
-    """The success contract: non-empty, finite, closed, manifold, no
-    degenerate faces."""
+    """The success contract: non-empty, finite, closed, no degenerate faces.
+    Non-manifold edges are not checked: they pass on to the following repair
+    steps instead of failing the part (owner decision 2026-10-04)."""
     if len(mesh.geometry.faces) == 0:
         raise RuntimeError('reconstruction produced no faces')
     if not np.isfinite(mesh.geometry.verts).all():
         raise RuntimeError('reconstruction produced non-finite coordinates')
     scan = scanner.scan(mesh)
-    if scan.open_edges or scan.non_manifold or scan.degenerate:
+    if scan.open_edges or scan.degenerate:
         raise RuntimeError(
-            f'reconstruction is not a closed manifold: open={scan.open_edges}, '
-            f'non_manifold={scan.non_manifold}, degenerate={scan.degenerate}')
+            f'reconstruction is not closed: open={scan.open_edges}, '
+            f'degenerate={scan.degenerate}, non_manifold={scan.non_manifold}')
 
 
 def step_winding_reconstruct(mesh: Mesh, config: "pipeconfig.StepConfig | None" = None
@@ -443,8 +505,12 @@ def step_winding_reconstruct(mesh: Mesh, config: "pipeconfig.StepConfig | None" 
             empty = mesh.with_geometry(Geometry(np.zeros((0, 3), np.float32),
                                                 np.zeros((0, 3), np.int64)))
             return True, empty, f'dropped: {exc}; {len(mesh.geometry.faces)} faces removed'
+        # A second scan (reconstruct's own is internal): seconds, against a
+        # reconstruction of tens to hundreds of seconds.
+        non_manifold = scanner.scan(result).non_manifold
+        passed_on = f', nm={non_manifold} passed on' if non_manifold else ''
         return True, result, (f'h={h:g}, blocks={p.blocks_per_axis}^3, '
                               f'est={p.estimate_bytes / 1e9:.2f} GB, '
-                              f'{len(result.geometry.faces)} faces')
+                              f'{len(result.geometry.faces)} faces{passed_on}')
     except Exception as exc:
         return False, mesh, f'{type(exc).__name__}: {exc}'

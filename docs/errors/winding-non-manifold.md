@@ -94,7 +94,7 @@ steps. Hip (NM 3, 8 blocks) has not been.
 
 ## Decision (owner, 2026-10-04): loosen the guard *and* fix the weld
 
-Not implemented. Two changes, both wanted:
+Implemented 2026-10-05 (see Fix below). Two changes, both wanted:
 
 1. **Loosen `winding._check`.** Failing a part because NM edges exist
    defeats the purpose of having MeshFix as the last step to fix NM. NM
@@ -108,8 +108,8 @@ Not implemented. Two changes, both wanted:
    - Keep empty output and non-finite coordinates as hard failures.
    - Open edges: decide whether they also pass to MeshFix (none were
      observed in these failures).
-   - Bound the risk: MeshFix has run past the 1 h timeout when given
-     thousands of NM edges ([post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md)).
+   - Bound the risk: given thousands of NM edges, MeshFix was still running
+     when the 1 h `per_file_timeout` killed the job (3,604 s, both cases) ([post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md)).
      Winding's defect is 1–3 edges, but a loosened guard has no upper limit.
    - `_check` is winding's documented success contract (closed, manifold;
      see the winding entry in [modules.md](../refactor/modules.md)).
@@ -121,21 +121,69 @@ Not implemented. Two changes, both wanted:
    guard then rarely matters, and the output stays clean for the designs that
    rely on it.
 
-## Fix directions for the weld (not implemented, not tested)
+## Fix (implemented 2026-10-05)
 
-- **Keep the field off zero at grid nodes:** raise the existing floor
-  (`winding.py` already clamps `|field|` to `h·1e-6`) to order 1e-3·h, so a
-  vertex lands further from the node than the weld tolerance. The surface
-  shift is **not bounded** by the floor: when both values on an edge are
-  below it, interpolation moves toward the middle of the edge. The field is
-  also not an exact distance near open or overlapping geometry. Needs a
-  measured bound on displacement, plus thin-feature and block-seam tests.
-- **Weld only seam vertices** (those on block boundary planes), and skip the
-  weld entirely for one block.
-- **Merge whole clusters consistently** (connected components within a
-  tolerance instead of rounded keys). Harder to guarantee manifold output.
+**Weld by grid edge.** `igl.marching_cubes` places every vertex on one grid
+edge and reports which (`E2V`, the edge's two corner indices; it was
+discarded before). `winding._edge_ids` turns that into a global edge id per
+vertex (block origin added), and `_weld` merges vertices with the same id.
+Seam copies from neighbouring blocks (equal up to ≤ 4e-15) merge exactly;
+vertices on different edges never merge, however close, so a near-node
+cluster can't be merged partially. No coordinate is rounded and there is no
+tolerance. A map that isn't one unit grid edge per vertex is a
+`RuntimeError`.
 
-Of the earlier candidates, letting NM through to MeshFix is now adopted as
-the guard change above, as a safety net alongside the weld fix. An
-alpha-wrap fallback isn't needed for these failures. A grid shift would only
-move the coincidence elsewhere.
+**Guard.** `_check` no longer fails on NM edges: they pass on, and the step
+detail says `nm=N passed on`. Empty output, non-finite coordinates, open
+edges and degenerate faces still fail (open edges would mean a seam or
+marching-cubes defect; none were seen). No NM cap: winding's defect was 1–3
+edges; the MeshFix timeouts came from thousands made by decimation. A direct
+`reconstruct` / `repairer.repair` caller may receive NM edges;
+`processor`'s judge flags any left in a final output (`UNREPAIRED`).
+
+All six failing models
+([tools/experiments/winding_edge_weld_check.py](../../tools/experiments/winding_edge_weld_check.py),
+batch h and 10 GB plan, one run each, both welds on the same
+marching-cubes output):
+
+| File | h | Blocks | Rounding weld faces / NM | Grid-edge weld faces / NM / open | Volume change |
+|---|---|---|---|---|---|
+| torso_girl | 0.10885 | 1 | 1,635,616 / 1 | 1,635,672 / 0 / 0 | 0 |
+| Hip | 0.15 | 2 | 2,559,212 / 3 | 2,559,324 / 0 / 0 | 0 |
+| Sword_and_head1 (part 1) | 0.15 | 1 | 801,736 / 1 | 801,764 / 0 / 0 | 0 |
+| Sword_sheath | 0.15 | 2 | 1,069,044 / 1 | 1,069,072 / 0 / 0 | 0 |
+| left_sword (part 1) | 0.15 | 2 | 1,590,828 / 1 | 1,590,892 / 0 / 0 | 1e-6 |
+| Base_Part_01 | 0.15 | 2 | 3,749,762 / 1 | 3,749,912 / 0 / 0 | 1e-6 |
+
+Volume is `scanner.component_volume`, change in model units (absolute). The
+grid-edge weld keeps the faces the rounding weld collapsed (28–150 more).
+Not run through the full batch yet.
+
+Tests: `tests/tests/test_winding.py` — the weld merges seam copies and keeps
+close neighbours apart (fails with the old weld), edge-map contract, closed
+and manifold with equal face counts for 1–3 blocks far from the origin and
+at small and large scale, NM passed on with the step detail, residual NM
+flagged by the judge, and the remaining hard failures.
+
+**Not addressed here:** the near-node sliver clusters themselves remain
+(manifold, tiny triangles). They are the suspected trigger of the vertices
+thrown off the surface by post-wrap decimation
+([post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md)); re-testing
+Aloy and Laura is the next step. Float32 `Geometry` can still round two
+near-node vertices to the same point (distinct indices, zero area); that is
+not degenerate in `scanner`'s sense and not NM.
+
+## Earlier weld directions (superseded)
+
+The grid-edge weld replaced these candidates:
+
+- **Raise the field floor** (`h·1e-6` → ~1e-3·h) so vertices land outside
+  the weld tolerance. Its surface shift was not bounded: when both values
+  on an edge are below the floor, interpolation moves toward the middle.
+- **Weld only seam vertices.** Clusters at grid nodes on seam planes could
+  still merge partially.
+- **Merge whole clusters** by connected components within a tolerance.
+  Harder to guarantee manifold output.
+
+An alpha-wrap fallback isn't needed for these failures. A grid shift would
+only move the coincidence elsewhere.

@@ -44,17 +44,25 @@ first, so blocks can be processed independently and still form a solid.
    sign from the fast winding number (`igl.signed_distance` with
    `SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER`). Inside is negative.
 5. **Field elsewhere.** Only the sign matters: winding number on a coarse
-   lattice (every `K = 4`-th grid point), threshold 0.5; each far point takes
+   lattice (every `K = 3`-rd grid point), threshold 0.5; each far point takes
    the sign of its nearest lattice point, value `±(BAND + 1) · h`. A far point
-   is more than `BAND` cells from the surface and its lattice point at most
-   `K/2 · √3 ≈ 3.5` cells away, so both are on the same side.
+   is more than 3.43 cells from the surface and its lattice point at most
+   `K/2 · √3 ≈ 2.6` cells away, so both are on the same side (`winding.K`;
+   K = 4 would allow 3.46 cells, outside that margin).
 6. **Surface.** `igl.marching_cubes` at level 0 per block (grid points
    ordered x-fastest).
-7. **Weld.** Concatenate blocks, merge vertices with equal coordinates
-   (quantized to `h · 1e-4`), drop faces that collapsed.
+7. **Weld.** Concatenate blocks and merge vertices that lie on the same grid
+   edge. Marching cubes reports each vertex's edge (`E2V`: the edge's two
+   corner indices); offset by the block's origin, that gives a global edge
+   id, so seam copies merge exactly and vertices on different edges never
+   merge, however close. (Until 2026-10-05 vertices were merged by
+   coordinates rounded to `h · 1e-4`, which partially merged near-node
+   clusters into non-manifold edges; see
+   [winding-non-manifold.md](../errors/winding-non-manifold.md).)
 
 Seams need no stitching: a vertex on a shared block face is interpolated from
-the same two grid values in both blocks. Marching cubes reads only cells the
+the same two grid values in both blocks, equal up to float rounding (measured
+≤ 4e-15), and lies on the same grid edge. Marching cubes reads only cells the
 surface crosses, whose corners lie in the band, so the far-field shortcut
 cannot change the output.
 

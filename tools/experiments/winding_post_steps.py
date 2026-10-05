@@ -13,6 +13,10 @@ on the winding output, skipping decimation. Uses shell 1 of FILE, the batch's
 grid spacing (whole-model diagonal) and the 10 GB plan. For a model decimated
 in the batch, pass its `stl-decimated/...900000.stl` cache.
 
+Written for the rounding weld (before 2026-10-05), whose NM output
+`_check` rejected; run from commit 5971d69 to reproduce the table. With the
+grid-edge weld the NM edge doesn't occur and `_check` passes NM on anyway.
+
 Read-only on inputs. Not wired into the pipeline.
 """
 

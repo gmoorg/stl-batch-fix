@@ -14,6 +14,11 @@ re-keys float32 output coordinates, which can land in a neighbouring bin.
 NM/open counts are edge incidence only: bow-tie vertices, orientation and
 self-intersections aren't checked.
 
+Reproduces the coordinate-rounding weld, replaced on 2026-10-05 by the
+grid-edge weld: run it from commit 5971d69 (`git worktree add`), where
+`_weld(Vo, Fo, h)` still has that signature. For the current weld use
+`winding_edge_weld_check.py`.
+
 Read-only. Uses the batch's grid spacing (whole-model diagonal) and the
 10 GB plan. Not wired into the pipeline.
 """

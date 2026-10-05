@@ -4,8 +4,10 @@
 
 Winding succeeds with a clean result (`nm=0, open=0`). The post-wrap
 decimation to 900k faces then introduces many non-manifold edges. The
-following `meshfix` step never finishes, the 3600 s `per_file_timeout`
-expires, and the parent writes a `.timeout.stl` marker.
+following `meshfix` step is still running when the 3600 s
+`per_file_timeout` kills the job (3,604 s in both cases), and the parent
+writes a `.timeout.stl` marker. Whether MeshFix would ever finish is not
+known.
 
 ## Files
 
@@ -75,8 +77,9 @@ face) and 120 faces under 1e-6·h² area. These are the
 grid-node vertex clusters behind
 [winding-non-manifold.md](winding-non-manifold.md). For such slivers the
 quadric error matrix is near-singular, and the "optimal" position solved from
-it can land anywhere. If that's right, the winding weld/field fix also removes
-this trigger. Not yet shown: that the flung vertices originate at those
+it can land anywhere. The weld fix (2026-10-05) does not remove these
+clusters: it only stops them being merged partially. Removing them would
+need a change to the field (e.g. a higher floor at grid nodes). Not yet shown: that the flung vertices originate at those
 clusters, or that the quadric matrix there is near-singular.
 
 **Possible silent damage:** a flung vertex is a spike in the printed part.
@@ -133,9 +136,9 @@ on near-singular slivers; placement off kept every vertex on the surface but
 is coarser and needs about twice the decimation memory. Vertices on the
 surface don't make it safe in general: collapses can still bridge cavities,
 drop thin parts, flip faces or self-intersect. Shape checked on the rod
-fixture and Aloy only; Laura only by NM count. If the winding
-weld/field fix removes the slivers, defaults may be safe again. So fix
-winding first, re-test Aloy, then decide on the setting.
+fixture and Aloy only; Laura only by NM count. The weld fix keeps the
+slivers, so the next step is to re-test Aloy and Laura with it, then decide
+between the decimation setting and a field change.
 
 Reproduce with
 [tools/experiments/decimation_sliver_probe.py](../../tools/experiments/decimation_sliver_probe.py)
