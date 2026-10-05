@@ -15,6 +15,32 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
   13.9 GB) — admission reserves for it, reducing it needs an owner decision
   (e.g. per-part spacing from area, or decimating blocks before the weld).
 
+## Print-risk check and rib supports
+
+`check_3mf.py` / `support_3mf.py`, see [modules](modules.md#print-risk-check-separate-from-repair).
+The first rib output (`/mnt/sda2/ank.supported.3mf`, 2026-10-04) is not yet
+confirmed by a test print: Bambu loading, ribs in the sliced preview and
+removal are all unverified.
+
+- [ ] Triangular ribs for easier removal: taper each rib's cross-section to
+  a narrow edge at the model instead of a full-width rectangular wall, so it
+  touches along a thinner line. In the 0.1–0.44 mm band a rib is only 1–2
+  layers tall, so a taper there may not survive slicing — decide together
+  with the lift idea below, which makes ribs tall enough to taper.
+- [ ] Tilt search: try orientations within ±5° and pick the one with the
+  most plate contact / least unsupportable area. A first measurement on the
+  ank body (2026-10-04) gave 0.7 → 14.4 mm² of contact at a 3.3° tilt, at
+  the cost of more unsupportable area (6.5 → 12.5 mm²); the trade-off rule is
+  open.
+- [ ] Lift the whole model so the ribs can be joined: with the model raised,
+  ribs become tall enough to stand on a shared connecting base, so they come
+  off as one piece instead of single-line ribs each fused to the plate where
+  they may stay stuck. Needs a lift height (and how it interacts with Bambu
+  dropping objects to the bed) and the base's shape.
+- [ ] Look online for existing tools that already do this (generated or
+  custom breakaway supports for FDM, near-plate undersides, 3MF
+  post-processing) before extending ours.
+
 ## Tests
 
 Target: end-to-end coverage — real `batch_repair.py` runs over a few fixtures

@@ -51,7 +51,9 @@ already-clean decimated model, or otherwise for its individual clean parts.
 
 A separate read-only checker predicts base-layer print risks in a Bambu
 Studio 3MF (`tools/project_python.sh check_3mf.py plate.3mf [--png DIR]`);
-see [modules](docs/refactor/modules.md#print-risk-check-separate-from-repair).
+`support_3mf.py plate.3mf` writes `plate.supported.3mf` with thin breakaway
+ribs under undersides the slicer cannot support; see
+[modules](docs/refactor/modules.md#print-risk-check-separate-from-repair).
 
 The batch runner exists and has real smoke coverage. Open review items and
 structural changes remain in TODO. A passing topology scan does not prove
