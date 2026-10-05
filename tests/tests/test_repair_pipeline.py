@@ -34,6 +34,7 @@ import unittest
 from unittest import mock
 
 from libs import blender, execstep, mesh_io, meshfix, meshlab, repairer, scanner, welder
+from tests.tests import defect_spheres as ds
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEST_ROOT = os.path.dirname(HERE)
@@ -76,6 +77,11 @@ MULTI_SHELL = {
 
 def load(name):
     path = os.path.join(PROBES, f'sphere_{name}.stl')
+    if name == 'degenerate':
+        # Its whole defect is what `mesh_io.load` now drops at the STL
+        # entrance; bypass it to keep testing the repair of degenerate faces
+        # that arrive another way (a PLY, a repair step).
+        return ds.load_keeping_degenerates(path, '/tmp/unused_destination.stl')
     return mesh_io.load(mesh_io.probe(path, '/tmp/unused_destination.stl'))
 
 

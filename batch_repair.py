@@ -309,9 +309,11 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                 loaded = mesh_io.read_ply(load_path, mesh)
             else:
                 loaded = mesh_io.load(mesh)
-                # Only after an STL load: a PLY cache's lower count is decimation.
-                if loaded.is_valid:
-                    steps = tuple(_dropped_note(mesh, loaded))
+                # A job with a prepare handoff (`load_path` set) had its note
+                # from the prepare pass, which loaded this same STL; a direct
+                # repair of an STL reports its own.
+                if loaded.is_valid and load_path is None:
+                    steps = tuple(_dropped_note(loaded))
             reason = loaded.problem or 'invalid loaded mesh'
             if loaded.is_valid:
                 stage = 'process'
@@ -407,11 +409,16 @@ def _load_cache(cache_path: str, source: Mesh) -> Mesh | None:
     return loaded if loaded.triangles > 0 else None
 
 
-def _dropped_note(probed: Mesh, loaded: Mesh) -> list[str]:
-    """A step line when `mesh_io.load` dropped triangles with NaN/inf
-    coordinates — the only triangles it drops — else nothing."""
-    dropped = (probed.triangles or 0) - loaded.triangles
-    return [f'load: dropped {dropped} triangles with NaN/inf coordinates'] if dropped > 0 else []
+def _dropped_note(loaded: Mesh) -> list[str]:
+    """A step line naming what `mesh_io.load` dropped, per reason, else
+    nothing. Informational: the scanner finds the holes on its own."""
+    drops = loaded.load_drops
+    if drops is None:
+        return []
+    reasons = [text for n, text in (
+        (drops.nonfinite, f'{drops.nonfinite} triangles with NaN/inf coordinates'),
+        (drops.degenerate, f'{drops.degenerate} triangles with coincident corners')) if n]
+    return [f'load: dropped {", ".join(reasons)}'] if reasons else []
 
 
 def _prepare_one_file(source_path: str, destination: str, max_faces: int,
@@ -463,7 +470,7 @@ def _prepare_one_file(source_path: str, destination: str, max_faces: int,
             if not loaded.is_valid:
                 reason = loaded.problem or 'invalid loaded mesh'
                 return terminal()
-            steps.extend(_dropped_note(probed, loaded))
+            steps.extend(_dropped_note(loaded))
             if prepared_path == source_path:
                 mesh = loaded
             else:

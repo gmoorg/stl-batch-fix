@@ -197,6 +197,7 @@ import json, sys
 import numpy as np
 from libs import decimator, scanner
 from libs.mesh_io import Geometry, Kind, Mesh, load, probe
+from tests.tests.defect_spheres import load_keeping_degenerates
 
 def arrays(verts, faces):
     g = Geometry(np.asarray(verts, np.float32), np.asarray(faces, np.int64))
@@ -254,9 +255,10 @@ class TestDegenerateFacesDoNotCrash(unittest.TestCase):
         self.assertTrue(out['input_unchanged'], 'the caller\'s arrays changed')
 
     def test_the_real_crash_crop_decimates(self):
-        """16 faces cropped from Base_Pillar_R, one of them [6, 9, 6]."""
+        """16 faces cropped from Base_Pillar_R, one of them [6, 9, 6].
+        Not through `load`, which now drops that face at the STL entrance."""
         out = self.child(
-            "out = run(load(probe('tests/probes/segv_min16.stl', '/nonexistent/out.stl')), 8)")
+            "out = run(load_keeping_degenerates('tests/probes/segv_min16.stl'), 8)")
         # Guard the fixture: a cleaned copy would no longer test anything.
         self.assertEqual(out['faces_in'], 16)
         self.assertEqual(out['degenerate_in'], 1)

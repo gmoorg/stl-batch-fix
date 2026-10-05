@@ -12,8 +12,9 @@ No output or marker is written.
 
 ## Where the error comes from
 
-Our own check, not PyMeshLab: `mesh_io.load` tests the raw float32
-coordinates with `np.isfinite` right after reading them, before welding. The
+Our own check, not PyMeshLab: `mesh_io.load` tests the float32
+coordinates with `np.isfinite` chunk by chunk as it reads them, before
+welding. The
 prepare pass sets `load_failure` just before calling `mesh_io.load`, so
 decimation and PyMeshLab never see these files.
 
@@ -77,7 +78,11 @@ recover, so `mesh_io.load` now drops every triangle with a non-finite vertex
 coordinate (even one bad coordinate) and loads the rest; the repair rebuilds
 the holes. A file with no finite triangle is invalid ("no finite
 triangles"). The step text reports the drop ("load: dropped N triangles
-with NaN/inf coordinates"). There is no pre-scan before PyMeshLab: every
+with NaN/inf coordinates"), once, in the pass that loaded the STL. Since the
+chunked loader (2026-10-05) `load` also drops finite triangles with two
+coincident corners and names them in the same note ("…, M triangles with
+coincident corners"); a triangle with both counts as non-finite. A cache
+hit does not repeat the note: the PLY is a new input (owner). There is no pre-scan before PyMeshLab: every
 source now goes through our loader (decimate-from-file was not adopted, see
 [decimation-memory-path.md](decimation-memory-path.md)). Stored normals are
 not checked. `read_ply` still rejects non-finite coordinates: a malformed

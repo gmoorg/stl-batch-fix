@@ -7,7 +7,7 @@ import math
 import os
 import struct
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 import numpy as np
@@ -20,6 +20,15 @@ HEADER_BYTES = 84
 
 #: How much of the file `kind()` reads to tell ASCII from binary.
 _SNIFF_BYTES = 256
+
+#: Triangles `load` reads per chunk: a 51 KB buffer (owner, 2026-10-05).
+#: The chunks replace one whole-file read, an allocation of 50 B/triangle
+#: that only held bytes on their way to the coordinate array.
+CHUNK_TRIANGLES = 1024
+
+#: One binary STL triangle record, little-endian and unaligned (50 bytes).
+_RECORD = np.dtype([('normal', '<f4', 3), ('corners', '<f4', 9), ('attribute', '<u2')])
+assert _RECORD.itemsize == BYTES_PER_TRIANGLE
 
 
 class Kind(Enum):
@@ -48,6 +57,15 @@ class Geometry:
 
 
 @dataclass(frozen=True)
+class LoadDrops:
+    """Triangles `load` removed from a binary STL, by reason. Informational:
+    the holes they leave are found by the scanner like any other."""
+
+    nonfinite: int                    # a NaN or infinite coordinate
+    degenerate: int                   # finite, two corners equal (after -0.0 -> 0.0)
+
+
+@dataclass(frozen=True)
 class Mesh:
     """What a file says about itself, and optionally the mesh itself.
 
@@ -63,6 +81,10 @@ class Mesh:
     is_valid    False when the file cannot be read as what it claims to be
     problem     why, when is_valid is False; None otherwise
     geometry    the welded mesh, once `load` has been called; None before that
+    load_drops  what `load` removed reading this mesh's STL (`LoadDrops`);
+                None when no STL load produced it (a probe, a PLY read).
+                Kept by `with_geometry`/`with_destination`; read once, for
+                the job's step note
 
     Frozen, and every operation returns a new one.  `load` does not fill in
     geometry on the mesh you hand it — it gives you back a second mesh that has
@@ -78,6 +100,7 @@ class Mesh:
     is_valid: bool
     problem: str | None = None
     geometry: Geometry | None = None
+    load_drops: LoadDrops | None = None
 
     @property
     def needs_conversion(self) -> bool:
@@ -99,7 +122,8 @@ class Mesh:
         point of those steps is that it changed.
         """
         return Mesh(self.path, self.destination, self.kind,
-                    len(geometry.faces), self.is_valid, self.problem, geometry)
+                    len(geometry.faces), self.is_valid, self.problem, geometry,
+                    self.load_drops)
 
 
     def with_destination(self, destination: str) -> Mesh:
@@ -112,7 +136,7 @@ class Mesh:
         part gets one.
         """
         return Mesh(self.path, destination, self.kind, self.triangles,
-                    self.is_valid, self.problem, self.geometry)
+                    self.is_valid, self.problem, self.geometry, self.load_drops)
 
 
 def require_geometry(mesh: Mesh) -> None:
@@ -236,11 +260,52 @@ def probe(path: str, destination: str) -> Mesh:
     return Mesh(path, destination, file_kind, count, True)
 
 
-def load(mesh: Mesh) -> Mesh:
+def _read_fully(f, view: memoryview) -> int:
+    """Fill `view` from `f`; the bytes read, fewer only at end of file.
+    `readinto` may return less than asked before the end, so loop."""
+    got = 0
+    while got < len(view):
+        n = f.readinto(view[got:])
+        if not n:
+            break
+        got += n
+    return got
+
+
+def _filter_chunk(corners: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """One chunk's kept triangles from its (n, 9) corner view: contiguous,
+    -0.0 folded to 0.0. Also returns how many were dropped for a NaN/inf
+    coordinate and how many (finite) for coincident corners."""
+    # One contiguous copy that also folds -0.0 to 0.0: adding 0.0 leaves
+    # every other value, NaN and infinity included, untouched. The fold comes
+    # before the coincidence test because -0.0 and 0.0 differ in bits.
+    tri = corners + np.float32(0.0)
+    finite = np.isfinite(tri).all(axis=1)
+    # Equal bits == equal values here (no NaN survives `finite`), and equal
+    # corners are exactly what the weld would turn into a repeated index.
+    c = tri.view(np.uint32).reshape(-1, 3, 3)
+    coincident = ((c[:, 0] == c[:, 1]).all(axis=1) | (c[:, 1] == c[:, 2]).all(axis=1)
+                  | (c[:, 0] == c[:, 2]).all(axis=1))
+    nonfinite = len(tri) - int(finite.sum())
+    degenerate = int((finite & coincident).sum())
+    if nonfinite + degenerate == 0:
+        return tri, 0, 0
+    return tri[finite & ~coincident], nonfinite, degenerate
+
+
+def load(mesh: Mesh, *, chunk_triangles: int = CHUNK_TRIANGLES) -> Mesh:
     """Weld `mesh` into memory and return a **new** Mesh carrying it.
 
     Only binary STL can be loaded; anything else must be converted first, and
     asking is a programming error rather than a data problem, so it raises.
+
+    The file is read `chunk_triangles` records at a time into one reused
+    buffer and filtered as it arrives, so only the kept coordinates
+    (36 B/triangle) accumulate; the file's bytes are never held whole. That
+    whole-file read was an allocation with no purpose (owner, 2026-10-05),
+    though not the load's peak: the weld's sort over all corners is, and
+    chunking leaves it as it was. `chunk_triangles` is a parameter so tests
+    can force chunk boundaries on small fixtures.
 
     The sort is done on the raw coordinate *bits* viewed as three uint32
     columns rather than on float rows.  Identical float32 values have identical
@@ -252,13 +317,20 @@ def load(mesh: Mesh) -> Mesh:
     have different bits, so without this a shared vertex would split in two and
     leave a crack that quadric edge collapse cannot close.
 
-    Triangles with a NaN or infinite vertex coordinate are dropped, not the
-    file (owner, 2026-10-05: garbage in, garbage out). Such a vertex has no
-    position to recover; dropping its triangles leaves a hole the repair
-    rebuilds. The returned `triangles` is the kept count, so a caller sees
-    the drop as `probe`'s count minus it (nothing else is dropped here:
-    degenerate triangles are kept and welding never removes one). A file
-    with no finite triangle is invalid. Stored normals are not checked.
+    Two kinds of triangle are dropped, not the file (owner, 2026-10-05:
+    garbage in, garbage out), and counted in the result's `load_drops`:
+    - a NaN or infinite coordinate: such a vertex has no position to
+      recover; dropping its triangles leaves a hole the repair rebuilds;
+    - coincident corners (two corners with equal bits after the -0.0 fold):
+      exactly the triangles the weld would turn into a repeated index
+      (`[a, a, b]`), which segfaults PyMeshLab's array path. Zero area, so
+      no hole. `meshlab.to_mesh` still drops those faces for meshes that
+      arrive other ways. Zero-area triangles with three distinct corners
+      are kept.
+    A triangle with both counts as non-finite. The returned `triangles` is
+    the kept count; kept triangles keep their order and winding. A file with
+    no kept triangle is invalid, with `load_drops` saying why. Stored normals
+    are not checked.
     """
     if mesh.kind is not Kind.BINARY_STL:
         raise ValueError(
@@ -270,56 +342,56 @@ def load(mesh: Mesh) -> Mesh:
         return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
                     problem)
 
+    def invalid(reason: str, drops: LoadDrops | None = None) -> Mesh:
+        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
+                    reason, None, drops)
+
+    # Drop bad triangles here, where the coordinates first become numbers.
+    # Nothing downstream copes with NaN: a NaN mesh scans as open=0, nm=0
+    # and produces a NaN volume, every comparison that guards the pipeline
+    # is `<` (False against NaN), and `cKDTree` raises from outside the
+    # repair sequence's own error handling.
+    coords = np.empty((count, 9), dtype=np.float32)
+    kept = nonfinite = degenerate = 0
+    try:
+        with open(mesh.path, 'rb') as f:
+            f.seek(HEADER_BYTES)
+            buffer = bytearray(min(count, chunk_triangles) * BYTES_PER_TRIANGLE)
+            done = 0
+            while done < count:
+                n = min(chunk_triangles, count - done)
+                got = _read_fully(f, memoryview(buffer)[:n * BYTES_PER_TRIANGLE])
+                if got < n * BYTES_PER_TRIANGLE:
+                    return invalid(
+                        f"short read: expected {count * BYTES_PER_TRIANGLE:,} "
+                        f"bytes, got {done * BYTES_PER_TRIANGLE + got:,}")
+                good, bad_nonfinite, bad_degenerate = _filter_chunk(
+                    np.frombuffer(buffer, dtype=_RECORD, count=n)['corners'])
+                coords[kept:kept + len(good)] = good
+                kept += len(good)
+                nonfinite += bad_nonfinite
+                degenerate += bad_degenerate
+                done += n
+            del buffer, good
+    except OSError as exc:
+        return invalid(f"{type(exc).__name__}: {exc}")
+    drops = LoadDrops(nonfinite, degenerate)
+    if kept == 0:
+        return invalid("no finite triangles: every triangle has a NaN or "
+                       "infinite coordinate" if nonfinite == count else
+                       "no non-degenerate triangles: every finite triangle "
+                       "has two coincident corners", drops)
+    if kept < count:
+        # Release the unused tail in place (realloc), not by copying the kept
+        # rows: one dropped triangle would otherwise copy the whole array.
+        # No view of `coords` exists here (the chunk arrays are gone), which
+        # is what `refcheck` would verify.
+        coords.resize((kept, 9), refcheck=False)
+
     # Each intermediate is released the moment it is no longer needed.  On a
     # 7M-triangle mesh holding them all to the end peaks at 1000 MB against
     # 667 MB when freed eagerly — and that mesh was OOM-killed at 2.5 GB once
     # the decimator's own structures were added on top.
-    try:
-        with open(mesh.path, 'rb') as f:
-            f.seek(HEADER_BYTES)
-            raw = np.frombuffer(f.read(count * BYTES_PER_TRIANGLE),
-                                dtype=np.uint8)
-    except OSError as exc:
-        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
-                    f"{type(exc).__name__}: {exc}")
-    if len(raw) < count * BYTES_PER_TRIANGLE:
-        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
-                    f"short read: expected {count * BYTES_PER_TRIANGLE:,} "
-                    f"bytes, got {len(raw):,}")
-    raw = raw.reshape(count, BYTES_PER_TRIANGLE)
-
-    # Bytes 12:48 of each record are the three vertices (9 float32).
-    #
-    # `.copy()`, not `ascontiguousarray`: the buffer from `frombuffer` is
-    # read-only, and when the slice is already contiguous — which it is for a
-    # single-triangle mesh — `ascontiguousarray` returns that read-only view
-    # unchanged, and the -0.0 fold below then fails on it.  A mesh small enough
-    # to hit that is a degenerate-face test case, not a model, so the bug would
-    # have surfaced only on the strangest input.
-    coords = raw[:, 12:48].copy().reshape(-1, 12)
-    del raw
-    fview = coords.view(np.float32).reshape(-1, 3)
-    # Drop triangles with NaN or infinity here, where the coordinates first
-    # become numbers. Nothing downstream could cope with them: a NaN mesh scans
-    # as open=0, nm=0 and produces a NaN volume, every comparison that guards
-    # the pipeline is `<` (False against NaN), and `cKDTree` raises from outside
-    # the repair sequence's own error handling. Clean input — nearly every
-    # file — is not copied: the mask is only applied when it drops something.
-    finite = np.isfinite(coords.view(np.float32).reshape(-1, 9)).all(axis=1)
-    if not finite.all():
-        # `coords` has a row per vertex (three per triangle); mask by triangle.
-        coords = coords.reshape(-1, 3 * 12)[finite].reshape(-1, 12)
-        count = int(finite.sum())
-        if count == 0:
-            return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
-                        "no finite triangles: every triangle has a NaN or "
-                        "infinite coordinate")
-        fview = coords.view(np.float32).reshape(-1, 3)
-    del finite
-    # Fold -0.0 to 0.0 in place; adding 0.0 leaves every other value untouched.
-    np.add(fview, np.float32(0.0), out=fview)
-    del fview
-
     bits = coords.view(np.uint32).reshape(-1, 3)
     order = np.lexsort((bits[:, 2], bits[:, 1], bits[:, 0]))
     srt = bits[order]
@@ -333,7 +405,8 @@ def load(mesh: Mesh) -> Mesh:
     verts = srt[new].view(np.float32).reshape(-1, 3).copy()
     del srt, new, bits, coords
 
-    return mesh.with_geometry(Geometry(verts, inv.reshape(count, 3)))
+    return replace(mesh.with_geometry(Geometry(verts, inv.reshape(kept, 3))),
+                   load_drops=drops)
 
 
 @contextlib.contextmanager
@@ -595,7 +668,9 @@ def read_ply(path: str, mesh: Mesh) -> Mesh:
     if layout.n_faces and (faces.min() < 0 or faces.max() >= layout.n_verts):
         raise ValueError(f"{path} has face indices outside its {layout.n_verts} vertices")
 
-    return mesh.with_geometry(Geometry(verts, np.ascontiguousarray(faces)))
+    # A PLY is a new input: whatever an STL load once dropped is not its history.
+    return replace(mesh.with_geometry(Geometry(verts, np.ascontiguousarray(faces))),
+                   load_drops=None)
 
 
 def bounds(path: str) -> tuple[tuple[float, float, float],

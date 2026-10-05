@@ -28,7 +28,9 @@ created — then:
    never reads the TOML file. An oversized job may run alone.
    - **Prepare** (`--mode prepare`), reserved by `jobmemory.prepare_bytes`
      (source triangles): load with `mesh_io.load` (it drops triangles with
-     NaN/inf coordinates; the step text says how many), run the initial
+     NaN/inf coordinates or coincident corners; the step text says how many
+     of each, once, in the pass that loaded the STL: a repair pass with a
+     prepare handoff and a cache hit do not repeat it), run the initial
      decimation (step 1 below) and save it atomically as a PLY
      (`mesh_io.write_ply`) to `<input>.decimated/<job source path relative
      to the input>.<max_faces>.<decimator.settings_tag()>.ply` — beside the

@@ -547,3 +547,22 @@ def composites() -> dict:
         dict(open=False, shells=2, sag=(s10 / 25.4, s10 / 25.4), parts=('1/2', '2/2')),
         'overlapping_shells scaled to inches')
     return out
+
+
+def load_keeping_degenerates(path: str, destination: str = '/nonexistent/out.stl'):
+    """A binary STL welded like `mesh_io.load` (exact, -0.0 folded) but
+    without its drops: coincident-corner triangles stay and weld into
+    index-degenerate faces. For tests of what happens when such faces reach
+    the array path by another way in (a PLY, a repair step), now that
+    `load` drops them at the STL entrance. Vertex order may differ from
+    `load`'s."""
+    from libs.mesh_io import Geometry, Kind, Mesh
+    with open(path, 'rb') as f:
+        f.seek(80)
+        n = int(np.frombuffer(f.read(4), '<u4')[0])
+        rec = np.frombuffer(f.read(n * 50), dtype=[('n', '<f4', 3), ('v', '<f4', 9), ('a', '<u2')])
+    corners = rec['v'].reshape(-1, 3) + np.float32(0.0)
+    verts, inv = np.unique(corners, axis=0, return_inverse=True)
+    return Mesh(path, destination, Kind.BINARY_STL, n, True, None,
+                Geometry(np.ascontiguousarray(verts, np.float32),
+                         inv.reshape(n, 3).astype(np.int64)))

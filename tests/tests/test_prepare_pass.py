@@ -78,11 +78,14 @@ class TestCachePath(_Case):
             batch_repair.decimated_path(str(self.inp), str(self.root / 'other.stl'), 9)
 
 
-def _nan_source(path, faces):
-    """`faces` triangles, the last one entirely NaN."""
+def _nan_source(path, faces, coincident=False):
+    """`faces` triangles, the last one entirely NaN; with `coincident`, the
+    one before it has two equal corners."""
     v, f = ds.sphere(10.0, 40)
     tris = np.asarray(v, np.float32)[np.asarray(f)][:faces].copy()
     tris[-1] = np.nan
+    if coincident:
+        tris[-2, 1] = tris[-2, 0]
     rec = np.zeros(len(tris), dtype=[('n', '<f4', 3), ('v', '<f4', (3, 3)), ('a', '<u2')])
     rec['v'] = tris
     with open(path, 'wb') as fh:
@@ -161,6 +164,21 @@ class TestPrepare(_Case):
         self.assertTrue(result.is_handoff, result.reason)
         self.assertIn('load: dropped 1 triangles with NaN/inf coordinates', result.steps)
 
+    def test_each_reason_is_counted_in_the_note(self):
+        _nan_source(self.source, 1500, coincident=True)
+        result = self.prepare(1000)
+        self.assertIn('load: dropped 1 triangles with NaN/inf coordinates, '
+                      '1 triangles with coincident corners', result.steps)
+
+    def test_a_cache_hit_does_not_repeat_the_note(self):
+        """Owner, 2026-10-05: the PLY is a new input; the run that loaded the
+        STL reported the drops."""
+        _nan_source(self.source, 1500)
+        self.prepare(1000)
+        again = self.prepare(1000)
+        self.assertTrue(any(step.startswith('decimate: cached') for step in again.steps))
+        self.assertFalse([s for s in again.steps if s.startswith('load: dropped')])
+
     def test_dropping_below_the_target_still_writes_the_cache(self):
         """The header is over target, the finite triangles are not: the
         decimator has nothing to do, and the handoff path is still the
@@ -225,6 +243,22 @@ class TestRepairFromPrepared(_Case):
                                    Indicator.FAILED, None, 'source', 'forced')):
             result = batch_repair._process_one_file(str(self.source), self.destination, 0)
         self.assertIn('load: dropped 1 triangles with NaN/inf coordinates', result.steps)
+
+    def test_a_no_decimation_handoff_reports_the_drop_once(self):
+        """Prepare loads the STL and reports; the repair pass reloads the same
+        STL through the handoff and does not report it again."""
+        _nan_source(self.source, 600, coincident=True)
+        prepared = self.prepare(0)
+        self.assertEqual(prepared.prepared_path, str(self.source))
+        note = ('load: dropped 1 triangles with NaN/inf coordinates, '
+                '1 triangles with coincident corners')
+        self.assertIn(note, prepared.steps)
+        with mock.patch.object(processor, 'process',
+                               lambda mesh, max_faces, **kw: processor.Outcome(
+                                   Indicator.FAILED, None, 'source', 'forced')):
+            result = batch_repair._process_one_file(str(self.source), self.destination, 0,
+                                                    load_path=prepared.prepared_path)
+        self.assertFalse([s for s in result.steps if s.startswith('load: dropped')])
 
 
 if __name__ == '__main__':

@@ -10,38 +10,16 @@ Work in this order; details in
 [decimation-memory-path.md](../errors/decimation-memory-path.md). Done (2026-10-05): the
 narrow PLY dialects; the PLY decimation cache beside the input folder
 (decimate-from-file was measured and not adopted: PyMeshLab's STL reader
-needs more memory than our loader).
+needs more memory than our loader); the chunked STL read with
+NaN/inf and coincident-corner triangles dropped and counted (`mesh_io.load`,
+1024-triangle chunks). The incremental weld proposed with it was dropped
+(owner): the load is not the job peak, and only the whole-file buffer was
+an allocation with no purpose.
 
-1. [ ] **Chunked STL loader** (owner idea, 2026-10-05; order relative to
-   float64 to confirm). `mesh_io.load` today reads the whole file in one
-   `f.read()` (50 B/triangle), copies the corner coordinates (36 B/tri),
-   then welds by sorting ALL corners (`lexsort` over a `(3F, 3)` uint32 view,
-   `order`/`inv` int64): load peak ~147 B/triangle (Bat Girl 4.83M: 0.77 GiB).
-   Proposed, all NumPy:
-   - read fixed-size chunks (e.g. 1M triangles) straight into float32 —
-     no raw-file buffer;
-   - per chunk: drop triangles with a NaN/inf coordinate and triangles whose
-     corners coincide (equal float32 bits after the -0.0 fold == index-
-     degenerate after an exact weld); COUNT both and carry the counts so
-     `scanner.scan`'s result reports them (owner: "count them, drop them,
-     add to scanner result");
-   - weld incrementally: sort + dedupe the chunk, `np.searchsorted` it
-     against a sorted table of unique vertices (each with its fixed index
-     from first sight), reuse matches, merge new vertices in with one
-     `np.insert` block copy per chunk; write the chunk's face indices.
-   Memory then follows the unique vertices (~F/2) plus one chunk, not all
-   corners; float64 would only widen the vertex table (~12 B/triangle).
-   Must give a bit-identical result to today's loader (measure on Bat Girl:
-   memory, time, identical vertices/faces). Does not lower the job peak
-   (PyMeshLab mesh build 1.55 GiB, decimation 2.05 GiB on Bat Girl), only
-   the load stage. If degenerates are dropped here, `meshlab.to_mesh`'s drop
-   stays as the guard for other array paths.
-   A compiled hash-table weld (C via `cffi` + gcc, both present; or Numba,
-   not installed) is the fallback if the NumPy version is not enough.
-2. [ ] **float64 `Geometry.verts`**, as its own plan. Then re-fit
+1. [ ] **float64 `Geometry.verts`**, as its own plan. Then re-fit
    `jobmemory.prepare_bytes` (calibrated on the old array path). Weld stays
    on float32 bits; convert the welded table (~12 B/triangle).
-3. Everything else: volume guard on open shells
+2. Everything else: volume guard on open shells
    ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), recording
    the crash signal, MeshFix time/NM guard, the NM-only fast path below.
 

@@ -20,9 +20,10 @@ import struct as _struct
 import numpy as np
 
 from libs import mesh_io
+from tests.tests import defect_spheres as ds
 
 from libs.mesh_io import (
-    BYTES_PER_TRIANGLE, HEADER_BYTES, Geometry, Kind, Mesh, bounds, diagonal,
+    BYTES_PER_TRIANGLE, HEADER_BYTES, Geometry, Kind, LoadDrops, Mesh, bounds, diagonal,
     dimensions, kind, load, probe, read_ply, triangle_count, write, write_ply,
 )
 
@@ -380,6 +381,123 @@ class TestLoad(MeshIOCase):
             load(ascii_mesh)
 
 
+
+class _Trickle:
+    """A file whose `readinto` returns at most `step` bytes per call, and
+    nothing once `limit` bytes have been read that way (a file cut short
+    after `triangle_count` checked its size)."""
+
+    def __init__(self, f, step, limit=None):
+        self.f, self.step, self.left = f, step, limit
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.f.close()
+
+    def __getattr__(self, name):
+        return getattr(self.f, name)
+
+    def readinto(self, view):
+        n = min(len(view), self.step)
+        if self.left is not None:
+            n = min(n, self.left)
+        got = self.f.readinto(view[:n]) if n else 0
+        if self.left is not None:
+            self.left -= got
+        return got
+
+
+class TestChunkedLoad(MeshIOCase):
+    """`load` reads in chunks and drops two kinds of triangle. A fixture with
+    known properties: a closed sphere plus planted triangles, at chunk sizes
+    that put the planted ones on chunk boundaries."""
+
+    NAN, INF = float('nan'), float('inf')
+
+    def fixture(self):
+        v, f = ds.sphere(10.0, 6)                     # 32 vertices, 60 faces
+        tris = [list(map(tuple, t)) for t in np.asarray(v, np.float32)[np.asarray(f)]]
+        a, b = tris[5][0], tris[5][1]                 # real sphere corners
+        planted = {
+            0: [(self.NAN, 0, 0), (1, 0, 0), (0, 1, 0)],           # non-finite
+            6: [a, a, b],                                          # coincident, end of chunk 1 (size 7)
+            7: [(0, 0, -0.0), (0, 0, 0.0), (1, 2, 3)],             # coincident after the fold
+            20: [b, b, b],                                         # all three
+            21: [(self.NAN, 0, 0), (self.NAN, 0, 0), (4, 5, 6)],   # both: counts as non-finite
+            30: [(100, 0, 0), (101, 0, 0), (102, 0, 0)],           # collinear, distinct: kept
+        }
+        for i in sorted(planted):
+            tris.insert(i, planted[i])
+        tris.append([(5, 5, 5), (6, 5, self.INF), (5, 6, 5)])      # non-finite, last
+        everything = np.asarray(tris, np.float32) + np.float32(0.0)
+        bad = {0, 6, 7, 20, 21, len(tris) - 1}
+        kept = np.asarray([t for i, t in enumerate(everything) if i not in bad])
+        path = _binary_stl(self.path('planted.stl'), triangles=tris)
+        return path, kept, len(np.unique(kept.reshape(-1, 3), axis=0))
+
+    def test_known_fixture_at_every_chunk_size(self):
+        path, kept, n_verts = self.fixture()
+        for chunk in (1, 3, 7, mesh_io.CHUNK_TRIANGLES):
+            with self.subTest(chunk=chunk):
+                result = load(probe(path, self.path('out.stl')), chunk_triangles=chunk)
+                self.assertTrue(result.is_valid, result.problem)
+                g = result.geometry
+                # Same triangles, same order, same corner order (winding).
+                np.testing.assert_array_equal(g.verts[g.faces], kept)
+                self.assertEqual(len(g.verts), n_verts)       # (1, 2, 3) etc. not kept
+                self.assertEqual(result.triangles, len(kept))
+                self.assertEqual(result.load_drops, LoadDrops(nonfinite=3, degenerate=3))
+
+    def test_a_clean_file_drops_nothing(self):
+        result = load(probe(_binary_stl(self.path('a.stl')), self.path('out.stl')),
+                      chunk_triangles=3)
+        self.assertEqual(result.load_drops, LoadDrops(0, 0))
+        self.assertEqual(len(result.geometry.verts), 4)
+
+    def test_negative_zero_welds_across_chunks(self):
+        triangles = (((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+                     ((-0.0, -0.0, -0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+        result = load(probe(_binary_stl(self.path('z.stl'), triangles=triangles),
+                            self.path('out.stl')), chunk_triangles=1)
+        self.assertEqual(len(result.geometry.verts), 4)
+
+    def test_a_file_of_only_coincident_triangles_is_invalid(self):
+        path = _binary_stl(self.path('d.stl'), triangles=[[(0, 0, 0), (0, 0, 0), (1, 0, 0)],
+                                                          [(self.NAN, 0, 0), (1, 0, 0), (0, 1, 0)]])
+        result = load(probe(path, self.path('out.stl')))
+        self.assertFalse(result.is_valid)
+        self.assertIn('no non-degenerate triangles', result.problem)
+        self.assertEqual(result.load_drops, LoadDrops(nonfinite=1, degenerate=1))
+
+    def test_partial_reads_are_continued(self):
+        path, kept, _ = self.fixture()
+        real_open = open
+        with mock.patch.object(mesh_io, 'open', create=True,
+                               new=lambda *a, **k: _Trickle(real_open(*a, **k), step=7)):
+            result = load(probe(path, self.path('out.stl')), chunk_triangles=4)
+        self.assertTrue(result.is_valid, result.problem)
+        np.testing.assert_array_equal(result.geometry.verts[result.geometry.faces], kept)
+
+    def test_a_file_cut_short_while_reading_is_invalid(self):
+        path = _binary_stl(self.path('a.stl'))
+        real_open = open
+        cut = 2 * BYTES_PER_TRIANGLE + 10
+        with mock.patch.object(mesh_io, 'open', create=True,
+                               new=lambda *a, **k: _Trickle(real_open(*a, **k), step=1 << 20,
+                                                            limit=cut)):
+            result = load(probe(path, self.path('out.stl')), chunk_triangles=3)
+        self.assertFalse(result.is_valid)
+        self.assertEqual(result.problem, f'short read: expected {4 * BYTES_PER_TRIANGLE:,} '
+                                         f'bytes, got {cut:,}')
+
+    def test_a_ply_read_carries_no_load_drops(self):
+        path, _, _ = self.fixture()
+        loaded = load(probe(path, self.path('out.stl')))
+        write_ply(loaded, self.path('c.ply'))
+        self.assertIsNone(read_ply(self.path('c.ply'), loaded).load_drops)
+
 class TestWrite(MeshIOCase):
 
     def _round_trip(self, triangles=_TETRA):
@@ -422,8 +540,9 @@ class TestWrite(MeshIOCase):
                                places=5, msg="the normal is not unit length")
 
     def test_a_degenerate_face_gets_a_zero_normal_not_a_nan(self):
-        """A zero-area face has no normal; NaNs in the file break slicers."""
-        degenerate = (((0, 0, 0), (1, 0, 0), (1, 0, 0)),)
+        """A zero-area face has no normal; NaNs in the file break slicers.
+        Collinear: `load` keeps it (a coincident-corner one it drops)."""
+        degenerate = (((0, 0, 0), (1, 0, 0), (2, 0, 0)),)
         src = _binary_stl(self.path('d.stl'), triangles=degenerate)
         write(load(probe(src, self.path('out.stl'))))
         with open(self.path('out.stl'), 'rb') as f:

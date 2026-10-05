@@ -23,6 +23,8 @@ def to_mesh(geometry: Geometry):
     from disk. So they are dropped here, the one hand-off every array into
     PyMeshLab passes (`apply_filters`, hence the decimator and every `step_*`
     filter). Lossless: such a face has zero area.
+    `mesh_io.load` drops them at the STL entrance too; this stays the guard
+    for meshes that arrive any other way (PLY, repair steps).
 
     Vertices are passed unchanged, even ones only a dropped face used, as the
     importer does; unreferenced vertices were measured harmless to decimation.
