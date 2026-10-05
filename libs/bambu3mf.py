@@ -80,6 +80,8 @@ class Instance:
 
     plate       Bambu plate number; 0 when the instance is on no plate
     overrides   per-object setting overrides from model_settings.config
+    transform   the build item's 4x4 row-vector matrix in millimetres:
+                world = [object coordinates, 1] @ transform
     """
 
     object_id: str
@@ -89,6 +91,7 @@ class Instance:
     printable: bool
     parts: tuple[Part, ...]
     overrides: dict[str, str] = field(default_factory=dict)
+    transform: np.ndarray = field(default_factory=lambda: np.eye(4))
 
     @property
     def normal_parts(self) -> tuple[Part, ...]:
@@ -97,10 +100,21 @@ class Instance:
 
 @dataclass(frozen=True)
 class Project:
+    """A read 3MF.
+
+    root_member     zip member holding the build (usually 3D/3dmodel.model)
+    root_in_mm      the root model's unit is millimetres
+    used_ids        every object id in every model file read, plus every part
+                    id in model_settings.config — what a new id must avoid
+    """
+
     path: str
     settings: dict[str, str]
     instances: tuple[Instance, ...]
     is_bambu: bool
+    root_member: str = _ROOT_MODEL
+    root_in_mm: bool = True
+    used_ids: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -365,7 +379,15 @@ def read(path: str) -> Project:
             seen[object_id] = instance_id + 1
             instances.append(_instance(reader, root_member, root, config, object_id,
                                        instance_id, item_matrix, printable))
-    return Project(path, settings, tuple(instances), config is not None)
+        used = set()
+        for member in archive.namelist():
+            if member.startswith('3D/') and member.endswith('.model'):
+                used |= set(reader.model(member).objects)
+        if config is not None:
+            for _, part_meta in config[0].values():
+                used |= set(part_meta)
+    return Project(path, settings, tuple(instances), config is not None,
+                   root_member, root.scale == 1.0, frozenset(used))
 
 
 def _instance(reader, root_member, root, config, object_id, instance_id,
@@ -401,7 +423,8 @@ def _instance(reader, root_member, root, config, object_id, instance_id,
                           {k: val for k, val in part_overrides.items()
                            if k not in _NOT_SETTINGS and k not in _PART_IDENTITY}))
     overrides = {k: v for k, v in meta.items() if k not in _NOT_SETTINGS}
-    return Instance(object_id, instance_id, name, plate, printable, tuple(parts), overrides)
+    return Instance(object_id, instance_id, name, plate, printable, tuple(parts), overrides,
+                    item)
 
 
 def _own_mesh(reader, member, object_id, matrix):
@@ -416,3 +439,248 @@ def _own_mesh(reader, member, object_id, matrix):
 #: Part metadata that is identity or bookkeeping, not a setting override.
 _PART_IDENTITY = {'matrix', 'source_file', 'source_object_id', 'source_volume_id',
                   'source_offset_x', 'source_offset_y', 'source_offset_z'}
+
+
+# ------------------------------------------------------------------ writing
+
+_CORE_NS = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02'
+_PROD_NS = 'http://schemas.microsoft.com/3dmanufacturing/production/2015/06'
+_RELS_MEMBER = '3D/_rels/3dmodel.model.rels'
+_SETTINGS_MEMBER = 'Metadata/model_settings.config'
+_MODEL_REL_TYPE = 'http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel'
+
+
+@dataclass(frozen=True)
+class Addition:
+    """A new printable part for one object, in WORLD millimetres.
+
+    It is converted to object coordinates through the instance's build
+    transform, so the object must have exactly one instance.
+    """
+
+    instance: Instance
+    name: str
+    vertices: np.ndarray
+    faces: np.ndarray
+
+
+def add_parts(project: Project, destination: str, additions: list[Addition]) -> None:
+    """Write a copy of `project` with each addition as a new normal part.
+
+    The source file is never modified, and `destination` must not exist: the
+    copy is built in a temporary file beside it, re-read to check that every
+    addition is present and placed, and only then linked into place.
+
+    Only Bambu projects whose root objects are component wrappers, in
+    millimetres, are supported.  The XML is edited as text so everything not
+    being changed stays byte-for-byte as Bambu wrote it (a parser round-trip
+    would rewrite namespace prefixes); every edit point must be found exactly
+    once, or nothing is written.
+    """
+    import os
+    import tempfile
+    import uuid
+    from xml.sax.saxutils import quoteattr
+
+    if not project.is_bambu:
+        raise ReadError('only Bambu Studio projects can be extended')
+    if not project.root_in_mm:
+        raise ReadError('the root model is not in millimetres')
+    source = os.path.realpath(project.path)
+    target = os.path.realpath(destination)
+    if source == target or os.path.exists(destination):
+        raise ReadError(f'refusing to write {destination}: it exists or is the source')
+    counts: dict[str, int] = {}
+    for instance in project.instances:
+        counts[instance.object_id] = counts.get(instance.object_id, 0) + 1
+    for addition in additions:
+        if counts.get(addition.instance.object_id) != 1:
+            raise ReadError(f'object {addition.instance.object_id} has several instances; '
+                            'a part added to it cannot fit all of them')
+    if len({a.instance.object_id for a in additions}) != len(additions):
+        raise ReadError('at most one addition per object')
+
+    with zipfile.ZipFile(project.path) as archive:
+        members = {info.filename: info for info in archive.infolist()}
+        root_text = archive.read(project.root_member).decode('utf-8')
+        rels_text = archive.read(_RELS_MEMBER).decode('utf-8') if _RELS_MEMBER in members else None
+        settings_text = archive.read(_SETTINGS_MEMBER).decode('utf-8')
+        if rels_text is None:
+            raise ReadError(f'{_RELS_MEMBER} is missing')
+
+        prefix = _namespace_prefix(root_text, _PROD_NS)
+        next_id = 1 + max((int(i) for i in project.used_ids if i.isdigit()), default=0)
+        new_members = {}
+        for addition in additions:
+            object_id = addition.instance.object_id
+            new_id = str(next_id)
+            next_id += 1
+            member = f'3D/Objects/support_{new_id}.model'
+            if member in members or member in new_members:
+                raise ReadError(f'{member} already exists')
+            local = _to_object(addition.instance.transform, addition.vertices)
+            new_members[member] = _mesh_model(new_id, local, addition.faces, str(uuid.uuid4()))
+            component_uuid = uuid.uuid4()
+
+            def component(core, member=member, new_id=new_id, uid=component_uuid):
+                # `core` is the prefix the object element uses for the core
+                # namespace, so the new element lands in the same namespace.
+                return (f'<{core}component {prefix}:path="/{member}" objectid="{new_id}" '
+                        f'{prefix}:UUID="{uid}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>')
+            root_text = _insert_in_object(root_text, object_id, 'components', component,
+                                          project.root_member)
+            rels_text = _insert_once(
+                rels_text, '</Relationships>',
+                f' <Relationship Target="/{member}" Id="rel-support-{new_id}" '
+                f'Type="{_MODEL_REL_TYPE}"/>\n', _RELS_MEMBER)
+            part = (f'    <part id="{new_id}" subtype="{NORMAL}" uuid="{uuid.uuid4()}">\n'
+                    f'      <metadata key="name" value={quoteattr(addition.name)}/>\n'
+                    f'      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n'
+                    f'      <mesh_stat face_count="{len(addition.faces)}" edges_fixed="0" '
+                    f'degenerate_facets="0" facets_removed="0" facets_reversed="0" '
+                    f'backwards_edges="0"/>\n    </part>\n  ')
+            settings_text = _insert_in_object(settings_text, object_id, None,
+                                              lambda core, part=part: part,
+                                              _SETTINGS_MEMBER, len(addition.faces))
+
+        replaced = {project.root_member: root_text, _RELS_MEMBER: rels_text,
+                    _SETTINGS_MEMBER: settings_text}
+        directory = os.path.dirname(target) or '.'
+        handle, staged = tempfile.mkstemp(dir=directory, prefix='.3mf-', suffix='.part')
+        os.close(handle)
+        try:
+            # mkstemp makes the file private (0600); give it the permissions
+            # any newly created file would get, as the published link keeps them.
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(staged, 0o666 & ~umask)
+            with zipfile.ZipFile(staged, 'w', zipfile.ZIP_DEFLATED) as out:
+                for name, info in members.items():
+                    data = replaced[name].encode('utf-8') if name in replaced else archive.read(name)
+                    out.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED)
+                for name, text in new_members.items():
+                    out.writestr(name, text.encode('utf-8'))
+            _verify(staged, project, additions)
+            _publish(staged, target)
+        finally:
+            os.unlink(staged)
+
+
+def _publish(staged: str, target: str) -> None:
+    """Put the finished file at `target`, never replacing an existing file.
+
+    A hard link is atomic and refuses an existing name.  Filesystems without
+    hard links (FAT, some network shares) get an exclusive create and a copy.
+    """
+    import errno
+    import os
+    import shutil
+    try:
+        os.link(staged, target)
+        return
+    except FileExistsError:
+        raise ReadError(f'refusing to write {target}: it exists') from None
+    except OSError as error:
+        if error.errno not in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV):
+            raise
+    try:
+        with open(staged, 'rb') as source, open(target, 'xb') as out:
+            shutil.copyfileobj(source, out)
+    except FileExistsError:
+        raise ReadError(f'refusing to write {target}: it exists') from None
+    except BaseException:
+        if os.path.exists(target):
+            os.unlink(target)
+        raise
+
+
+def _to_object(transform: np.ndarray, world: np.ndarray) -> np.ndarray:
+    """World millimetres -> the object's own coordinates (inverse build item)."""
+    return (np.asarray(world, dtype=np.float64) - transform[3, :3]) @ np.linalg.inv(transform[:3, :3])
+
+
+def _mesh_model(object_id: str, vertices: np.ndarray, faces: np.ndarray, uid: str) -> str:
+    vertex_xml = '\n'.join(f'     <vertex x="{x:.9g}" y="{y:.9g}" z="{z:.9g}"/>'
+                           for x, y, z in vertices.tolist())
+    triangle_xml = '\n'.join(f'     <triangle v1="{a}" v2="{b}" v3="{c}"/>'
+                             for a, b, c in faces.tolist())
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<model unit="millimeter" xml:lang="en-US" xmlns="{_CORE_NS}" '
+            f'xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" '
+            f'xmlns:p="{_PROD_NS}" requiredextensions="p">\n'
+            ' <metadata name="BambuStudio:3mfVersion">1</metadata>\n'
+            ' <resources>\n'
+            f'  <object id="{object_id}" p:UUID="{uid}" type="model">\n'
+            '   <mesh>\n    <vertices>\n' + vertex_xml + '\n    </vertices>\n'
+            '    <triangles>\n' + triangle_xml + '\n    </triangles>\n'
+            '   </mesh>\n  </object>\n </resources>\n <build/>\n</model>\n')
+
+
+def _namespace_prefix(text: str, namespace: str) -> str:
+    import re
+    found = re.findall(r'xmlns:([A-Za-z_][\w.-]*)\s*=\s*["\']' + re.escape(namespace) + r'["\']',
+                       text)
+    if len(found) != 1:
+        raise ReadError('root model must declare the 3MF production namespace exactly once')
+    return found[0]
+
+
+def _insert_once(text: str, marker: str, insertion: str, member: str) -> str:
+    if text.count(marker) != 1:
+        raise ReadError(f'{member}: expected exactly one {marker!r}')
+    return text.replace(marker, insertion + marker)
+
+
+def _insert_in_object(text: str, object_id: str, container: str | None, insertion,
+                      member: str, added_faces: int | None = None) -> str:
+    """Insert before `</container>` (or `</object>`) inside object `object_id`.
+
+    The object element may carry a namespace prefix and its attributes in any
+    order or quoting; it must occur exactly once and not be self-closing.
+    `insertion(prefix)` builds the text, given the object's own prefix
+    (e.g. 'c:' or '').
+    """
+    import re
+    opens = [m for m in re.finditer(r'<((?:[A-Za-z_][\w.-]*:)?)object\b([^>]*)>', text)
+             if re.search(r'\bid\s*=\s*(["\'])' + re.escape(object_id) + r'\1', m.group(2))]
+    if len(opens) != 1 or opens[0].group(2).rstrip().endswith('/'):
+        raise ReadError(f'{member}: expected exactly one open <object id="{object_id}">')
+    prefix = opens[0].group(1)
+    start = opens[0].end()
+    end = text.find(f'</{prefix}object>', start)
+    if end < 0:
+        raise ReadError(f'{member}: object {object_id} is not closed')
+    body = text[start:end]
+    closing = f'</{prefix}{container}>' if container else None
+    if closing is not None:
+        if body.count(closing) != 1:
+            raise ReadError(f'{member}: object {object_id} needs exactly one {closing}')
+        body = body.replace(closing, insertion(prefix) + closing)
+    else:
+        body = body + insertion(prefix)
+    if added_faces is not None:
+        body = re.sub(r'(<metadata\s+face_count\s*=\s*["\'])(\d+)(["\'])',
+                      lambda m: f'{m.group(1)}{int(m.group(2)) + added_faces}{m.group(3)}',
+                      body, count=1)
+    return text[:start] + body + text[end:]
+
+
+def _verify(path: str, before: Project, additions: list[Addition]) -> None:
+    """Re-read the written copy: the old parts unchanged, each addition placed."""
+    after = read(path)
+    old = {(i.object_id, i.instance_id): i for i in before.instances}
+    added = {a.instance.object_id: a for a in additions}
+    for instance in after.instances:
+        previous = old[(instance.object_id, instance.instance_id)]
+        extra = len(instance.parts) - len(previous.parts)
+        if extra != (1 if instance.object_id in added else 0):
+            raise ReadError(f'written copy: object {instance.object_id} has {extra} new parts')
+        for a, b in zip(previous.parts, instance.parts):
+            if a.subtype != b.subtype or not np.allclose(a.vertices, b.vertices, atol=1e-6):
+                raise ReadError(f'written copy: object {instance.object_id} changed')
+        if instance.object_id in added:
+            new = instance.parts[-1]
+            want = added[instance.object_id].vertices
+            if new.subtype != NORMAL or not np.allclose(new.vertices, want, atol=1e-5):
+                raise ReadError(f'written copy: the part added to object {instance.object_id} '
+                                'is not where it was meant to be')

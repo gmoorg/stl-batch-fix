@@ -26,121 +26,14 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 from libs import bambu3mf, basecheck  # noqa: E402
+from libs.printsettings import (instance_problems, resolve_settings,  # noqa: E402
+                                thresholds_for)
 
 EXIT_OK, EXIT_RISK, EXIT_ERROR, EXIT_INCOMPLETE = 0, 1, 2, 3
-
-#: Bambu treats a support threshold angle of 0 as "automatic"; this is the
-#: angle assumed for it.
-AUTO_SUPPORT_ANGLE = 30.0
 
 SCOPE = ('Scope: predictions from geometry, not a slice. Thresholds are provisional '
          '(not yet checked against sliced output). Check B measures clearance to the '
          'plate only; undersides above other model geometry are not evaluated.')
-
-
-class Value:
-    """A threshold value and where it came from."""
-
-    def __init__(self, value, source):
-        self.value, self.source = value, source
-
-    def __repr__(self):
-        return f'{self.value} ({self.source})'
-
-
-def _number(text):
-    value = float(text)
-    if not math.isfinite(value):
-        raise ValueError(text)
-    return value
-
-
-def resolve_settings(project: bambu3mf.Project, instance: bambu3mf.Instance,
-                     cli: argparse.Namespace) -> tuple[dict[str, Value], list[str]]:
-    """The effective support/layer settings for one instance, with sources.
-
-    Precedence: command line > object override > project settings > default.
-    A value that cannot be parsed falls back to the default and is marked
-    'assumed'.
-    """
-    notes = []
-    layered = [('project', project.settings), ('object', instance.overrides)]
-
-    def pick(key, default, parse):
-        value, source = default, 'default'
-        for name, table in layered:
-            if key in table:
-                try:
-                    value, source = parse(table[key]), name
-                except ValueError:
-                    value, source = default, 'assumed'
-                    notes.append(f'{key}={table[key]!r} ({name}) not understood; using {default}')
-        return Value(value, source)
-
-    def flag(text):
-        if text not in ('0', '1'):
-            raise ValueError(text)
-        return text == '1'
-
-    first = pick('initial_layer_print_height', 0.2, _number)
-    layer = pick('layer_height', 0.2, _number)
-    gap = pick('support_top_z_distance', 0.2, _number)
-    angle = pick('support_threshold_angle', AUTO_SUPPORT_ANGLE, _number)
-    if angle.source in ('project', 'object') and angle.value == 0:
-        angle = Value(AUTO_SUPPORT_ANGLE, 'assumed for automatic (0)')
-    enabled = pick('enable_support', True, flag)
-    support_type = pick('support_type', 'normal(auto)', str)
-    supports = Value(bool(enabled.value) and 'manual' not in str(support_type.value),
-                     enabled.source)
-    plate_only = pick('support_on_build_plate_only', False, flag)
-
-    def cli_override(value, current):
-        return current if value is None else Value(value, 'command line')
-
-    first = cli_override(cli.first_layer, first)
-    layer = cli_override(cli.layer_height, layer)
-    gap = cli_override(cli.support_gap, gap)
-    angle = cli_override(cli.support_angle, angle)
-
-    if any(p.subtype not in (bambu3mf.NORMAL, bambu3mf.NEGATIVE) for p in instance.parts):
-        notes.append('modifier or support enforcer/blocker parts present: effective '
-                     'settings may differ inside them')
-    part_keys = {k for p in instance.parts for k in p.overrides}
-    used = {'initial_layer_print_height', 'layer_height', 'support_top_z_distance',
-            'support_threshold_angle', 'enable_support', 'support_type'}
-    if part_keys & used:
-        notes.append('per-part overrides of ' + ', '.join(sorted(part_keys & used))
-                     + ' are not applied')
-    return ({'first_layer': first, 'layer_height': layer, 'support_gap': gap,
-             'support_angle': angle, 'supports_enabled': supports,
-             'support_on_build_plate_only': plate_only}, notes)
-
-
-def thresholds_for(settings: dict[str, Value], cli) -> basecheck.Thresholds:
-    extra = {}
-    for name in ('cell', 'foot_height', 'shallow_angle', 'min_region_area',
-                 'min_contact_fraction', 'max_extra_islands', 'sink_quantile'):
-        value = getattr(cli, name)
-        if value is not None:
-            extra[name] = value
-    return basecheck.Thresholds(first_layer=settings['first_layer'].value,
-                                layer_height=settings['layer_height'].value,
-                                support_gap=settings['support_gap'].value,
-                                support_angle=settings['support_angle'].value,
-                                supports_enabled=settings['supports_enabled'].value,
-                                **extra)
-
-
-def _instance_problems(instance: bambu3mf.Instance) -> list[str]:
-    problems = []
-    if any(p.subtype == bambu3mf.NEGATIVE for p in instance.parts):
-        problems.append('negative volume present: it is not subtracted, so the analysed '
-                        'base may include material that will not print')
-    unmatched = [p.name for p in instance.parts if p.subtype is None]
-    if unmatched:
-        problems.append('parts with no matching metadata (subtype unknown, not analysed): '
-                        + ', '.join(unmatched))
-    return problems
 
 
 def _region_line(kind, region: basecheck.Region) -> str:
@@ -282,7 +175,7 @@ def main(argv=None, out=sys.stdout) -> int:
             except ValueError as error:
                 print(f'error: {error}', file=sys.stderr)
                 return EXIT_ERROR
-            problems = _instance_problems(instance)
+            problems = instance_problems(instance)
             if not settings['support_on_build_plate_only'].value:
                 notes.append('supports may also start on the model; their clearance is not checked')
             parts = [(p.vertices, p.faces) for p in instance.normal_parts]
