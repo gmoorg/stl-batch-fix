@@ -281,6 +281,11 @@ on the file path (option 2 above).
   distinct. Decimation is best effort and can stay above `max_faces`, and
   `max_faces = 0` disables it, so "every repair input is ≤ `max_faces`"
   below is not guaranteed.
+- **Cache location (owner, 2026-10-05): out of the source folder.** Today
+  the cache is `<input>/stl-decimated/` (`indicators.DECIMATED_DIRNAME`),
+  inside the input tree the batch scans. The PLY cache should go to an
+  intermediate folder beside it instead, e.g. `<input>.decimated/`; the
+  exact name is to settle while planning.
 - **Existing cache.** The 15 GB of `stl-decimated/*.900000.stl` files become
   unused. Rebuild, or read both formats during a transition.
 - **Sources at or under `max_faces`** still load through `mesh_io.load`
