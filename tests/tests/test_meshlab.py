@@ -14,19 +14,20 @@ TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
 needs_meshlab = unittest.skipUnless(
     meshlab.is_available(), "pymeshlab is not installed")
 
-#: The four CLEAN filters as one combined `apply_filters()` call — a
-#: test-local reference sequence for comparing against the four separate
-#: `step_clean_*` calls. `repairer.WHOLE_MESH_STEPS` is empty by default in
-#: the uniform-step refactor (docs/refactor/TODO.md) — these filters are not
-#: wired into it; this tuple exists only to give
-#: `test_running_the_four_steps_separately_matches_one_combined_call` a
-#: reference order to check the four separate calls against.
-CLEAN_FILTERS_COMBINED: tuple[tuple[str, dict], ...] = (
-    ('meshing_remove_null_faces', {}),
-    ('meshing_merge_close_vertices', {'threshold': 0.1}),
-    ('meshing_remove_duplicate_faces', {}),
-    ('meshing_remove_unreferenced_vertices', {}),
-)
+def clean_filters_combined() -> tuple[tuple[str, dict], ...]:
+    """The four CLEAN filters as one combined `apply_filters()` call — a
+    test-local reference sequence for comparing against the four separate
+    `step_clean_*` calls. `repairer.WHOLE_MESH_STEPS` is empty by default in
+    the uniform-step refactor (docs/refactor/TODO.md) — these filters are not
+    wired into it; this exists only to give
+    `test_running_the_four_steps_separately_matches_one_combined_call` a
+    reference order."""
+    return (
+        ('meshing_remove_null_faces', {}),
+        ('meshing_merge_close_vertices', {'threshold': meshlab.percent(0.1)}),
+        ('meshing_remove_duplicate_faces', {}),
+        ('meshing_remove_unreferenced_vertices', {}),
+    )
 
 
 def mesh(verts, faces):
@@ -76,22 +77,58 @@ class TestMeshLab(unittest.TestCase):
         np.testing.assert_array_equal(geometry.verts, verts_before)
         np.testing.assert_array_equal(geometry.faces, faces_before)
 
-    def test_apply_filters_wraps_float_parameters(self):
-        doubled = mesh(TETRA_VERTS, TETRA_FACES + TETRA_FACES)
-        filters = (
-            ('meshing_remove_null_faces', {}),
-            ('meshing_merge_close_vertices', {'threshold': 0.1}),
-            ('meshing_remove_duplicate_faces', {}),
-            ('meshing_remove_unreferenced_vertices', {}),
-        )
-        result = meshlab.apply_filters(doubled, filters)
+    def test_a_percentage_threshold_welds_nearby_vertices(self):
+        """`percent(0.1)` is 0.1 % of the diagonal: a second tetrahedron
+        1e-5 away (distinct vertices, so duplicate-face removal alone could
+        not do it) is welded onto the first."""
+        near = [[x + 1e-5, y, z] for x, y, z in TETRA_VERTS]
+        doubled = mesh(TETRA_VERTS + near,
+                       TETRA_FACES + [[a + 4, b + 4, c + 4] for a, b, c in TETRA_FACES])
+        result = meshlab.apply_filters(doubled, clean_filters_combined())
+        self.assertEqual(len(result.geometry.verts), 4)
         self.assertEqual(len(result.geometry.faces), 4)
+
+    def test_a_percent_is_plain_python_compared_by_value(self):
+        self.assertEqual(meshlab.percent(0.1), meshlab.percent(0.1))
+        self.assertNotEqual(meshlab.percent(0.1), 0.1)
+
+    def test_a_plain_float_is_passed_as_is(self):
+        """Quadric decimation's `qualitythr` is a plain float, not a
+        percentage. Passing its default explicitly gives the same result as
+        a call with every other parameter matched."""
+        from libs import decimator
+        from tests.tests.test_decimator import _sphere
+        v, f = _sphere(subdivisions=3)
+        m = mesh(v, f)
+        name = 'meshing_decimation_quadric_edge_collapse'
+        params = dict(targetfacenum=200, **decimator.QUADRIC_PARAMS)
+        self.assertIsInstance(params['qualitythr'], float)
+        explicit = meshlab.apply_filters(m, ((name, params),))
+        again = meshlab.apply_filters(m, ((name, dict(params, qualitythr=0.3)),))
+        np.testing.assert_array_equal(explicit.geometry.faces, again.geometry.faces)
+        self.assertEqual(len(explicit.geometry.faces), 200)
 
     def test_apply_filters_rejects_unloaded_mesh(self):
         unloaded = Mesh('/in/body.stl', '/out/body.stl', Kind.BINARY_STL,
                         4, True)
         with self.assertRaises(ValueError):
             meshlab.apply_filters(unloaded, ())
+
+
+class TestWithoutPyMeshLab(unittest.TestCase):
+    """The steps report a failure, not an exception, when PyMeshLab is
+    missing — including merge_close, whose parameter is a percentage."""
+
+    def test_every_step_returns_a_failure(self):
+        m = tetra()
+        with mock.patch.object(meshlab, '_pymeshlab', None, create=True):
+            for step_fn in (meshlab.step_clean_null_faces, meshlab.step_clean_merge_close,
+                            meshlab.step_clean_duplicate_faces, meshlab.step_clean_unreferenced,
+                            meshlab.step_orient):
+                with self.subTest(step_fn.__name__):
+                    ok, result, detail = step_fn(m)
+                    self.assertFalse(ok)
+                    self.assertIs(result, m)
 
 
 @needs_meshlab
@@ -125,7 +162,7 @@ class TestCleanAndOrientSteps(unittest.TestCase):
             TETRA_VERTS + doubled_verts,
             TETRA_FACES + [[a + 4, b + 4, c + 4] for a, b, c in TETRA_FACES])
 
-        combined = meshlab.apply_filters(doubled, CLEAN_FILTERS_COMBINED)
+        combined = meshlab.apply_filters(doubled, clean_filters_combined())
 
         m = doubled
         for step_fn in (meshlab.step_clean_null_faces,

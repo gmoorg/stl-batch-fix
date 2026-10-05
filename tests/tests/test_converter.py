@@ -182,8 +182,11 @@ class TestSkipping(ConverterCase):
 
     def test_the_decimated_folder_is_not_walked(self):
         """The prepare pass's decimated copies are intermediate input."""
+        from libs import decimator
         from libs.indicators import DECIMATED_DIRNAME
         _binary_stl(os.path.join(self.src, DECIMATED_DIRNAME, 'a.stl.900000.stl'))
+        _binary_stl(os.path.join(self.src, DECIMATED_DIRNAME,
+                                 f'b.stl.900000.{decimator.settings_tag()}.stl'))
         summary = self.run_prepare()
         self.assertEqual(self.seen, [])
         self.assertEqual(summary.scanned, 0)

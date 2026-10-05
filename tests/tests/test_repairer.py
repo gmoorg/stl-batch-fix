@@ -43,13 +43,14 @@ from libs.repairer import Result, Step, StepResult, repair
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
 TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
 
-#: Historical combined CLEAN call, retained to test the unwired tools.
-CLEAN_FILTERS_COMBINED: tuple[tuple[str, dict], ...] = (
-    ('meshing_remove_null_faces', {}),
-    ('meshing_merge_close_vertices', {'threshold': 0.1}),
-    ('meshing_remove_duplicate_faces', {}),
-    ('meshing_remove_unreferenced_vertices', {}),
-)
+def clean_filters_combined() -> tuple[tuple[str, dict], ...]:
+    """Historical combined CLEAN call, retained to test the unwired tools."""
+    return (
+        ('meshing_remove_null_faces', {}),
+        ('meshing_merge_close_vertices', {'threshold': meshlab.percent(0.1)}),
+        ('meshing_remove_duplicate_faces', {}),
+        ('meshing_remove_unreferenced_vertices', {}),
+    )
 
 #: Only tests that explicitly exercise these retained tools need them.
 HAVE_TOOLS = meshlab.is_available() and meshfix.is_available()
@@ -174,7 +175,7 @@ class TestContract(unittest.TestCase):
         at 200% volume. The other three are not optional."""
         self.assertEqual(self._clean_filter_calls(),
                          [('meshing_remove_null_faces', {}),
-                          ('meshing_merge_close_vertices', {'threshold': 0.1}),
+                          ('meshing_merge_close_vertices', {'threshold': meshlab.percent(0.1)}),
                           ('meshing_remove_duplicate_faces', {}),
                           ('meshing_remove_unreferenced_vertices', {})])
 
@@ -576,13 +577,13 @@ class TestWhyCleanIsAllFourFilters(unittest.TestCase):
                         "that is what makes the doubles case dangerous")
         alone = meshlab.apply_filters(
             doubled, (('meshing_merge_close_vertices',
-                       {'threshold': 0.1}),))
+                       {'threshold': meshlab.percent(0.1)}),))
         self.assertGreater(scanner.scan(alone).non_manifold, 0,
                            "merge alone should leave a branching surface")
 
     def test_the_full_set_repairs_what_merge_alone_breaks(self):
         """The same input through all four comes out as one tetrahedron."""
-        result = meshlab.apply_filters(self.doubled(), CLEAN_FILTERS_COMBINED)
+        result = meshlab.apply_filters(self.doubled(), clean_filters_combined())
         self.assertEqual(len(result.geometry.faces), len(TETRA_FACES))
         self.assertTrue(scanner.scan(result).is_clean)
 
@@ -596,10 +597,10 @@ class TestWhyCleanIsAllFourFilters(unittest.TestCase):
         weight.
         """
         merged = meshlab.apply_filters(
-            self.doubled(), CLEAN_FILTERS_COMBINED[:3])       # all but the last
+            self.doubled(), clean_filters_combined()[:3])       # all but the last
         orphans = (len(merged.geometry.verts)
                    - len(np.unique(merged.geometry.faces)))
-        full = meshlab.apply_filters(self.doubled(), CLEAN_FILTERS_COMBINED)
+        full = meshlab.apply_filters(self.doubled(), clean_filters_combined())
         after = (len(full.geometry.verts)
                  - len(np.unique(full.geometry.faces)))
         self.assertEqual(after, 0, "the last filter should leave no orphans")

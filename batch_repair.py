@@ -350,16 +350,19 @@ def decimated_path(input_root: str, source: str, max_faces: int) -> str:
     file the job loads, so a converted model is keyed by its
     `stl-exported/` copy and never shares a cache with a native STL bound
     for the same output (`stl-decimated/stl-exported/a.stl.N.stl` vs
-    `stl-decimated/a.stl.N.stl`). Sources are never modified, so a cache
-    never goes stale; a new `max_faces` gets its own file.
+    `stl-decimated/a.stl.N.T.stl`). A new `max_faces` gets its own file, and
+    so do new decimator settings: `T` is `decimator.settings_tag()`, so a
+    cache made with other parameters is never read (files from before the
+    tag, `a.stl.N.stl`, are left on disk unread). Sources are assumed
+    unmodified; a changed source or PyMeshLab version is not detected.
 
     The one clash left needs an input directory literally named like a cache
-    file (`a.stl.900000.stl/`); writing that cache then fails, and the job
+    file (`a.stl.900000.T.stl/`); writing that cache then fails, and the job
     fails with the reason rather than reading the wrong geometry.
     """
     rel = os.path.relpath(os.path.abspath(source), os.path.abspath(input_root))
     return os.path.join(os.path.abspath(input_root), DECIMATED_DIRNAME,
-                        f'{rel}.{int(max_faces)}.stl')
+                        f'{rel}.{int(max_faces)}.{decimator.settings_tag()}.stl')
 
 
 def expected_prepared_path(mesh: Mesh, cache_path: str, max_faces: int) -> str:

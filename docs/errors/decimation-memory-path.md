@@ -286,8 +286,10 @@ on the file path (option 2 above).
   inside the input tree the batch scans. The PLY cache should go to an
   intermediate folder beside it instead, e.g. `<input>.decimated/`; the
   exact name is to settle while planning.
-- **Existing cache.** The 15 GB of `stl-decimated/*.900000.stl` files become
-  unused. Rebuild, or read both formats during a transition.
+- **Existing cache.** Already superseded (2026-10-05): the cache name now
+  carries `decimator.settings_tag()`, so the ~15 GB of untagged
+  `stl-decimated/*.900000.stl` files, made with the default decimation, are
+  no longer read. They stay on disk until removed by hand.
 - **Sources at or under `max_faces`** still load through `mesh_io.load`
   (no decimation). Unchanged.
 

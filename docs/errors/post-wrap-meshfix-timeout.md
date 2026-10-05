@@ -204,6 +204,46 @@ Reproduce with
 (pass the `stl-decimated/...900000.stl` cache; `--save` keeps the decimated
 arrays for a separate MeshFix run).
 
+## Fix (implemented 2026-10-05): `planarquadric=True` in both passes
+
+Owner decision: `decimator.QUADRIC_PARAMS` passes every parameter of the
+quadric filter explicitly, PyMeshLab's defaults except `planarquadric=True`,
+for the initial and the post-reconstruction decimation (one implementation
+serves both). Passing every parameter also stops a call inheriting flags
+from an earlier one in the process. The decimation cache name carries
+`decimator.settings_tag()`, so caches made with the defaults are not reused.
+
+Aloy and Laura through the real repair path (`processor.process`, batch
+settings: skip_clean, min_shell_faces 100, 10 GB reconstruction budget),
+from their decimation caches:
+
+| Model | Result | Total | Winding | Decimation (NM after) | MeshFix |
+|---|---|---|---|---|---|
+| Aloy | PROCESS, 100.00 % volume | 70 s | 36 s | 10 s (0) | skipped: no defects |
+| Laura | PROCESS, 100.00 % volume | 596 s | 489 s | 55 s (1) | 35 s, clean |
+
+Both timed out at 3,604 s in the batch.
+
+Initial pass on sources, defaults vs `planarquadric`, each in its own
+process
+([tools/experiments/initial_decimation_compare.py](../../tools/experiments/initial_decimation_compare.py)).
+Criteria agreed before the run (diag = source diagonal): surface distance
+both ways, p99 within max(1.25 × defaults', 1e-4·diag) and max within
+max(1.25 × defaults', 1e-3·diag); component volume ratio within 0.005 of
+defaults'; every source shell of ≥ 100 faces and both tips along the longest
+axis within max(1.25 × defaults', 1e-3·diag). All pass on all three:
+
+| Source | Faces | Time defaults / planar | Peak | src→dec max | dec→src max | NM defaults / planar |
+|---|---|---|---|---|---|---|
+| Base_Pillar_R | 1.00M → 0.90M | 4.5 / 4.6 s | 0.50 / 0.50 GiB | 0.0488 / 0.0488 | 0.0137 / 0.0137 | 5 / 5 |
+| Bat Girl Merge | 4.83M → 0.90M | 66.6 / 67.6 s | 2.19 / 2.19 GiB | 0.211 / 0.211 | 0.0487 / 0.0217 | 42 / 45 |
+| left_sword (24 shells) | 2.08M → 0.90M | 24.9 / 23.8 s | 0.98 / 0.97 GiB | 0.046 / 0.065 | 0.0173 / 0.0176 | 36 / 45 |
+
+Scope: three source models; this does not prove the setting safe on every
+source. The shell check is sampled coverage, not proof that components stay
+topologically distinct. What triggers the defaults' thrown vertices is
+still not known.
+
 ## Not yet done
 
 - Reproduce MeshFix on the decimated output alone, to see whether it hangs or

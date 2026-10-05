@@ -1,10 +1,10 @@
 """Reduce a loaded mesh to a face budget with PyMeshLab quadric edge collapse.
 
-PyMeshLab's `meshing_decimation_quadric_edge_collapse` with its default
-parameters (owner decision 2026-10-04): fast_simplification destroyed thin
-features on reconstructed output, turned spheres oblong and stalled far
-above extreme targets; evidence in docs/refactor/reconstruction.md,
-"Decimation after reconstruction"."""
+PyMeshLab's `meshing_decimation_quadric_edge_collapse` (owner decision
+2026-10-04): fast_simplification destroyed thin features on reconstructed
+output, turned spheres oblong and stalled far above extreme targets;
+evidence in docs/refactor/reconstruction.md, "Decimation after
+reconstruction". Parameters: `QUADRIC_PARAMS`."""
 
 from __future__ import annotations
 
@@ -12,8 +12,50 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
+import hashlib
+
 from . import meshlab
 from .mesh_io import Geometry, Mesh, require_geometry
+
+#: Every parameter of the quadric filter except the face target, passed on
+#: each call. PyMeshLab keeps a filter's parameters from its previous call in
+#: the process, so one left out would silently take whatever an earlier call
+#: set (measured 2026-10-05: after a planarquadric call, a call passing only
+#: the target still behaved as planarquadric).
+#:
+#: All are PyMeshLab's defaults except `planarquadric=True` (owner decision
+#: 2026-10-05, both passes). With the defaults, decimating winding output
+#: threw vertices off the surface — up to 43 mm on Aloy, 412 mm on Laura —
+#: leaving thousands of non-manifold edges that MeshFix could not clear
+#: within the per-file timeout. planarquadric left none off the surface,
+#: 0–1 NM edges, at the same memory, faster, and kept the rod fixture's tip
+#: at least as well (docs/errors/post-wrap-meshfix-timeout.md).
+#:
+#: Changing anything here changes `settings_tag`, so cached decimations
+#: made with other settings are not reused.
+QUADRIC_PARAMS: dict = {
+    'targetperc': 0.0,
+    'qualitythr': 0.3,
+    'preserveboundary': False,
+    'boundaryweight': 1.0,
+    'preservenormal': False,
+    'preservetopology': False,
+    'optimalplacement': True,
+    'planarquadric': True,
+    'planarweight': 0.001,
+    'qualityweight': False,
+    'autoclean': True,
+    'selected': False,
+}
+
+
+def settings_tag() -> str:
+    """A short, stable name for `QUADRIC_PARAMS`: it changes whenever any
+    parameter does. It says nothing about the source file or the PyMeshLab
+    version."""
+    text = repr(sorted(QUADRIC_PARAMS.items()))
+    return hashlib.sha1(text.encode()).hexdigest()[:8]
+
 
 class Rung(Enum):
     """Whether the required decimator ran, was unnecessary, or failed."""
@@ -63,12 +105,10 @@ def available_rungs() -> tuple[Rung, ...]:
 
 
 def _decimate_meshlab(mesh: Mesh, max_faces: int) -> Geometry:
-    """PyMeshLab quadric edge collapse to `max_faces`, every other parameter
-    at its default (optimal vertex placement, quality threshold 0.3, no
-    topology/boundary constraints, autoclean)."""
+    """PyMeshLab quadric edge collapse to `max_faces` with `QUADRIC_PARAMS`."""
     return meshlab.apply_filters(
         mesh, (('meshing_decimation_quadric_edge_collapse',
-                {'targetfacenum': int(max_faces)}),)).geometry
+                {'targetfacenum': int(max_faces), **QUADRIC_PARAMS}),)).geometry
 
 
 def decimate(mesh: Mesh, max_faces: int) -> Result:

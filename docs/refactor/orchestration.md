@@ -29,8 +29,10 @@ created — then:
    - **Prepare** (`--mode prepare`), reserved by `jobmemory.prepare_bytes`
      (source triangles): load, run the initial decimation (step 1 below) and
      save it atomically to `<input>/stl-decimated/<job source path relative
-     to the input>.<max_faces>.stl` (a converted job is keyed by its
-     `stl-exported/` copy) — reused by later runs, rebuilt if unreadable,
+     to the input>.<max_faces>.<decimator.settings_tag()>.stl` (a converted
+     job is keyed by its `stl-exported/` copy; the tag changes with the
+     decimator's parameters, so a cache made with other settings is never
+     read) — reused by later runs, rebuilt if unreadable,
      not written when no decimation is needed; reload it, then compute
      `jobmemory.repair_bytes` on the reloaded mesh. A success is a handoff
      (`childresult.PREPARED`: the mesh to load and the estimate), not a job

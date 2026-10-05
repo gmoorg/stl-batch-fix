@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from . import scanner
@@ -53,23 +55,43 @@ def from_mesh(mesh) -> Geometry:
     )
 
 
+@dataclass(frozen=True)
+class Percent:
+    """A percentage parameter (of the bounding-box diagonal), for filters that
+    take one, such as merge_close's `threshold`. Plain Python, so building it
+    never needs PyMeshLab and two compare equal by value; `apply_filters`
+    turns it into PyMeshLab's own type."""
+    value: float
+
+
+def percent(value: float) -> Percent:
+    """A percentage parameter for `apply_filters`; see `Percent`."""
+    return Percent(float(value))
+
+
 def apply_filters(mesh: Mesh,
                   filters: tuple[tuple[str, dict], ...]) -> Mesh:
     """Apply PyMeshLab filters to a loaded mesh without using the filesystem.
 
-    Float parameters are interpreted as percentages because that is the
-    contract used by the filter policy in the repair pipeline.
+    Parameters are passed unchanged: a percentage must be wrapped with
+    `percent` (PyMeshLab rejects a plain float where it wants one), and a
+    plain float stays a plain float, as quadric decimation's `qualitythr`
+    needs. Floats used to be turned into percentages wholesale, which made
+    such parameters impossible to pass.
+
+    PyMeshLab keeps a filter's parameters from its previous call in the
+    process, even on a new MeshSet: a parameter left out is not reset to its
+    default. A caller whose result must not depend on earlier calls passes
+    every parameter (see `decimator.QUADRIC_PARAMS`).
     """
     require_geometry(mesh)
     ms = _pymeshlab.MeshSet()
     ms.add_mesh(to_mesh(mesh.geometry))
     for name, params in filters:
-        prepared = {
-            key: (_pymeshlab.PercentageValue(value)
-                  if isinstance(value, float) else value)
-            for key, value in params.items()
-        }
-        ms.apply_filter(name, **prepared)
+        ms.apply_filter(name, **{
+            key: (_pymeshlab.PercentageValue(value.value)
+                  if isinstance(value, Percent) else value)
+            for key, value in params.items()})
     return mesh.with_geometry(from_mesh(ms.current_mesh()))
 
 
@@ -96,7 +118,7 @@ def step_clean_merge_close(mesh: Mesh, config: object | None = None) -> tuple[bo
     """Weld vertices within 0.1% of the bbox diagonal. Uniform step: see
     `_step`. **Measured harmful** on Amidara base — see
     docs/refactor/modules.md's meshlab entry."""
-    return _step(mesh, 'meshing_merge_close_vertices', {'threshold': 0.1})
+    return _step(mesh, 'meshing_merge_close_vertices', {'threshold': percent(0.1)})
 
 
 def step_clean_duplicate_faces(mesh: Mesh, config: object | None = None) -> tuple[bool, Mesh, str]:

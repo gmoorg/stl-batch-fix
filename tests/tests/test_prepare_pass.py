@@ -39,9 +39,15 @@ class _Case(unittest.TestCase):
 
 
 class TestCachePath(_Case):
-    def test_target_is_in_the_name_under_the_input_tree(self):
+    def test_target_and_settings_are_in_the_name_under_the_input_tree(self):
+        tag = decimator.settings_tag()
         self.assertEqual(self.cache(900000),
-                         str(self.inp / 'stl-decimated' / 'sub' / 'ball.stl.900000.stl'))
+                         str(self.inp / 'stl-decimated' / 'sub' / f'ball.stl.900000.{tag}.stl'))
+
+    def test_new_decimator_settings_get_their_own_file(self):
+        before = self.cache(1000)
+        with mock.patch.dict(decimator.QUADRIC_PARAMS, planarquadric=False):
+            self.assertNotEqual(self.cache(1000), before)
 
     def test_each_target_has_its_own_file(self):
         self.assertNotEqual(self.cache(1000), self.cache(2000))
@@ -52,7 +58,8 @@ class TestCachePath(_Case):
         native = batch_repair.decimated_path('/in', '/in/a.stl', 9)
         converted = batch_repair.decimated_path('/in', '/in/stl-exported/a.stl', 9)
         self.assertNotEqual(native, converted)
-        self.assertEqual(converted, '/in/stl-decimated/stl-exported/a.stl.9.stl')
+        self.assertEqual(converted,
+                         f'/in/stl-decimated/stl-exported/a.stl.9.{decimator.settings_tag()}.stl')
 
 
 class TestPrepare(_Case):
@@ -80,6 +87,18 @@ class TestPrepare(_Case):
             result = self.prepare(1000)
         self.assertTrue(result.is_handoff, result.reason)
         self.assertTrue(any('cached' in step for step in result.steps), result.steps)
+
+    def test_a_cache_from_before_the_settings_tag_is_not_reused(self):
+        """Untagged files were decimated with other settings: the job
+        decimates again and writes the tagged file; the old one stays."""
+        old = Path(str(self.inp / 'stl-decimated' / 'sub' / 'ball.stl.1000.stl'))
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b'stale cache, must not be read')
+        result = self.prepare(1000)
+        self.assertTrue(result.is_handoff, result.reason)
+        self.assertEqual(result.prepared_path, self.cache(1000))
+        self.assertFalse(any('cached' in step for step in result.steps), result.steps)
+        self.assertEqual(old.read_bytes(), b'stale cache, must not be read')
 
     def test_an_unreadable_cache_is_rebuilt(self):
         Path(self.cache(1000)).parent.mkdir(parents=True)

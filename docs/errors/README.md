@@ -30,7 +30,7 @@ is also out of scope: too big to process on this machine.
 | Segfault in PyMeshLab initial decimation | 7 | **Fixed** (2026-10-05): `meshlab.to_mesh` drops index-degenerate faces before PyMeshLab | [decimation-segfault.md](decimation-segfault.md) |
 | Out-of-memory kill, nothing logged | 1 (Azula, 39.6M faces) | **Out of scope** (owner, 2026-10-05): too big for this machine, not pursued. Doc kept as reference | [oom-kill-silent.md](oom-kill-silent.md) |
 | Winding output non-manifold | 8 (6 models) | **Fixed** (2026-10-05): weld by the grid edge marching cubes reports (no rounding); NM edges pass on to repair. All 6 models rebuild with 0 NM | [winding-non-manifold.md](winding-non-manifold.md) |
-| MeshFix timeout after post-wrap decimation | 2 | **Cause narrowed**: default decimation throws vertices off the surface (up to 43 mm on Aloy, 412 mm on Laura). Not the winding slivers (causal test). `planarquadric=True` stops it on both models at default memory; decision pending. Also found: PyMeshLab keeps filter parameters between calls in a process | [post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md) |
+| MeshFix timeout after post-wrap decimation | 2 | **Fixed** (2026-10-05): decimation with `planarquadric=True` (both passes, every parameter explicit; PyMeshLab keeps filter parameters between calls). Aloy 70 s, Laura 596 s, both PROCESS | [post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md) |
 | Volume-loss rejection (`DESTROYED`) | 12 (10 `_SUP`, 2 real) | `_SUP`: struts dropped as debris (out of scope). `arm2`/`fabric3`: **guard measures open shells meaninglessly**, and the shells are pieces of one surface split at unwelded seams | [volume-loss-rejected.md](volume-loss-rejected.md) |
 | STL with non-finite coordinates | 2 (`_SUP`) | Our loader rejects them; PyMeshLab's importer silently drops NaN faces (measured) | [non-finite-coordinates.md](non-finite-coordinates.md) |
 
@@ -68,6 +68,7 @@ pipeline. Usage in each docstring. Some modes write to a path you pass
 | `winding_post_steps.py` | broken winding output through decimate / MeshFix |
 | `decimation_sliver_probe.py` | slivers in winding output; vertices thrown off the surface by decimation |
 | `sliver_cause_probe.py` | causal test (short edges collapsed before decimation); `planarquadric` (its `preservetopology` row inherited `planarquadric`, see the timeout doc) |
+| `initial_decimation_compare.py` | initial decimation, defaults vs `planarquadric`, against agreed shape criteria |
 | `placement_rod_check.py` | thin-feature accuracy with `optimalplacement` on/off |
 | `placement_memory_probe.py` | PyMeshLab decimation time and peak memory with `optimalplacement` on/off |
 | `shell_report.py` | per-shell volumes, origin dependence, seam/boundary coincidence |

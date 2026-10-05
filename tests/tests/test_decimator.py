@@ -337,6 +337,42 @@ out = dict(with_face, same=(with_face['verts'] == by_hand['verts']
         self.assertEqual(len(result.mesh.geometry.faces), 5)
 
 
+_CONTAMINATION = """
+import hashlib
+import numpy as np
+from libs import decimator, meshlab
+from libs.mesh_io import Geometry, Kind, Mesh
+from tests.tests.test_decimator import _sphere
+v, f = _sphere(subdivisions=4)
+m = Mesh('/s', '/s', Kind.BINARY_STL, len(f), True, None, Geometry(v, f))
+if {contaminate}:
+    meshlab.apply_filters(m, (('meshing_decimation_quadric_edge_collapse',
+                               dict(targetfacenum=3000, preservetopology=True,
+                                    optimalplacement=False, planarquadric=False)),))
+g = decimator.decimate(m, 1000).mesh.geometry
+print(hashlib.sha1(g.verts.tobytes() + g.faces.tobytes()).hexdigest())
+"""
+
+
+class TestEarlierCallsDoNotLeakIn(unittest.TestCase):
+    """PyMeshLab keeps a filter's parameters from its previous call in the
+    process. The decimator passes every parameter, so what ran before it in
+    the same process cannot change its result."""
+
+    def digest(self, contaminate):
+        import subprocess
+        import sys
+        proc = subprocess.run(
+            [sys.executable, '-c', _CONTAMINATION.format(contaminate=contaminate)],
+            cwd=_ROOT, env=dict(os.environ, PYTHONPATH=_ROOT),
+            capture_output=True, text=True, timeout=300)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        return proc.stdout.strip()
+
+    def test_a_previous_call_with_other_flags_changes_nothing(self):
+        self.assertEqual(self.digest(True), self.digest(False))
+
+
 class TestShapeIsKept(unittest.TestCase):
     """Outcomes, not internals: the decimated surface stays on the input
     shape. fast_simplification failed both of these (owner decision
