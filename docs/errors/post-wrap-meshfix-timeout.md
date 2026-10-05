@@ -155,6 +155,20 @@ The icosphere check (20,480 → 1,000) is uninformative for placement off:
 every kept vertex is an original one on the sphere, so the vertex-radius test
 passes trivially (extent ratio 1.0031 vs 1.0022 with defaults).
 
+Rerun after the grid-edge weld, with `planarquadric` (2026-10-05; each
+variant in its own process, `placement_rod_check.py VARIANT`). The rebuilt
+rod now has 452,652 faces, so the defaults' numbers moved slightly:
+
+| Setting | Rod tip | p99 | max | Vertices off rebuilt surface | NM / open | Icosphere radius dev / extent ratio |
+|---|---|---|---|---|---|---|
+| defaults | 0.005 | 0.023 | 0.116 | 0.048 | 1 / 0 | 0.453% / 1.0022 |
+| `optimalplacement=False` | 0.004 | 0.065 | 0.158 | 0.000 | 1 / 0 | 0.000% / 1.0031 |
+| `planarquadric=True` | 0.004 | 0.022 | 0.094 | 0.075 | 0 / 0 | 0.489% / 1.0016 |
+
+All keep the rod. `planarquadric` is as accurate as the defaults (same
+p99, lower max) and leaves no NM edge; its 0.075 off the rebuilt surface is
+ordinary optimal placement, within the 0.184 limit, not a thrown vertex.
+
 Speed and memory of PyMeshLab decimation with the flag on and off
 (2026-10-05,
 [tools/experiments/placement_memory_probe.py](../../tools/experiments/placement_memory_probe.py)):
