@@ -7,6 +7,7 @@ Read only the reference relevant to the task:
 - [TODO](refactor/TODO.md): open work and agreed future design.
 - [Tests](refactor/tests.md): commands, suite boundaries, regression evidence.
 - [Reconstruction](refactor/reconstruction.md): winding-number + marching-cubes experiment (alpha-wrap alternative).
+- [Errors](errors/README.md): failures collected from the full-suite run, one file per kind.
 
 [Archives](../../stl-batch-fix.old/archive/README.md) (outside the repository) retain dated reviews and historical evidence.
 All current actions belong in TODO. Avoid recursive documentation reads.

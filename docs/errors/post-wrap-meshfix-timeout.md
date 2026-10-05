@@ -1,0 +1,152 @@
+# MeshFix timeout after post-wrap decimation
+
+## Symptom
+
+Winding succeeds with a clean result (`nm=0, open=0`). The post-wrap
+decimation to 900k faces then introduces many non-manifold edges. The
+following `meshfix` step never finishes, the 3600 s `per_file_timeout`
+expires, and the parent writes a `.timeout.stl` marker.
+
+## Files
+
+| File | Winding out | Winding time | After decimate | NM after decimate | Last step started |
+|---|---|---|---|---|---|
+| Abe3D - Laura Kinney X-23/base.stl | 5,171,046 faces (blocks 2³) | 529 s | 899,998 | **6,968** | meshfix 19:01:55 |
+| CA3D/Alloy/1-9 scale Aloy NSFW CA3D/1-9 scale Aloy NSFW CA3D/Base_part_1.stl | 1,402,300 faces | 42 s | 900,000 | 534 | meshfix 17:16:53 |
+
+`batch.log` trail for `base.stl`:
+
+```
+winding   1/1  529.478  h=0.15, blocks=2^3, est=4.48 GB, 5171046 faces
+decimate  1/1   95.124  meshlab, 899998 faces out
+scan      1/1           nm=6968, open=0
+meshfix   1/1           899998 faces in        <- no end line
+```
+
+## Observations
+
+- Decimation adding a few NM edges is normal, and MeshFix normally clears
+  them in seconds. Here the counts are hundreds to thousands, much higher.
+- Both are heavy reductions: 5.2M to 0.9M (5.7×) for `base`, and 1.4M to 0.9M
+  for `Base_part_1`. Whether reduction ratio predicts the NM count is
+  **not measured**.
+- Both models are bases. Large flat areas with sharp edges may decimate badly,
+  but that is **unverified**.
+- The whole job burns the full hour, blocking a worker.
+
+## Where it times out (checked 2026-10-04)
+
+Neither model was split into many parts: both had **1 shell part**. The time
+goes into the single MeshFix call on that part: ~59 min for Aloy and ~49 min
+for Laura, after winding (529 s for Laura) and decimation.
+
+## Cause (Aloy reproduced 2026-10-04): decimation throws vertices off the surface
+
+Rebuilt from the decimation cache with the batch's settings (h = 0.15, 1
+block). Winding output is clean (1,402,300 faces, NM 0). The
+post-reconstruction decimation to 900k then produces a broken mesh. A second
+decimation with `optimalplacement=False` is a diagnostic only, not a
+proposed setting:
+
+| | Default decimation (batch) | `optimalplacement=False` |
+|---|---|---|
+| NM edges | **534** (474 shared by 4 faces, rest by 6–12) | 15 |
+| Duplicate-face groups (same 3 vertices) | **286** (602 faces) | 5 |
+| Vertices > 1·h from the winding surface | **292** | **0** |
+| Furthest vertex from the surface | **285·h ≈ 43 mm** | 0 |
+| Longest edge | 634·h ≈ 95 mm (model diagonal 121 mm) | 134·h ≈ 20 mm (on-surface, flat base) |
+
+The distance rows are point-to-triangle distances to the winding surface
+(`igl.point_mesh_squared_distance`, rechecked 2026-10-05). The first
+measurement used nearest-vertex distance, an upper bound; the recheck gives
+the same 292 vertices and the same 285.1·h maximum. Decimation ran
+(`rung=meshlab`) at the pipeline's target, the part's own 900,000 faces.
+
+417 of the 534 NM edges belong to duplicate faces. Optimal vertex placement
+moves 292 vertices up to 43 mm off the surface, so spikes span the model,
+with long slivers, duplicated faces and NM edges around them. MeshFix then
+runs for an hour on it. With placement off, every vertex stays on the
+surface and only 15 NM edges remain (the "a few NM after decimation is
+normal" case).
+
+**Likely trigger (not proven):** the winding output already holds 284 distinct
+edges shorter than 0.001·h (the first count, 568, counted each edge once per
+face) and 120 faces under 1e-6·h² area. These are the
+grid-node vertex clusters behind
+[winding-non-manifold.md](winding-non-manifold.md). For such slivers the
+quadric error matrix is near-singular, and the "optimal" position solved from
+it can land anywhere. If that's right, the winding weld/field fix also removes
+this trigger. Not yet shown: that the flung vertices originate at those
+clusters, or that the quadric matrix there is near-singular.
+
+**Possible silent damage:** a flung vertex is a spike in the printed part.
+Models where MeshFix finished in time may carry such spikes. Nothing in the
+pipeline checks for vertices leaving the surface (the volume guard wouldn't
+notice a thin spike). How many processed outputs are affected is unknown.
+
+Decimation settings are the owner's decision (PyMeshLab defaults for both
+passes, see the decimator decision). `optimalplacement=False` was measured
+only to identify the cause.
+
+Thin-feature check of `optimalplacement=False` (2026-10-04, the
+[reconstruction.md](../refactor/reconstruction.md) rod method;
+[tools/experiments/placement_rod_check.py](../../tools/experiments/placement_rod_check.py)):
+`sphere_with_rod` rebuilt at h = 0.092 (452,648 faces), decimated back to
+840 faces.
+
+| Setting | Rod tip | p99 | max | Vertices off rebuilt surface | NM / open |
+|---|---|---|---|---|---|
+| defaults (`optimalplacement=True`) | 0.004 | 0.014 | 0.101 | 0.044 | 0 / 0 |
+| `optimalplacement=False` | 0.009 | 0.060 | 0.128 | **0.000** | 0 / 0 |
+
+Both keep the rod (2·h limit = 0.184). With placement off, accuracy is
+somewhat worse (p99 ×4, max ×1.25, in line with the existing "original
+vertices kept" row: 0.004 / 0.055 / 0.174), but no vertex leaves the surface.
+The icosphere check (20,480 → 1,000) is uninformative for placement off:
+every kept vertex is an original one on the sphere, so the vertex-radius test
+passes trivially (extent ratio 1.0031 vs 1.0022 with defaults).
+
+Speed and memory of PyMeshLab decimation with the flag on and off
+(2026-10-05,
+[tools/experiments/placement_memory_probe.py](../../tools/experiments/placement_memory_probe.py)):
+each model rebuilt once with winding, then decimated in a separate process
+per setting from the same output, to the pipeline's target. Peak is the
+process VmHWM (GiB), about 0.15–0.26 GiB of it baseline before decimation.
+
+| Model (reduction) | `optimalplacement` | Time | Peak | RSS after | NM edges |
+|---|---|---|---|---|---|
+| Aloy (1.40M → 0.90M) | on (default) | 9.1–9.5 s | 0.68 | 0.40 | 534 |
+| | off | 13.6–13.8 s | 1.29 | 0.91 | 15 |
+| Laura (5.17M → 0.90M) | on (default) | 83 s | 2.50 | 1.39 | 6,968 |
+| | off | 76 s | 4.65 | 3.05 | 8 |
+
+Aloy ran twice per setting with identical results; Laura once. Placement off
+needs about 1.9× the peak memory on both. Its speed is mixed (slower on Aloy,
+slightly faster on Laura). Why it needs more memory is not known. "RSS after"
+may include memory the allocator kept rather than live data; not checked.
+Laura's rebuild matched the batch (5,171,046 faces, NM 0, 451 s), and its
+default decimation reproduced the batch's 6,968 NM edges. Its off-surface
+distances were not measured.
+
+Trade-off: defaults are more accurate on clean surfaces but fling vertices
+on near-singular slivers; placement off kept every vertex on the surface but
+is coarser and needs about twice the decimation memory. Vertices on the
+surface don't make it safe in general: collapses can still bridge cavities,
+drop thin parts, flip faces or self-intersect. Shape checked on the rod
+fixture and Aloy only; Laura only by NM count. If the winding
+weld/field fix removes the slivers, defaults may be safe again. So fix
+winding first, re-test Aloy, then decide on the setting.
+
+Reproduce with
+[tools/experiments/decimation_sliver_probe.py](../../tools/experiments/decimation_sliver_probe.py)
+(pass the `stl-decimated/...900000.stl` cache; `--save` keeps the decimated
+arrays for a separate MeshFix run).
+
+## Not yet done
+
+- Reproduce MeshFix on the decimated output alone, to see whether it hangs or
+  is just very slow.
+- Check whether decimation with topology preservation, or a smaller reduction
+  step, avoids the NM explosion.
+- Consider a MeshFix time bound or NM-count guard, so the step fails quickly
+  instead of consuming the per-file timeout.
