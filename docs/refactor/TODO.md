@@ -4,6 +4,24 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
 [pipeline](orchestration.md). Historical review evidence and test results are
 [archived](../../../stl-batch-fix.old/archive/README.md). Remove completed tasks; update the owning reference.
 
+## Priority (owner, 2026-10-05)
+
+Work in this order; details in
+[decimation-memory-path.md](../errors/decimation-memory-path.md).
+
+1. [ ] **PLY, narrow:** `read_ply` gains PyMeshLab's layout as a second
+   fixed dialect (`double` x/y/z, `list uchar int` faces); `write_ply` gains
+   float64 output. Not a general PLY reader (owner: narrow is enough).
+2. [ ] **Decimate from file:** sources over `max_faces` go
+   `load_new_mesh(source)` → quadric decimation (`decimator.QUADRIC_PARAMS`)
+   → PLY cache → `read_ply`. The cache moves out of the source folder
+   (e.g. `<input>.decimated/`). Settle while planning: NaN policy, weld
+   equivalence, the `UNDECIMATED` fallback, the old cache.
+3. [ ] **float64 `Geometry.verts`**, after 2, as its own plan.
+4. Everything else: volume guard on open shells
+   ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), recording
+   the crash signal, MeshFix time/NM guard, the NM-only fast path below.
+
 ## Reconstruction
 
 - [ ] Winding-number reconstruction (`libs/winding.py`, default part step
