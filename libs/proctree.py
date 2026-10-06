@@ -1,11 +1,64 @@
-"""Kill and confirm the death of a whole process group."""
+"""Kill and confirm the death of a whole process group; tie a child's life
+to its runner's."""
 
 from __future__ import annotations
 
+import ctypes
 import os
 import signal
 import subprocess
+import sys
 import time
+
+#: `prctl` option number from <linux/prctl.h>.
+_PR_SET_PDEATHSIG = 1
+
+#: Exit status of a child that finds its runner already gone at startup.
+RUNNER_GONE_EXIT = 75
+
+
+def exit_with_parent(parent_pid: int) -> None:
+    """Make the kernel SIGKILL this process when its runner dies.
+
+    Called first thing in a managed child, before any work, with the runner
+    PID the parent captured at spawn time. Without it a runner killed by
+    SIGKILL (`kill -9`, the OOM killer) leaves every running child going on
+    its own: no timeout, no memory admission, results nobody reads.
+
+    `PR_SET_PDEATHSIG` is not retroactive: a runner that died before this
+    call sends nothing, and the child has been reparented by then. So after
+    arming, a parent PID other than `parent_pid` means the runner is already
+    gone, and the process exits at once with `RUNNER_GONE_EXIT`. The PID
+    must come from the runner; read here, `os.getppid()` could already be
+    the reaper's.
+
+    SIGKILL, as `terminate_and_confirm` uses: in-process native code cannot
+    block it, and what it leaves behind (temp files, a pending marker) is
+    what a parent timeout kill leaves, which the next run already handles.
+
+    Limits (Linux only):
+    - The signal follows the spawning *thread*, not the runner process.
+      `_Runner._run_one` spawns and reaps on one worker thread, so it does
+      not fire early in normal operation. On an unconfirmed kill the worker
+      returns with the child alive; the child then dies when that worker
+      thread exits — intended.
+    - It reaches this process only, not its group. The default pipeline has
+      no descendants (Blender repair is not a default step).
+
+    Raises `OSError` when `prctl` fails, so a child never runs unprotected
+    without saying so.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, f'prctl(PR_SET_PDEATHSIG): {os.strerror(errno)}')
+    if os.getppid() != parent_pid:
+        try:
+            sys.stderr.write(f'runner {parent_pid} already gone; exiting\n')
+            sys.stderr.flush()
+        except Exception:                  # noqa: BLE001 — exiting is what matters
+            pass
+        os._exit(RUNNER_GONE_EXIT)
 
 
 def live_group_members(pgid: int) -> tuple[int, int]:

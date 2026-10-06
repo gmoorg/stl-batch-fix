@@ -12,6 +12,12 @@ The parent points this process's stdout and stderr at the model's own log
 (`libs.modellog`), so everything any tool prints lands there. This script
 adds a separator line before and after every step, and enables
 `faulthandler` so a native crash also leaves a Python traceback there.
+
+`--parent-pid` (always passed by the runner) ties this process's life to
+the runner's: it is armed before the heavy imports below, so a runner that
+dies, even by SIGKILL, takes this child with it
+(`libs.proctree.exit_with_parent`). Without the flag (a direct diagnostic
+run) nothing is armed.
 """
 
 import argparse
@@ -20,6 +26,42 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from libs import proctree                                                 # noqa: E402
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError('must be a positive integer') from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return value
+
+
+def _add_parent_pid(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument('--parent-pid', type=_positive_int, metavar='PID')
+
+
+def _arm_parent_death(argv) -> None:
+    """Arm `proctree.exit_with_parent` from `--parent-pid`, when present.
+
+    Runs before `import batch_repair` when this file is the script, so a
+    child whose runner is already gone exits before loading the libraries;
+    `main` repeats it for a direct `main(argv)` call (arming twice is
+    harmless). Reads only `--parent-pid` and leaves every other argument,
+    and every argument error, to `main`'s full parser.
+    """
+    early = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    _add_parent_pid(early)
+    args, _ = early.parse_known_args(argv)
+    if args.parent_pid is not None:
+        proctree.exit_with_parent(args.parent_pid)
+
+
+if __name__ == '__main__':
+    _arm_parent_death(sys.argv[1:])
+
 import batch_repair                                                       # noqa: E402
 from libs import childresult, modellog, splitter, steplog                 # noqa: E402
 
@@ -83,16 +125,6 @@ def _with_separators(step_logger: steplog.StepLogger) -> steplog.StepLogger:
     return log
 
 
-def _positive_int(text: str) -> int:
-    try:
-        value = int(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError('must be a positive integer') from None
-    if value <= 0:
-        raise argparse.ArgumentTypeError('must be a positive integer')
-    return value
-
-
 def _non_negative_int(text: str) -> int:
     try:
         value = int(text)
@@ -120,9 +152,12 @@ def main(argv=None) -> int:
     parser.add_argument('--mode', choices=('prepare', 'repair'), default='repair')
     parser.add_argument('--cache-path', metavar='PATH')
     parser.add_argument('--load-from', metavar='PATH')
+    _add_parent_pid(parser)
     args = parser.parse_args(argv)
     if args.mode == 'prepare' and not args.cache_path:
         parser.error('--mode prepare needs --cache-path')
+    if args.parent_pid is not None:
+        proctree.exit_with_parent(args.parent_pid)
     return run_one_file(args)
 
 

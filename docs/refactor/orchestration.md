@@ -78,6 +78,21 @@ jobs unresolved. Cancelled jobs receive no synthetic marker. Already committed
 outputs can remain, so rerun behavior still follows existing output indicators.
 Incomplete runs, diagnostics, and companion-copy failures return nonzero.
 
+A runner that dies without cleanup (`kill -9`, the OOM killer) takes its
+children with it: each child gets the runner's PID (`--parent-pid`) and,
+before loading any library, asks the kernel for SIGKILL on parent death
+(`proctree.exit_with_parent`, `PR_SET_PDEATHSIG`). A child whose runner is
+already gone by then exits at once with status 75. Before this (found
+2026-10-06), a SIGKILLed runner left its children running with no timeout
+or memory admission. Limits: the signal is tied to the worker thread that
+spawned the child, which reaps it before taking another job, so it never
+fires early; a child whose kill could not be confirmed dies when that worker
+exits. It reaches the child only, not its group: the default pipeline has
+no descendants, and Blender (intake conversion, run by the runner itself;
+`step_blender_repair`, not a default step) is not covered. Leftovers are
+those of a timeout kill (pending marker, temp files); the next run redoes
+the job.
+
 ## One mesh
 
 | Order | Invocation | Condition / parameters |

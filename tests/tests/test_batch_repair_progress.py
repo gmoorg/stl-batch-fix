@@ -19,9 +19,26 @@ from unittest import mock
 
 from libs import converter, steplog
 from libs.mesh_io import Kind, Mesh
+from libs.proctree import live_group_members
 import batch_repair
 from libs.runconfig import RunConfig
 from batch_repair import ProgressReporter, _Runner
+
+
+def _kill_processes_mentioning(text):
+    """SIGKILL every other process whose command line contains `text` — a
+    test's unique temp path — so a failed test leaks nothing, whether or
+    not it got as far as learning the PIDs."""
+    for name in os.listdir('/proc'):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        try:
+            with open(f'/proc/{name}/cmdline', 'rb') as f:
+                cmdline = f.read().decode('utf-8', 'replace')
+            if text in cmdline:
+                os.kill(int(name), signal.SIGKILL)
+        except OSError:
+            continue
 
 
 _TETRA = (
@@ -300,6 +317,7 @@ class TestReportingWriteFailure(unittest.TestCase):
             parser.add_argument('--mode', default='repair')
             parser.add_argument('--cache-path')
             parser.add_argument('--load-from')
+            parser.add_argument('--parent-pid')
             args = parser.parse_args()
             if args.mode == 'prepare':
                 import json as _json, os as _os
@@ -375,22 +393,33 @@ class TestReportingWriteFailure(unittest.TestCase):
 
 
 class TestSigkillRetention(unittest.TestCase):
-    """A forked child flushes N of M jobs' progress records, signals
+    """A forked runner flushes N of M jobs' progress records, signals
     readiness via an explicit file write made AFTER the Nth flush, then gets
-    SIGKILLed — proving progress.log retains exactly what was flushed."""
+    SIGKILLed — proving progress.log retains exactly what was flushed, and
+    that the child still running dies with the runner."""
 
     def test_progress_log_survives_sigkill_with_exact_record_counts(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
+        # Registered before anything is spawned (cleanups run in reverse, so
+        # this runs before the directory is removed): whatever readiness was
+        # or was not reached, nothing started from `root` outlives the test.
+        self.addCleanup(_kill_processes_mentioning, str(root))
         input_dir = root / 'in'
         output_dir = root / 'out'
         input_dir.mkdir()
         ready_marker = root / 'ready_after_2'
+        slow_pid_file = root / 'slow_child.pid'
 
         fake_child = root / 'fake_child.py'
-        fake_child.write_text(textwrap.dedent('''
-            import argparse, json, os, time
+        fake_child.write_text(
+            f'REPO = {str(Path(batch_repair.__file__).resolve().parent)!r}\n'
+            f'SLOW_PID_FILE = {str(slow_pid_file)!r}\n'
+            + textwrap.dedent('''
+            import argparse, json, os, sys, time
+            sys.path.insert(0, REPO)
+            from libs import proctree
             parser = argparse.ArgumentParser()
             parser.add_argument('--one-file', required=True)
             parser.add_argument('--destination', required=True)
@@ -402,7 +431,9 @@ class TestSigkillRetention(unittest.TestCase):
             parser.add_argument('--mode', default='repair')
             parser.add_argument('--cache-path')
             parser.add_argument('--load-from')
+            parser.add_argument('--parent-pid', type=int)
             args = parser.parse_args()
+            proctree.exit_with_parent(args.parent_pid)
             if args.mode == 'prepare':
                 import json as _json, os as _os
                 _r = {'path': args.one_file, 'category': 'prepared', 'indicator': None, 'stage': 'prepare',
@@ -414,6 +445,10 @@ class TestSigkillRetention(unittest.TestCase):
                 raise SystemExit(0)
             name = os.path.basename(args.one_file)
             if name.startswith('slow_'):
+                # Armed above; announce this PID only now.
+                with open(SLOW_PID_FILE + '.tmp', 'w') as f:
+                    f.write(str(os.getpid()))
+                os.replace(SLOW_PID_FILE + '.tmp', SLOW_PID_FILE)
                 time.sleep(600)
             result = {'path': args.one_file, 'category': 'published', 'indicator': 'PROCESS',
                      'stage': 'process', 'reason': 'ok', 'written_path': args.destination}
@@ -474,9 +509,20 @@ class TestSigkillRetention(unittest.TestCase):
         )
         proc = subprocess.Popen([sys.executable, str(helper)],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(proc.stdout.close)
         self._wait_for(ready_marker, timeout=20.0)
+        self._wait_for(slow_pid_file, timeout=20.0)
+        slow_pid = int(slow_pid_file.read_text())
         os.kill(proc.pid, signal.SIGKILL)
         proc.wait(timeout=10)
+
+        # The child still running dies with its runner: its whole group
+        # (it leads its own session) has no live member left.
+        deadline = time.monotonic() + 5.0
+        while live_group_members(slow_pid) != (0, 0) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(live_group_members(slow_pid), (0, 0),
+                         f'child {slow_pid} outlived its SIGKILLed runner')
 
         progress_path = output_dir / 'progress.log'
         self._wait_for(progress_path, timeout=5.0)
@@ -520,6 +566,7 @@ class TestRealRunProgressLog(unittest.TestCase):
             parser.add_argument('--mode', default='repair')
             parser.add_argument('--cache-path')
             parser.add_argument('--load-from')
+            parser.add_argument('--parent-pid')
             args = parser.parse_args()
             if args.mode == 'prepare':
                 import json as _json, os as _os

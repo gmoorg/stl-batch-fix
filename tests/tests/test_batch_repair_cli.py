@@ -269,6 +269,48 @@ class TestBatchRepairCLI(unittest.TestCase):
                 sys.executable, str(Path(batch_repair.__file__)), mesh, 0, '/tmp/result.json')
             proc.wait()
         self.assertIn('--managed-child', captured['argv'])
+        argv = captured['argv']
+        self.assertEqual(argv[argv.index('--parent-pid') + 1], str(os.getpid()))
+
+    def test_child_whose_runner_is_gone_exits_before_any_work(self):
+        """The real child script, told a runner PID that is not its parent
+        (as when the runner died before the child armed), exits at once
+        with `RUNNER_GONE_EXIT` and writes neither result nor output."""
+        from libs import proctree
+        script = Path(batch_repair_child.__file__).resolve()
+        source = self.root / 'a.stl'
+        source.write_bytes(b'')
+        destination = self.root / 'b.stl'
+        result_file = self.root / 'r.json'
+        not_my_parent = os.getppid()        # the child's parent is this process
+        result = subprocess.run(
+            [sys.executable, str(script), '--one-file', str(source),
+             '--destination', str(destination), '--result-file', str(result_file),
+             '--max-faces', '0', '--managed-child', '--parent-pid', str(not_my_parent)],
+            cwd=self.root, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, proctree.RUNNER_GONE_EXIT, result.stderr)
+        self.assertIn('already gone', result.stderr)
+        self.assertFalse(result_file.exists())
+        self.assertFalse(destination.exists())
+
+    def test_child_arms_only_when_given_a_runner_pid(self):
+        """A direct diagnostic run (no `--parent-pid`) arms nothing; a
+        runner-managed one arms with the given PID; a bad PID is refused."""
+        from libs import proctree
+        base = ['--one-file', 'a.stl', '--destination', 'b.stl',
+                '--result-file', 'r.json', '--max-faces', '0']
+        for extra, expected in (([], []), (['--parent-pid', '4242'], [mock.call(4242)])):
+            with self.subTest(extra=extra), \
+                    mock.patch.object(proctree, 'exit_with_parent') as arm, \
+                    mock.patch.object(batch_repair_child, 'run_one_file', return_value=0):
+                batch_repair_child.main(base + extra)
+                self.assertEqual(arm.call_args_list, expected)
+        for bad in ('0', '-1', 'x'):
+            with self.subTest(bad=bad), redirect_stderr(io.StringIO()), \
+                    mock.patch.object(proctree, 'exit_with_parent') as arm, \
+                    self.assertRaises(SystemExit):
+                batch_repair_child.main(base + ['--parent-pid', bad])
+            arm.assert_not_called()
 
     def test_managed_child_flag_present_reaches_processor_as_true(self):
         """`batch_repair_child.run_one_file` invoked with `--managed-child` present (simulating

@@ -565,10 +565,11 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
     child's stdout and stderr directly, so every tool's output lands there as
     it is written and survives the child crashing; None sends them to
     DEVNULL. Opening is the caller's job, so a log that cannot be opened is
-    never mistaken for a failed launch."""
+    never mistaken for a failed launch. `--parent-pid` carries this runner's
+    PID so the child dies with it (`proctree.exit_with_parent`)."""
     argv = [python, script, '--one-file', mesh.path, '--destination', mesh.destination,
            '--max-faces', str(max_faces), '--result-file', result_file,
-           '--managed-child']
+           '--managed-child', '--parent-pid', str(os.getpid())]
     if log_file:
         argv += ['--log-file', log_file]
     if skip_clean:

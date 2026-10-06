@@ -98,6 +98,7 @@ class TestRunSigint(unittest.TestCase):
             "p.add_argument('--mode', default='repair')\n"
             "p.add_argument('--cache-path')\n"
             "p.add_argument('--load-from')\n"
+            "p.add_argument('--parent-pid')\n"
             'args = p.parse_args()\n'
             "if args.mode == 'prepare':\n"
             "    import json as _json, os as _os\n"
@@ -222,6 +223,7 @@ class TestRunSigint(unittest.TestCase):
             "p.add_argument('--mode', default='repair')\n"
             "p.add_argument('--cache-path')\n"
             "p.add_argument('--load-from')\n"
+            "p.add_argument('--parent-pid')\n"
             'args = p.parse_args()\n'
             "if args.mode == 'prepare':\n"
             "    import json as _json, os as _os\n"

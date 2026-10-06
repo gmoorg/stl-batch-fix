@@ -43,6 +43,7 @@ FAKE_CHILD = textwrap.dedent('''
     parser.add_argument('--mode', default='repair')
     parser.add_argument('--cache-path')
     parser.add_argument('--load-from')
+    parser.add_argument('--parent-pid')
     args = parser.parse_args()
     if args.mode == 'prepare':
         import json as _json, os as _os, re as _re
@@ -267,6 +268,7 @@ class TestBasicDispatch(_PoolTestCase):
             parser.add_argument('--mode', default='repair')
             parser.add_argument('--cache-path')
             parser.add_argument('--load-from')
+            parser.add_argument('--parent-pid')
             args = parser.parse_args()
             if args.mode == 'prepare':
                 import json as _json, os as _os
@@ -325,6 +327,7 @@ class TestBasicDispatch(_PoolTestCase):
             parser.add_argument('--mode', default='repair')
             parser.add_argument('--cache-path')
             parser.add_argument('--load-from')
+            parser.add_argument('--parent-pid')
             args = parser.parse_args()
             if args.mode == 'prepare':
                 import json as _json, os as _os
@@ -545,6 +548,7 @@ class TestCancellation(_PoolTestCase):
             "p.add_argument('--mode', default='repair')\n"
             "p.add_argument('--cache-path')\n"
             "p.add_argument('--load-from')\n"
+            "p.add_argument('--parent-pid')\n"
             'args = p.parse_args()\n'
             "if args.mode == 'prepare':\n"
             "    import json as _json, os as _os\n"
