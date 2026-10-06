@@ -6,15 +6,18 @@ row-wise `np.unique(axis=0)` against one int64 key per edge.
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/scan_memory.py --make sphereR OUT.ply BLOCKS
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/scan_memory.py --agree
 
-VARIANT: `current` (scanner.scan), `key_unique` (np.unique on int64 keys,
-return_counts) or `key_sort` (keys sorted in place, run lengths from the
-boundaries). Peak = VmHWM reset after loading, minus RSS after loading: the
-memory the count itself adds. Run each variant in a fresh process.
+VARIANT: `current` (scanner.scan — since 2026-10-06 the key sort below),
+`row_unique` (scanner.scan before that: row-wise `np.unique(axis=0)` over the
+edge pairs), `key_unique` (np.unique on int64 keys, return_counts) or
+`key_sort` (keys sorted in place, run lengths from the boundaries). Peak =
+VmHWM reset after loading, minus RSS after loading: the memory the count
+itself adds. Run each variant in a fresh process.
 
 `--make` rebuilds an icosphere of radius R with `winding.reconstruct` and
 writes it as PLY (a realistic large output). `--agree` checks every variant
-returns the same open / non-manifold / degenerate counts as scanner.scan on
-meshes with open, non-manifold and degenerate edges and on random soups.
+returns the same Scan as `row_unique`, the independent reference, on meshes
+with open, non-manifold and degenerate edges, on sparse indices and on
+random soups.
 
 Read-only on inputs. Not wired into the pipeline.
 """
@@ -68,10 +71,19 @@ def counts_key_sort(faces, n):
     return np.diff(np.flatnonzero(change))
 
 
+def counts_row_unique(faces, n):
+    _, counts = np.unique(scanner.face_edges(faces), axis=0, return_counts=True)
+    return counts
+
+
 def scan_with(counter, mesh):
     faces = mesh.geometry.faces
-    n = len(mesh.geometry.verts)
-    assert n < 3_037_000_499, 'keys would overflow int64'
+    if len(faces) == 0:
+        return scanner.Scan(0, 0, 0, 0)
+    # Same index domain as scanner._edge_counts: radix from the faces.
+    assert faces.min() >= 0, 'negative face index'
+    n = int(faces.max()) + 1
+    assert n <= 3_037_000_499, 'keys would overflow int64'
     degenerate = int(scanner.degenerate_mask(faces).sum())
     counts = counter(faces, n)
     return scanner.Scan(open_edges=int((counts == 1).sum()),
@@ -80,6 +92,7 @@ def scan_with(counter, mesh):
 
 
 VARIANTS = {'current': scanner.scan,
+            'row_unique': lambda m: scan_with(counts_row_unique, m),
             'key_unique': lambda m: scan_with(counts_key_unique, m),
             'key_sort': lambda m: scan_with(counts_key_sort, m)}
 
@@ -109,6 +122,8 @@ def agree():
         'single triangle': mesh_of(v[:3], [[0, 1, 2]]),
         'single degenerate triangle (two corners)': mesh_of(v[:3], [[0, 0, 1]]),
         'single point triangle (one distinct edge)': mesh_of(v[:3], [[1, 1, 1]]),
+        # Keyed by the 4-vertex table length, (0, 5) and (1, 1) would collide.
+        'sparse indices past the vertex table': mesh_of(v[:4], [[0, 5, 9], [1, 1, 2]]),
     }
     for seed in range(5):
         nv = int(rng.integers(5, 200))
@@ -116,7 +131,7 @@ def agree():
                                                rng.integers(0, nv, (int(rng.integers(1, 2000)), 3)))
     ok = True
     for name, m in cases.items():
-        ref = scanner.scan(m)
+        ref = VARIANTS['row_unique'](m)
         for variant, fn in VARIANTS.items():
             got = fn(m)
             if got != ref:

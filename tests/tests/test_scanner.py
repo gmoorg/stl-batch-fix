@@ -123,6 +123,64 @@ class TestScan(unittest.TestCase):
         self.assertGreaterEqual(found.non_manifold, 0)   # a real answer
 
 
+def row_unique_scan(m):
+    """The scan as it was before int64 edge keys: a row-wise unique over the
+    sorted edge pairs. Kept as an independent reference for the key count."""
+    faces = m.geometry.faces
+    if len(faces) == 0:
+        return Scan(0, 0, 0, 0)
+    edges = np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]],
+                                    faces[:, [2, 0]]]), axis=1)
+    _, counts = np.unique(edges, axis=0, return_counts=True)
+    degenerate = int(((faces[:, 0] == faces[:, 1]) | (faces[:, 1] == faces[:, 2])
+                      | (faces[:, 0] == faces[:, 2])).sum())
+    return Scan(int((counts == 1).sum()), int((counts > 2).sum()),
+                len(faces), degenerate)
+
+
+class TestEdgeKeys(unittest.TestCase):
+    """scan counts edges by int64 key; it must count exactly what the
+    row-wise unique did, and refuse the indices its keys cannot represent."""
+
+    def test_it_agrees_with_the_row_unique_count_on_random_soups(self):
+        # Random index triples: open, non-manifold, duplicate, reversed and
+        # degenerate faces all occur.
+        rng = np.random.default_rng(0)
+        for _ in range(30):
+            nv = int(rng.integers(3, 60))
+            faces = rng.integers(0, nv, (int(rng.integers(1, 400)), 3))
+            m = mesh(rng.random((nv, 3)), faces)
+            self.assertEqual(scan(m), row_unique_scan(m))
+
+    def test_indices_beyond_the_vertex_table_do_not_collide(self):
+        # With the 4-vertex table length as the radix, (0, 5) and the self-edge
+        # (1, 1) would both key to 5. The radix comes from the faces instead.
+        m = mesh(TETRA_VERTS, [[0, 5, 9], [1, 1, 2]])
+        self.assertEqual(scan(m), row_unique_scan(m))
+        # Open: the first face's three edges and the self-edge (1, 1); the
+        # degenerate face walks (1, 2) twice.
+        self.assertEqual(scan(m).open_edges, 4)
+
+    def test_the_largest_keyable_index_is_counted(self):
+        m = mesh(TETRA_VERTS, [[0, 1, 3_037_000_498], [1, 0, 3_037_000_498]])
+        self.assertEqual(scan(m), Scan(0, 0, 2, 0))
+
+    def test_an_index_past_the_key_range_raises(self):
+        with self.assertRaises(ValueError):
+            scan(mesh(TETRA_VERTS, [[0, 1, 3_037_000_499]]))
+
+    def test_a_negative_index_raises(self):
+        with self.assertRaises(ValueError):
+            scan(mesh(TETRA_VERTS, [[0, 1, -1]]))
+
+    def test_the_faces_are_not_modified(self):
+        faces = np.array([[3, 1, 2], [2, 1, 0], [0, 0, 1]], dtype=np.int64)
+        m = mesh(TETRA_VERTS, faces)
+        before = m.geometry.faces.copy()
+        scan(m)
+        np.testing.assert_array_equal(m.geometry.faces, before)
+
+
 class TestOpenLoops(unittest.TestCase):
 
     def test_one_missing_face_makes_one_loop(self):

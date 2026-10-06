@@ -290,17 +290,20 @@ Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
   | sphere r 132 (5,120 in, 29.2 M out), 5³ | 8.66 | 2.58 | 4.42 | 6.14 | **8.67** |
   | sphere r 132, 8³ | 8.54 | 2.02 | 2.47 | 6.07 | **8.54** |
 
-  An input-dominated model peaks in the block field; a large output peaks
+  An input-dominated model peaks in the block field; a large output peaked
   in `_check`'s `scanner.scan`, which runs on the whole result with the
-  block lists still alive. The scan's row-wise `np.unique(axis=0)` adds
+  block lists still alive. The scan's row-wise `np.unique(axis=0)` added
   ~197 B and ~3.7 µs per face (29.2 M faces: +5.74 GB, 107 s; winding
-  calls it twice). One int64 key per edge (low·n + high), sorted in place,
-  gives identical counts with +34 B per face (+0.99 GB, 2.3 s;
-  `tools/experiments/scan_memory.py`). Fixing the scan comes first; the
-  weld (~6.1 GB on sphere r 132) is then the predicted peak, and a cheaper
-  weld or streaming each block's piece out is the next lever — to be
-  measured then, not assumed. The winding-number calls take 53 of 100 s on
-  join_complication at 2³ (octree rebuilt per call).
+  calls it twice). **Fixed 2026-10-06:** `scanner.scan` now counts one
+  int64 key per edge (low·n + high, n = largest face index + 1), sorted in
+  place: identical counts, +34 B per face (sphere r 132: +0.99 GB, 2.3 s,
+  re-measured on the module itself with `tools/experiments/scan_memory.py`,
+  which also checks agreement against the old row-wise count). The whole
+  reconstruction's peak was not re-measured. The weld (~6.1 GB on sphere
+  r 132) is the predicted new peak; a cheaper weld or streaming each
+  block's piece out is the next lever — to be measured, not assumed. The
+  winding-number calls take 53 of 100 s on join_complication at 2³ (octree
+  rebuilt per call).
 - **Band mask cost** — bucket the samples by block once instead of scanning
   them per block.
 - **Grid spacing** — 0.15 mm matched alpha-wrap's quality on Mirko by eye;
