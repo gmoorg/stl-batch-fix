@@ -20,8 +20,9 @@
 >   source copy), and so does an ASCII STL facet without exactly three
 >   vertices — a new marker path, since an intake conversion failure is
 >   only a diagnostic today.
-> - **Open:** keep writing exports to `<input>/<export dir>` or load
->   OBJ/ASCII directly in `mesh_io`.
+>   Exports stay as today: our converter replaces Blender only, writing
+>   the same `<input>/<export dir>` copy that later runs reuse.
+> - **Open:** none recorded; raise new ones one at a time.
 > - **Code to read:** `mesh_io.kind` / `probe` / `Mesh.needs_conversion`
 >   (OBJ and ASCII STL get no triangle count until converted);
 >   `converter.prepare` (`pending` list, `convert_one`, `_conversion_failure`);

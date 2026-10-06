@@ -94,9 +94,11 @@ parent's diagnosis ([orchestration.md](orchestration.md) step 5).
   is split along whichever diagonal keeps both triangles inside it (the
   one through the reflex corner when concave; either when convex).
 
-  Open decisions, one at a time: whether to keep writing exports to
-  `<input>/<export dir>` or load OBJ/ASCII directly in `mesh_io` (then
-  probe needs a triangle count without a full parse).
+  Decided (owner, 2026-10-06): keep the export copy. Our converter replaces
+  Blender only; it writes the binary STL to the same
+  `<input>/<export dir>` path (`indicators.export_path`) through a
+  `.partial` and rename, and later runs reuse it as today. Probe, load
+  and the reuse check stay unchanged.
 
   Scope to cover: ASCII STL with several `solid` blocks, odd whitespace and
   case, a truncated file; OBJ `f` forms `v`, `v/vt`, `v//vn`, `v/vt/vn`,
