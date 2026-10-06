@@ -47,6 +47,12 @@ class TestDeclaredDefects(unittest.TestCase):
                     self.assertEqual(len(scanner.shells(m)), d['shells'])
                 if 'volume_sign' in d:
                     self.assertEqual(np.sign(ds.signed_volume(fx.verts, fx.faces)), d['volume_sign'])
+                if 'nm_edges' in d:
+                    self.assertEqual(s.non_manifold, d['nm_edges'], s)
+                if 'open_edges' in d:
+                    self.assertEqual(s.open_edges, d['open_edges'], s)
+                if 'seam_edges' in d:
+                    self.assertEqual(seams, d['seam_edges'])
 
     def test_every_fixture_declares_at_least_its_shell_count(self):
         for name, fx in FIXTURES.items():

@@ -191,6 +191,36 @@ def build_fin(v, f):
     return v, np.vstack([f, [[a, b, len(v) - 1]]])
 
 
+def build_closed_fins(v, f, n=20, h=1.5, seed=0):
+    """`n` two-sided flaps, one per distinct edge of a southern face
+    (centroid z < -3, clear of `build_seam`'s cap and the `hole` band).
+
+    Each fin is two back-to-back triangles (a,b,p),(b,a,p), p the edge
+    midpoint pushed `h` out along its radius. The sphere edge then has four
+    faces — exactly one NM edge per fin — while a-p and b-p are each shared
+    by the two fin faces in opposite directions: no open edge, no seam.
+    NM-only as the scanner sees it; the fin faces themselves overlap.
+    Returns the mesh and the fin tips (for vanish boxes).
+    """
+    south = np.flatnonzero(v[f].mean(axis=1)[:, 2] < -3.0)
+    verts, faces, tips, used = v.tolist(), f.tolist(), [], set()
+    for t in np.random.default_rng(seed).permutation(south):
+        a, b = (int(i) for i in f[t][:2])
+        if frozenset((a, b)) in used:
+            continue
+        used.add(frozenset((a, b)))
+        mid = (v[a].astype(np.float64) + v[b]) / 2.0
+        tips.append(mid + mid / np.linalg.norm(mid) * h)
+        verts.append(tips[-1].tolist())
+        p = len(verts) - 1
+        faces += [[a, b, p], [b, a, p]]
+        if len(used) == n:
+            break
+    tips = np.array(tips, np.float32)
+    assert len(tips) == n and len(np.unique(tips, axis=0)) == n
+    return np.array(verts, np.float32), np.array(faces, np.int64), tips
+
+
 def build_degenerate(v, f):
     """A zero-area face: two identical corners. PyMeshFix fixes it exactly."""
     return v, np.vstack([f, [[f[100][0], f[100][1], f[100][1]]]])
@@ -442,6 +472,22 @@ def fixtures() -> dict:
 
     holed = np.delete(f, np.arange(370, 382), axis=0)
     add('hole', v, holed, one, dict(open=True, non_manifold=False, shells=1), '12 equatorial faces removed')
+
+    # Closed fins: NM edges as the only scanned defect, then with one more.
+    def fin_boxes(tips):
+        return tuple((t - 0.3, t + 0.3) for t in tips.astype(np.float64))
+    fv, ff, tips = build_closed_fins(v, f)
+    add('nm_only', fv, ff, one, dict(open=False, non_manifold=True, seams=False, degenerate=False,
+                                     shells=1, volume_sign=1, nm_edges=20, open_edges=0, seam_edges=0),
+        '20 closed fins (1 NM edge each)', vanish=fin_boxes(tips))
+    sv, sf, tips = build_closed_fins(*build_seam(v, f))
+    add('nm_seam', sv, sf, one, dict(open=False, non_manifold=True, seams=True, degenerate=False,
+                                     shells=1, nm_edges=20, open_edges=0),
+        '20 closed fins + reversed northern cap', vanish=fin_boxes(tips))
+    hv, hf, tips = build_closed_fins(v, holed)
+    add('nm_hole', hv, hf, one, dict(open=True, non_manifold=True, seams=False, degenerate=False,
+                                     shells=1, nm_edges=20, seam_edges=0),
+        '20 closed fins + 12 equatorial faces removed', vanish=fin_boxes(tips))
     shifted = (v + np.float32([12, 0, 0])).astype(np.float32)
     add('overlapping_shells', *_with(v, f, (shifted, f)), (clean, (shifted, f)),
         dict(open=False, non_manifold=False, shells=2, overlap=True), 'two spheres, centres 12 apart (r 10): union')

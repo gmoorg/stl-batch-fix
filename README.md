@@ -47,7 +47,8 @@ Each part is rebuilt as a solid by winding-number reconstruction
 (`libs/winding.py`; alpha-wrap stays available but is no longer the default);
 `reconstruct_memory_budget_gb` (default 10) sizes it per part and worker.
 `skip_clean = true` (opt-in, not yet validated) skips repair for an
-already-clean decimated model, or otherwise for its individual clean parts.
+already-clean decimated model, or otherwise for its individual clean parts;
+a part whose only defect is non-manifold edges tries MeshFix alone first.
 
 A separate read-only checker predicts base-layer print risks in a Bambu
 Studio 3MF (`tools/project_python.sh check_3mf.py plate.3mf [--png DIR]`);

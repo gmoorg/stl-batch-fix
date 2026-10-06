@@ -35,10 +35,11 @@ from unittest import mock
 
 import numpy as np
 
-from libs import decimator, execstep, meshfix, meshlab, pipeconfig, repairer, scanner, welder, winding
+from libs import decimator, execstep, meshfix, meshlab, pipeconfig, repairer, scanner, splitter, welder, winding
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.pipeconfig import StepConfig
 from libs.repairer import Result, Step, StepResult, repair
+from tests.tests import defect_spheres as ds
 
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
 TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
@@ -911,6 +912,12 @@ class TestIsAlreadyClean(unittest.TestCase):
         m = mesh(verts, faces)
         self.assertFalse(repairer.is_already_clean(m))
 
+    def test_non_manifold_edges_alone_are_not_clean(self):
+        """`nm_only`: NM edges with no open edge and no seam — the case the
+        proposed NM-only fast path would route (docs/refactor/TODO.md)."""
+        fx = ds.fixtures()['nm_only']
+        self.assertFalse(repairer.is_already_clean(mesh(fx.verts, fx.faces)))
+
     def test_inverted_winding_is_not_clean_even_though_scan_is_clean(self):
         """The exact case `Scan.is_clean` alone misses — one face reversed
         relative to its neighbors is still open_edges=0, non_manifold=0
@@ -1009,11 +1016,181 @@ class TestCleanGates(unittest.TestCase):
 
     def test_model_skip_keeps_the_non_finite_guard(self):
         bad = mesh([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, np.nan]], TETRA_FACES)
-        with mock.patch.object(repairer, 'is_already_clean', return_value=True):
+        with mock.patch.object(repairer, '_is_clean', return_value=True):
             result, recorder, _ = self._run(bad, skip_clean=True)
         self.assertFalse(result.ok)
         self.assertIn('NaN or infinite', result.problem)
         self.assertEqual(recorder.seen, [])
+
+
+def fixture_mesh(name):
+    fx = ds.fixtures()[name]
+    return mesh(fx.verts, fx.faces), fx
+
+
+class TestNmFastPath(unittest.TestCase):
+    """`skip_clean`'s NM-only fast path: a part whose only scanned defect is
+    NM edges gets MeshFix alone; a result that is not accepted, or any error,
+    runs the part sequence on the ORIGINAL part instead (never a failure).
+    The fixtures are 2.5% NM per face, far over the production limit, so the
+    route tests lift it; the limit tests set their own."""
+
+    DEFAULT_MAX_PERCENT = repairer.NM_FAST_PATH_MAX_PERCENT
+
+    def setUp(self):
+        patcher = mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', 100.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, m, part_steps, **flags):
+        events = []
+
+        def logger(source_name, event, step, part, duration, detail):
+            events.append((step, detail))
+
+        result = repair(m, min_shell_faces=0, part_steps=part_steps,
+                        step_logger=logger, source_name='/x.stl', **flags)
+        return result, [detail for step, detail in events if step == 'nm_fast_path']
+
+    def _assert_fell_back(self, m, **flags):
+        """A recording sequence ran once, on the original part's geometry."""
+        recorder = Recorder()
+        result, log = self._run(m, (('recorder', recorder),), skip_clean=True, **flags)
+        self.assertTrue(result.ok, result.problem)
+        self.assertEqual(len(recorder.seen), 1)
+        np.testing.assert_array_equal(recorder.seen[0].geometry.verts, m.geometry.verts)
+        np.testing.assert_array_equal(recorder.seen[0].geometry.faces, m.geometry.faces)
+        return log
+
+    def _assert_kept_own_surface(self, result, m, fx):
+        self.assertTrue(result.ok, result.problem)
+        out = result.mesh
+        scan = scanner.scan(out)
+        self.assertEqual((scan.non_manifold, scan.open_edges, scanner.winding_seams(out)[0]), (0, 0, 0))
+        for lo, hi in fx.vanish_boxes:
+            self.assertFalse(np.all((out.geometry.verts >= lo) & (out.geometry.verts <= hi), axis=1).any())
+        # Every output vertex is a retained input vertex (MeshFix moves them
+        # ~1e-6; a rebuilt surface moves them ~0.1): no rebuilt surface.
+        distance, _ = repairer.cKDTree(m.geometry.verts).query(out.geometry.verts)
+        self.assertLess(distance.max(), repairer.LOST_VERTEX_TOLERANCE)
+        low, high = repairer.NM_FAST_PATH_VOLUME_BAND
+        self.assertTrue(low <= scanner.component_volume(out) / scanner.component_volume(m) <= high)
+
+    def test_nm_only_part_gets_meshfix_alone(self):
+        m, fx = fixture_mesh('nm_only')
+        result, log = self._run(m, None, skip_clean=True)
+        self._assert_kept_own_surface(result, m, fx)
+        self.assertEqual(len(log), 1)
+        self.assertTrue(log[0].startswith('NM 20 in 800 faces (2.500%): kept'), log)
+
+    def test_it_takes_precedence_over_a_custom_sequence(self):
+        m, fx = fixture_mesh('nm_only')
+        result, _ = self._run(m, (), skip_clean=True)
+        self._assert_kept_own_surface(result, m, fx)
+
+    def test_off_without_skip_clean(self):
+        m, _ = fixture_mesh('nm_only')
+        result, log = self._run(m, ())
+        self.assertTrue(result.ok, result.problem)
+        np.testing.assert_array_equal(result.mesh.geometry.faces, m.geometry.faces)
+        self.assertEqual(log, [])
+
+    def test_other_defects_are_not_eligible(self):
+        for name in ('nm_seam', 'nm_hole'):
+            with self.subTest(name):
+                m, _ = fixture_mesh(name)
+                self.assertEqual(self._assert_fell_back(m), [])
+
+    def test_a_degenerate_face_is_not_eligible(self):
+        m, _ = fixture_mesh('nm_only')
+        f = m.geometry.faces
+        # [a,b,b] twice: zero-area, edge-connected (one shell), and its b-b
+        # self-edge is shared by the pair, so no open edge appears.
+        a, b = f[0][0], f[0][1]
+        m = mesh(m.geometry.verts, np.vstack([f, [[a, b, b], [a, b, b]]]))
+        scan = scanner.scan(m)
+        self.assertTrue(scan.degenerate > 0 and scan.non_manifold > 0 and scan.open_edges == 0
+                        and len(splitter.by_shells(m, min_faces=0)) == 1, f'fixture assumption: {scan}')
+        self.assertEqual(self._assert_fell_back(m), [])
+
+    def test_at_the_limit_is_tried_over_it_is_not(self):
+        m, fx = fixture_mesh('nm_only')
+        with mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', 2.5):
+            self._assert_kept_own_surface(self._run(m, (), skip_clean=True)[0], m, fx)
+        with mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', 2.4):
+            log = self._assert_fell_back(m)
+        self.assertEqual(log, ['NM 20 in 800 faces (2.500%) over limit 2.400%: not tried'])
+
+    def test_the_limit_is_a_share_of_the_part_faces(self):
+        """Same NM count, different sizes: only the larger part is tried."""
+        small = mesh(*ds.build_closed_fins(*ds.sphere(seg=20))[:2])
+        large = mesh(*ds.build_closed_fins(*ds.sphere(seg=40))[:2])
+        for m in (small, large):
+            scan = scanner.scan(m)
+            self.assertEqual((scan.non_manifold, scan.open_edges, scan.degenerate,
+                              scanner.winding_seams(m)[0]), (20, 0, 0, 0), 'fixture assumption')
+        self.assertEqual(len(small.geometry.faces), 800)
+        self.assertGreater(len(large.geometry.faces), 2000)
+        with mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', 1.0), \
+                mock.patch.object(repairer, '_nm_fast_path', return_value=(None, 'stub')):
+            self.assertIn('over limit', self._assert_fell_back(small)[0])
+            self.assertIn('fallback: stub', self._assert_fell_back(large)[0])
+
+    def test_the_default_limit_excludes_the_dense_fixture(self):
+        m, _ = fixture_mesh('nm_only')
+        with mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', self.DEFAULT_MAX_PERCENT):
+            log = self._assert_fell_back(m)
+        self.assertEqual(log, ['NM 20 in 800 faces (2.500%) over limit 0.050%: not tried'])
+
+    def test_zero_input_volume_is_not_tried(self):
+        # Two closed fins on one edge, nothing else: 1 NM edge, encloses nothing.
+        m = mesh([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                 [[0, 1, 2], [1, 0, 2], [0, 1, 3], [1, 0, 3]])
+        self.assertEqual(scanner.scan(m).non_manifold, 1, 'fixture assumption')
+        log = self._assert_fell_back(m)
+        self.assertIn('fallback: input volume', log[0])
+
+    def test_a_rejected_meshfix_result_falls_back(self):
+        m, _ = fixture_mesh('nm_only')
+        nan = np.array(m.geometry.verts)
+        nan[0, 0] = np.nan
+        candidates = {
+            'nm left': m,
+            'open left': fixture_mesh('hole')[0],
+            'seams left': fixture_mesh('seam')[0],
+            'non-finite': mesh(nan, m.geometry.faces),
+        }
+        for label, candidate in candidates.items():
+            with self.subTest(label), mock.patch.object(
+                    meshfix, 'repair', return_value=meshfix.Result(candidate, True, None, 0.0)):
+                log = self._assert_fell_back(m)
+                self.assertIn('fallback:', log[0])
+
+    def test_a_failed_meshfix_falls_back(self):
+        m, _ = fixture_mesh('nm_only')
+        failed = meshfix.Result(m, False, 'pymeshfix produced an empty mesh', 0.0)
+        with mock.patch.object(meshfix, 'repair', return_value=failed):
+            log = self._assert_fell_back(m)
+        self.assertIn('fallback:', log[0])
+        self.assertIn('empty mesh', log[0])
+
+    def test_an_error_during_the_attempt_falls_back(self):
+        m, _ = fixture_mesh('nm_only')
+        with mock.patch.object(repairer, '_nm_fast_path', side_effect=RuntimeError('boom')):
+            log = self._assert_fell_back(m)
+        self.assertEqual(log, ['NM 20 in 800 faces (2.500%): fallback: RuntimeError: boom'])
+
+    def test_volume_band_bounds(self):
+        """nm_only keeps ~98.95% of its volume (coarse sphere, flat refills)."""
+        m, fx = fixture_mesh('nm_only')
+        for band, accepted in (((0.985, 0.99), True),    # inside, near the top
+                               ((0.995, 1.02), False),   # below the lower bound
+                               ((0.97, 0.985), False)):  # above the upper bound
+            with self.subTest(band), mock.patch.object(repairer, 'NM_FAST_PATH_VOLUME_BAND', band):
+                if accepted:
+                    self._assert_kept_own_surface(self._run(m, (), skip_clean=True)[0], m, fx)
+                else:
+                    self.assertIn('outside', self._assert_fell_back(m)[0])
 
 
 class TestPartDecimation(unittest.TestCase):

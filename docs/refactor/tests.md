@@ -29,7 +29,7 @@ High-priority probes are `small_valid_shell.stl`, `opposite_volume_shells.stl`, 
 ## Defect-sphere fixtures
 
 `tests/tests/defect_spheres.py` is the single source of defect meshes with a
-known true shape (`fixtures()`, 19 fixtures). The single-defect probe
+known true shape (`fixtures()`, 22 fixtures). The single-defect probe
 builders moved there from `tools/make_probe_meshes.py`, which re-exports
 them; committed `tests/probes/sphere_*.stl` stay byte-reproducible (tested).
 
@@ -41,7 +41,10 @@ sags ~0.12 mm), with `truth_volume` (union volume, computed numerically) and
 `vanish_boxes` that must end up empty (debris).
 
 Fixtures: control `correct`; winding `inverted`, `inverted_third`, `seam`;
-open edges `tjunction`, `tjunction_many`, `hole`; non-manifold `fin`;
+open edges `tjunction`, `tjunction_many`, `hole`; non-manifold `fin`
+(also open), and NM as the only scanned defect `nm_only` (20 closed fins:
+two back-to-back triangles per sphere edge, exactly 20 NM edges, 0 open,
+0 seams), `nm_seam` (+ reversed cap), `nm_hole` (+ 12 faces removed);
 `degenerate`; duplicated `doubles`; multi-shell `two_shells`,
 `shell_inverted`, `overlapping_shells` (union), `touching_shells` (boxes
 sharing a plane); debris `debris_sheet` (open), `debris_speck` (closed,

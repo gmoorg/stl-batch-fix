@@ -53,6 +53,10 @@ max_faces = 900000
 #     alpha-wrap, part steps and merge; it is still judged and written.
 #   * Otherwise each clean split part is merged as is, and only the defective
 #     parts are repaired.
+#   * A part whose only defect is non-manifold edges (at most 0.05 per 100
+#     faces of the part) is first given to MeshFix alone, keeping its own
+#     surface; if the result is not clean or its volume moved by more than
+#     2%, the part is repaired as usual.
 # NOT YET VALIDATED on real models. A model that is consistently wound but
 # inside-out, or self-intersecting, passes the check and is not repaired.
 # Default: false

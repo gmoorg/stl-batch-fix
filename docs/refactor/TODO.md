@@ -25,8 +25,24 @@ parent's diagnosis ([orchestration.md](orchestration.md) step 5).
    models (owner, 2026-10-05: wanted, on in the owner's config). Confirm
    Amidara base (`/mnt/sda2/Amidara_Blustmorn_1-12_base.stl`) fails it
    and that gated output slices and prints. Keep it off by default until
-   then. Together with it: the NM-only fast path
-   (Reconstruction below), which widens the same gate.
+   then. The NM-only fast path (Reconstruction below) widens the same
+   gate and is tested with it.
+   - [ ] Run the gated sample outputs through an online repair/analysis
+     tool and note whether it finds anything the scan cannot see
+     (self-intersections, overlapping or inverted shells). Sample re-run
+     on HEAD 2026-10-05 (`skip_clean = true`, `max_faces = 900000`),
+     outputs under `/mnt/sda2/STL/GateSample/out/` (sources in `in/`):
+     - whole model skipped: `zoro/NomNom Zoro/Zoro_STL/178mm_split/r_blade.stl`,
+       `MonHun_duo/Hinoa_Minoto_Bikini/Minoto_Bikini_Right_leg.stl`,
+       `Fae/Aine  Noon Fae/Aine__Noon_Fae_-_STL/wingR.stl`,
+       `CA3D/1-6Scale Fantasy Dragon/Fantasy/Dragon_1_Part_5.stl`,
+       `Peach Figure - Scooby-Doo - Velma Dinkley/VELMA_NSFW_PEACHFIGURE/Velma nsfw/Legs_nsfw_v1.stl`
+       (decimated to 900k, still clean);
+     - clean parts merged unrepaired: `Mandy Pinup Figurine/Mandy NSFW Dinamuu3D/Mandy NSFW Version A/MandyNakedA_Arms.stl`
+       (4/14 parts), `nutshell-atelier-belly-dancer-nsfw/3rd-02.stl` (1/2),
+       `Kuton Figurines - Hebe/Unsupported_STL/cloth.stl` (6/7),
+       `CA3D/Cleopatra + NSFW/1-9 Scale Uncut Cleopatra_NSFW/model.stl` (6/7);
+     - control, fully repaired (not gated): `Shadaloo Studios - Madelyne Pryor nsfw/Madelyne_NM_Body.stl`.
 2. Everything else: volume guard on open shells
    ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), MeshFix
    time/NM guard ([post-wrap-meshfix-timeout.md](../errors/post-wrap-meshfix-timeout.md),
@@ -46,23 +62,42 @@ parent's diagnosis ([orchestration.md](orchestration.md) step 5).
   time follow ~3·A/h² rebuilt faces; sphere r 132: 29 M faces, 353 s,
   13.9 GB) — admission reserves for it, reducing it needs an owner decision
   (e.g. per-part spacing from area, or decimating blocks before the weld).
-- [ ] NM-only fast path in the clean gate (owner idea, 2026-10-05). Today
-  `repairer.is_already_clean` (with `skip_clean`) skips repair only when a
-  part has no NM edges, no open edges and no winding seams; anything else
-  goes through winding → decimate → conditional MeshFix. Proposal: when NM
-  edges are the ONLY defect found, skip winding and the post decimation and
-  run MeshFix directly; any other defect still goes to winding. Cheaper and
-  keeps the original surface instead of a rebuilt one. To settle first:
-  - "Only NM" is limited by what the scan sees: self-intersections,
-    overlapping shells and a whole inverted shell are invisible to it, and
-    `winding_seams` cannot check winding across the NM edges themselves.
-  - MeshFix fixes NM by deleting faces around them and refilling. With many
-    NM edges it can run past the per-file timeout (the Aloy/Laura cases had
-    thousands), and on irreconcilable winding it can delete whole surfaces.
-    So: a shape check on its result (retained volume, open/NM left), and on
-    failure fall back to winding rather than failing the part.
-  - Possibly an NM-count limit for the fast path; measure MeshFix time
-    against NM count first.
+- [ ] NM-only fast path: revisit after the next long run (owner,
+  2026-10-05). Implemented under `skip_clean` (orchestration step 4a): a
+  part whose only scanned defect is NM edges gets MeshFix alone, accepted
+  when clean with component volume in 98–102%, else the part sequence runs
+  on the original part. Open:
+  - `NM_FAST_PATH_MAX_PERCENT = 0.05` (NM edges per 100 part faces; owner
+    asked for a percentage, 2026-10-06) and `NM_FAST_PATH_VOLUME_BAND` are
+    provisional; set them from the long run's `nm_fast_path` log lines (NM
+    count and percentage, MeshFix step time, volume, kept/fallback). The
+    limit is not a time bound: MeshFix runs in-process, and a ratio does
+    not cap the NM count on a very large part (`max_faces = 0`). The
+    Aloy/Laura MeshFix timeouts (534 and 6,968 NM on 900k faces) were
+    damaged post-reconstruction decimations, not fast-path input.
+  - Open edges next (owner chose NM only first). Needs a shape check that
+    works on open input: its volume is no reliable reference (priority 2,
+    open-shell volume guard).
+  - Seams stay excluded: MeshFix can delete whole surfaces on
+    irreconcilable winding. "Only NM" is only what the scan sees:
+    self-intersections, overlapping shells and a whole inverted shell are
+    invisible, and winding across the NM edges is checked only on the
+    result.
+  - Measured on fixtures before the implementation (2026-10-05, custom
+    `part_steps`). `nm_only` / `nm_seam` / `nm_hole`
+    (tests.md; 760-face sphere, 20 closed fins, no decimation): MeshFix
+    alone 0.01 s, clean, all 20 fins gone, every output vertex on the
+    sphere, but 800 → 662 faces and volume −1.05% (faces deleted around
+    each NM edge, refilled flat). Default sequence: ~54 s, clean, fins
+    gone, volume −0.07% (`nm_hole` −0.18%), output vertex radius
+    9.876–10.030 (`nm_hole` 9.739–10.059; rebuilt surface, r 10 truth).
+    MeshFix also cleared the seam and hole.
+    On an 80-segment sphere (12,640 faces, scratch run under load):
+    1/20/200 fins, MeshFix 0.5–2 s and volume −0.0/−0.0/−0.05%; default
+    56–78 s. Limits: a closed fin on a perfect sphere is an easy NM case.
+    It does not set an NM-count limit, does not stand in for the Aloy/Laura
+    thousands, and its overlapping fin faces are not a self-intersection
+    test.
 
 ## Print-risk check and rib supports
 
