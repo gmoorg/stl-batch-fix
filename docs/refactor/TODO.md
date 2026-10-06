@@ -23,13 +23,17 @@ parent's diagnosis ([orchestration.md](orchestration.md) step 5).
 
 1. [ ] **Test the `is_already_clean` gate** (`skip_clean = true`) on real
    models (owner, 2026-10-05: wanted, on in the owner's config). Amidara
-   base fails it (confirmed 2026-10-06, below). Confirm that gated output
-   slices and prints. Keep it off by default until
+   base fails it (confirmed 2026-10-06, below). The sample's outputs pass
+   Bambu's recommended repair tool (2026-10-06, below). Confirm that gated
+   output slices and prints. Keep it off by default until
    then. The NM-only fast path (Reconstruction below) widens the same
    gate and is tested with it.
-   - [ ] Run the gated sample outputs through an online repair/analysis
+   - [x] Run the gated sample outputs through an online repair/analysis
      tool and note whether it finds anything the scan cannot see
-     (self-intersections, overlapping or inverted shells). Sample re-run
+     (self-intersections, overlapping or inverted shells). Done (owner,
+     2026-10-06): every file in `out/` below, Amidara included, is clean
+     according to the repair tool Bambu recommends — it found nothing the
+     scan missed. Slicing and printing are still unconfirmed. Sample re-run
      on HEAD 2026-10-05 (`skip_clean = true`, `max_faces = 900000`),
      outputs under `/mnt/sda2/STL/GateSample/out/` (sources in `in/`):
      - whole model skipped: `zoro/NomNom Zoro/Zoro_STL/178mm_split/r_blade.stl`,
@@ -42,7 +46,8 @@ parent's diagnosis ([orchestration.md](orchestration.md) step 5).
        (4/14 parts), `nutshell-atelier-belly-dancer-nsfw/3rd-02.stl` (1/2),
        `Kuton Figurines - Hebe/Unsupported_STL/cloth.stl` (6/7),
        `CA3D/Cleopatra + NSFW/1-9 Scale Uncut Cleopatra_NSFW/model.stl` (6/7);
-     - control, fully repaired (not gated): `Shadaloo Studios - Madelyne Pryor nsfw/Madelyne_NM_Body.stl`;
+     - control, fully repaired (not gated): `Shadaloo Studios - Madelyne Pryor nsfw/Madelyne_NM_Body.stl`
+       — looks excellent on visual inspection (owner, 2026-10-06);
      - Amidara base, confirmed failing the gate (2026-10-06, HEAD `bcceb5f`,
        same settings, child run directly): no NM or open edges but 922
        winding seams, so both gates said "not clean"; repaired by winding
