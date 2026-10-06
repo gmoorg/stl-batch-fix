@@ -564,5 +564,5 @@ def load_keeping_degenerates(path: str, destination: str = '/nonexistent/out.stl
     corners = rec['v'].reshape(-1, 3) + np.float32(0.0)
     verts, inv = np.unique(corners, axis=0, return_inverse=True)
     return Mesh(path, destination, Kind.BINARY_STL, n, True, None,
-                Geometry(np.ascontiguousarray(verts, np.float32),
+                Geometry(np.ascontiguousarray(verts, np.float64),
                          inv.reshape(n, 3).astype(np.int64)))

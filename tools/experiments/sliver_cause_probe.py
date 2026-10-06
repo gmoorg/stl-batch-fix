@@ -49,7 +49,7 @@ def collapse_short_edges(G, limit):
     Vn = sums / np.bincount(label, minlength=count)[:, None]
     Fn = label[F]
     Fn = Fn[(Fn[:, 0] != Fn[:, 1]) & (Fn[:, 1] != Fn[:, 2]) & (Fn[:, 0] != Fn[:, 2])]
-    return Geometry(Vn.astype(np.float32), Fn.astype(np.int64)), len(short), n - count
+    return Geometry(Vn.astype(np.float64), Fn.astype(np.int64)), len(short), n - count
 
 
 def main():

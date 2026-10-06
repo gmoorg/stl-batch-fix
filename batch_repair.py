@@ -360,8 +360,8 @@ def decimated_root(input_root: str) -> str:
 def decimated_path(input_root: str, source: str, max_faces: int) -> str:
     """Where the prepare pass keeps the decimated mesh of job `source`: a PLY
     written by `mesh_io.write_ply`, so the decimator's vertex table is handed
-    to the repair pass as is, never re-welded from STL triangles. It holds
-    float32 coordinates until `Geometry` moves to float64.
+    to the repair pass as is, never re-welded from STL triangles, and with
+    the decimator's float64 coordinates unrounded.
 
     Keyed by the job's own source path relative to the input tree — the
     file the job loads, so a converted model is keyed by its

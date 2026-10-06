@@ -60,7 +60,7 @@ def main(outdir):
         v, f = build(base_v.copy(), base_f.copy())
         path = os.path.join(outdir, f'sphere_{name}.stl')
         mesh = Mesh('/generated', path, Kind.BINARY_STL, len(f), True, None,
-                    Geometry(v, f))
+                    Geometry(np.asarray(v, np.float64), f))
         write(mesh)
         s = scanner.scan(mesh)
         print(f'{name:18} {len(f):>6} {len(v):>6} {s.non_manifold:>4} '

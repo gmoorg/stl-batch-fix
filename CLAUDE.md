@@ -1,30 +1,5 @@
 # Claude Code instructions
 
-> **Temporary handoff (2026-10-05).** Read this, then delete this note when
-> the next task's first commit lands.
->
-> - **State:** branch `error-fixes`, pushed at `5ca221a`, tree clean.
->   Today: `e590ec4` PLY decimation cache at `<input>.decimated/` (cache key
->   is the source's lexical path; NaN/inf triangles dropped at load);
->   `5ca221a` `mesh_io.load` reads 1024-triangle chunks and also drops
->   coincident-corner triangles (`Mesh.load_drops`, one step note in the
->   pass that loaded the STL). Full suite was 950 tests.
-> - **Data:** the old `/mnt/sda2/STL/Fixing/stl-decimated/` and two stray
->   experiment PLYs were deleted by the owner. The next batch run
->   re-decimates every model over target into `/mnt/sda2/STL/Fixing.decimated/`
->   (Bat Girl ~73 s). The owner's local `batch_repair.toml` (ignored by git)
->   still says the cache is `<input>/stl-decimated/`; only the comment is
->   stale.
-> - **Next:** [TODO](docs/refactor/TODO.md) priority 1, float64
->   `Geometry.verts`, as its own plan (weld stays on float32 bits; convert
->   the welded table; then re-fit `jobmemory.prepare_bytes`). Then priority 2.
->   New task: run `tools/reset_codex.sh`, then INTERPRETATION with full context.
-> - **Owner decisions this session:** loader correctness is tested with
->   known-property fixtures, not an old-loader oracle (vertex order is free);
->   load drop counts appear only in the step note, a cached PLY is "a new
->   input"; remove unneeded allocations even when not at the peak; discuss
->   open decisions one point at a time.
-
 Treat the directory containing this file as the project root. Return to it before project commands; do not derive project paths from the shell's inherited working directory. Start with [README.md](README.md) and follow only the compact documentation needed.
 
 Read only task-relevant sections linked from README; do not preload every

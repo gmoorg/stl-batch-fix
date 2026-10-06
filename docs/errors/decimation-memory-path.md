@@ -250,8 +250,9 @@ on the file path (option 2 above).
 
   **Implemented 2026-10-05** (narrow, owner): `read_ply` accepts exactly the
   float32 layout and PyMeshLab's float64 layout, with a strict header and
-  body-length check; `write_ply` writes float64 geometry as `double`. Until
-  `Geometry` is float64, `read_ply` rounds double coordinates to float32.
+  body-length check; `write_ply` writes float64 geometry as `double`. Since
+  `Geometry` moved to float64 (same day), `read_ply` keeps double
+  coordinates exactly.
   Checked on `Sword_and_head1.stl`: PyMeshLab import + bare save, then
   `read_ply` gives exactly PyMeshLab's arrays (199,986 v / 399,759 f, float32),
   in 0.01 s.
@@ -340,15 +341,24 @@ are ~0.12 GB of that. A mesh built from arrays costs ~155 B/face, not the
 So the prepare pass loads every source with `mesh_io.load`, decimates from
 arrays (`meshlab.to_mesh` drops index-degenerate faces, the segfault fix) and
 writes the PLY cache with `mesh_io.write_ply` to `<input>.decimated/` (owner:
-"Ok, let use our stl import"). The cache holds float32 until `Geometry`
-moves to float64. Non-finite triangles are dropped by `mesh_io.load`
+"Ok, let use our stl import"). The cache holds the decimator's float64
+coordinates. Non-finite triangles are dropped by `mesh_io.load`
 (owner: garbage in, garbage out); see
 [non-finite-coordinates.md](non-finite-coordinates.md).
 
 ## Decision: float64 internal vertex buffer (owner, 2026-10-04)
 
-Not implemented. `Geometry.verts` moves from float32 to **float64**. Do it
-**after** decimate-from-file lands, as its own plan.
+**Implemented 2026-10-05.** `Geometry.verts` is **float64** and
+`Geometry` raises `TypeError` for any other vertex dtype or non-int64 faces,
+so a producer cannot slip a float32 array back in. Two entrances: `load`
+welds on the float32 bits and converts the welded table once; `read_ply`
+keeps PyMeshLab's doubles exactly. One exit: `write` rounds to float32. The
+producers below return float64 (`meshlab.from_mesh`, MeshFix,
+`winding._weld`), the consumers' casts are gone, and `write_ply` always
+writes `double`. Job memory was re-measured afterwards: peaks rose 0–4 %,
+the constants were kept
+([orchestration](../refactor/orchestration.md#job-memory-calibration-2026-10-04)).
+The rest of this section is the reasoning as decided.
 
 **Why.** float32 saves nothing when every consumer casts to float64. While
 a library runs, we hold our float32 array *and* its float64 copy, so the peak is

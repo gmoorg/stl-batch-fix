@@ -64,7 +64,7 @@ needs_cgal = unittest.skipIf(alphawrap is None, 'CGAL (optional) is not installe
 
 
 def mesh(verts, faces, source='/in/body.stl', destination='/out/body.stl'):
-    geometry = Geometry(np.array(verts, dtype=np.float32),
+    geometry = Geometry(np.array(verts, dtype=np.float64),
                         np.array(faces, dtype=np.int64).reshape(-1, 3))
     return Mesh(source, destination, Kind.BINARY_STL, len(geometry.faces),
                 True, None, geometry)
@@ -226,30 +226,31 @@ class TestLostVertices(unittest.TestCase):
     """Exact comparison reported 382 losses on a mesh that lost nothing."""
 
     def test_float_noise_is_not_a_loss(self):
-        """PyMeshLab's float64 round trip re-rounds coordinates a repair never
-        touched. Measured: the furthest such move was 1.0e-05."""
-        before = np.array(TETRA_VERTS, dtype=np.float32)
+        """Float noise on a vertex a repair never meant to move. Measured
+        1.0e-05 at most while PyMeshLab's float64 results were rounded back
+        to float32."""
+        before = np.array(TETRA_VERTS, dtype=np.float64)
         after = before + 1e-6
         self.assertEqual(repairer._count_lost(before, after), 0)
 
     def test_a_deleted_vertex_is_a_loss(self):
-        before = np.array(TETRA_VERTS, dtype=np.float32)
+        before = np.array(TETRA_VERTS, dtype=np.float64)
         self.assertEqual(repairer._count_lost(before, before[:3]), 1)
 
     def test_a_real_displacement_is_a_loss(self):
         """The fixtures that genuinely lose geometry move a vertex by ~8.0,
         the sphere's radius — five orders of magnitude above the noise."""
-        before = np.array(TETRA_VERTS, dtype=np.float32)
+        before = np.array(TETRA_VERTS, dtype=np.float64)
         after = before.copy()
         after[0] = [50, 50, 50]
         self.assertEqual(repairer._count_lost(before, after), 1)
 
     def test_an_empty_output_loses_everything(self):
-        before = np.array(TETRA_VERTS, dtype=np.float32)
+        before = np.array(TETRA_VERTS, dtype=np.float64)
         self.assertEqual(repairer._count_lost(before, np.empty((0, 3))), 4)
 
     def test_the_tolerance_is_adjustable(self):
-        before = np.array(TETRA_VERTS, dtype=np.float32)
+        before = np.array(TETRA_VERTS, dtype=np.float64)
         after = before + 0.01
         self.assertEqual(repairer._count_lost(before, after, 1e-4), 4)
         self.assertEqual(repairer._count_lost(before, after, 1.0), 0)
@@ -1041,7 +1042,7 @@ class TestPartDecimation(unittest.TestCase):
 
     def geometry(self, n):
         return Geometry(np.array(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
-                                 dtype=np.float32),
+                                 dtype=np.float64),
                         np.array((TETRA_FACES + [[4, 6, 5], [4, 5, 7]])[:n], dtype=np.int64))
 
     def test_one_pass_with_the_parts_own_target_and_meshfix_gets_its_output(self):

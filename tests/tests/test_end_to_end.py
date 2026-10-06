@@ -33,7 +33,7 @@ PROJECT = Path(__file__).resolve().parent.parent.parent
 
 def _write(path, verts, faces):
     mesh_io.write(Mesh(str(path), str(path), Kind.BINARY_STL, len(faces), True, None,
-                       Geometry(np.asarray(verts, np.float32), np.asarray(faces, np.int64))))
+                       Geometry(np.asarray(verts, np.float64), np.asarray(faces, np.int64))))
 
 
 def _surface_samples(v, f, n, seed):
@@ -102,7 +102,7 @@ class TestEndToEnd(unittest.TestCase):
                 V, F = self._output(name)
                 self.assertGreater(len(F), 0)
                 self.assertTrue(np.isfinite(V).all())
-                mesh = Mesh('/o', '/o', Kind.BINARY_STL, len(F), True, None, Geometry(V.astype(np.float32), F))
+                mesh = Mesh('/o', '/o', Kind.BINARY_STL, len(F), True, None, Geometry(V.astype(np.float64), F))
                 s = scanner.scan(mesh)
                 self.assertEqual((s.open_edges, s.non_manifold), (0, 0))
                 for shell in scanner.shells(mesh):

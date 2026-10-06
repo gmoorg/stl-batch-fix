@@ -42,7 +42,7 @@ def to_mesh(geometry: Geometry):
 def from_mesh(mesh) -> Geometry:
     """Convert a PyMeshLab mesh to the project's canonical array dtypes."""
     return Geometry(
-        np.ascontiguousarray(mesh.vertex_matrix(), dtype=np.float32),
+        np.ascontiguousarray(mesh.vertex_matrix(), dtype=np.float64),
         np.ascontiguousarray(mesh.face_matrix(), dtype=np.int64),
     )
 

@@ -45,7 +45,7 @@ class TestRealEndToEnd(unittest.TestCase):
         fx = ds.fixtures()[fixture]
         path = str(self.input / name)
         mesh_io.write(Mesh(path, path, Kind.BINARY_STL, len(fx.faces), True, None,
-                           Geometry(np.asarray(fx.verts, np.float32),
+                           Geometry(np.asarray(fx.verts, np.float64),
                                     np.asarray(fx.faces, np.int64))))
 
     def run_batch(self, workers):

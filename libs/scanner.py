@@ -305,8 +305,7 @@ def diagonal(mesh: Mesh) -> float:
     verts = mesh.geometry.verts
     if len(verts) == 0:
         return 0.0
-    span = verts.max(axis=0).astype(np.float64) - \
-        verts.min(axis=0).astype(np.float64)
+    span = verts.max(axis=0) - verts.min(axis=0)
     return float(np.linalg.norm(span))
 
 
@@ -319,7 +318,7 @@ def volume(mesh: Mesh) -> float:
     _require_geometry(mesh)
     if len(mesh.geometry.faces) == 0:
         return 0.0
-    tri = mesh.geometry.verts[mesh.geometry.faces].astype(np.float64)
+    tri = mesh.geometry.verts[mesh.geometry.faces]
     return float(np.einsum('ij,ij->i', tri[:, 0],
                            np.cross(tri[:, 1], tri[:, 2])).sum() / 6.0)
 
@@ -355,7 +354,7 @@ def component_volume(mesh: Mesh) -> float:
     faces = mesh.geometry.faces
     if len(faces) == 0:
         return 0.0
-    tri = mesh.geometry.verts[faces].astype(np.float64)
+    tri = mesh.geometry.verts[faces]
     # Per-face signed contribution, summed within a component and only then
     # taken as a magnitude: a component's own faces must still cancel normally
     # against each other, or a closed shell would not measure as closed.

@@ -66,7 +66,7 @@ def _sphere(subdivisions=1):
         verts = np.array(verts, dtype=np.float64)
         faces = np.array(new_faces, dtype=np.int64)
 
-    return verts.astype(np.float32), faces
+    return verts.astype(np.float64), faces
 
 
 def _mesh(verts, faces):
@@ -147,7 +147,7 @@ class TestWrap(unittest.TestCase):
         self.assertEqual(g.verts.shape[1], 3)
         self.assertEqual(g.faces.ndim, 2)
         self.assertEqual(g.faces.shape[1], 3)
-        self.assertEqual(g.verts.dtype, np.float32)
+        self.assertEqual(g.verts.dtype, np.float64)
         self.assertEqual(g.faces.dtype, np.int64)
         self.assertGreater(len(g.verts), 0)
         self.assertGreater(len(g.faces), 0)

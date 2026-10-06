@@ -51,8 +51,8 @@ DEFAULT_PART_STEPS: tuple[Entry, ...] = (
         scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)),
 )
 
-#: Allow float re-rounding when counting retained vertices. This absolute
-#: threshold is a known scale risk; see
+#: How far an input vertex may move and still count as retained. This
+#: absolute threshold is a known scale risk; see
 #: ../stl-batch-fix.old/archive/docs-refactor-2026-09-22/open-issues.md.
 LOST_VERTEX_TOLERANCE = 1e-4
 
@@ -103,8 +103,8 @@ def _count_lost(before: np.ndarray, after: np.ndarray,
                 tolerance: float = LOST_VERTEX_TOLERANCE) -> int:
     """Input vertices with no output vertex within `tolerance`.
 
-    Nearest-neighbour rather than set difference, because a repair that moves
-    nothing still re-rounds everything — see `LOST_VERTEX_TOLERANCE`.
+    Nearest-neighbour rather than set difference, so a vertex a repair moves
+    by less than `LOST_VERTEX_TOLERANCE` still counts as kept.
 
     A repair that *moves* a vertex slightly is counted as keeping it, which is
     the intended reading: the question this answers is "did something get
@@ -112,8 +112,7 @@ def _count_lost(before: np.ndarray, after: np.ndarray,
     """
     if len(after) == 0:
         return len(before)
-    distance, _ = cKDTree(after.astype(np.float64)).query(
-        before.astype(np.float64))
+    distance, _ = cKDTree(after).query(before)
     return int((distance > tolerance).sum())
 
 

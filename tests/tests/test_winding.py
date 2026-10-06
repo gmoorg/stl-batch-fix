@@ -17,7 +17,7 @@ from tests.tests.test_decimator import _sphere
 
 
 def mesh(verts, faces):
-    g = Geometry(np.asarray(verts, np.float32), np.asarray(faces, np.int64).reshape(-1, 3))
+    g = Geometry(np.asarray(verts, np.float64), np.asarray(faces, np.int64).reshape(-1, 3))
     return Mesh('/in/m.stl', '/out/m.stl', Kind.BINARY_STL, len(g.faces), True, None, g)
 
 
@@ -73,7 +73,7 @@ def with_nm_pair(weld):
     def wrapped(Vo, Fo, edges):
         g = weld(Vo, Fo, edges)
         pv, pf = nm_pair()
-        return Geometry(np.vstack([g.verts, pv.astype(np.float32)]),
+        return Geometry(np.vstack([g.verts, pv.astype(np.float64)]),
                         np.vstack([g.faces, pf + len(g.verts)]))
     return wrapped
 
@@ -318,7 +318,7 @@ class TestContract(unittest.TestCase):
 
     def welded_to(self, verts, faces):
         """Patch `_weld` so a reconstruction comes out as the given arrays."""
-        g = Geometry(np.asarray(verts, np.float32), np.asarray(faces, np.int64).reshape(-1, 3))
+        g = Geometry(np.asarray(verts, np.float64), np.asarray(faces, np.int64).reshape(-1, 3))
         return mock.patch.object(winding, '_weld', return_value=g)
 
     def test_an_open_result_is_rejected(self):
@@ -396,6 +396,8 @@ class TestWeld(unittest.TestCase):
         self.assertEqual(len(g.verts), 3, 'a and a2 merge; b stays separate')
         self.assertEqual(len(g.faces), 2)
         self.assertEqual(sorted(map(sorted, g.faces.tolist())), [[0, 1, 2], [0, 1, 2]])
+        # Kept exactly: a, b and the node are one point in float32.
+        self.assertEqual(sorted(map(tuple, g.verts.tolist())), sorted(map(tuple, [a, b, c])))
 
     def test_an_edge_map_that_is_not_one_unit_edge_per_vertex_is_rejected(self):
         shape, r0 = (4, 4, 4), np.zeros(3, np.int64)

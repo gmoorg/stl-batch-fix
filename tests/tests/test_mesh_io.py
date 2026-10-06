@@ -296,6 +296,30 @@ class TestLoad(MeshIOCase):
         self.assertEqual(len(loaded.geometry.verts), 4,
                          "-0.0 did not weld with 0.0")
 
+    def test_vertices_are_float64_and_write_back_bit_identical(self):
+        """Welded on float32 bits, held as float64, rounded once at `write`:
+        every corner of the file comes back with the same bits (0.1 is not
+        exact in float32, so a second rounding would show)."""
+        triangles = [tuple(tuple(c + 0.1 for c in v) for v in tri) for tri in _TETRA]
+        src = _binary_stl(self.path('p.stl'), triangles=triangles)
+        loaded = load(probe(src, self.path('out.stl')))
+        self.assertEqual(loaded.geometry.verts.dtype, np.float64)
+        write(loaded)
+        corners = lambda path: open(path, 'rb').read()[84:]
+        a = np.frombuffer(corners(src), np.uint8).reshape(-1, 50)[:, 12:48]
+        b = np.frombuffer(corners(self.path('out.stl')), np.uint8).reshape(-1, 50)[:, 12:48]
+        np.testing.assert_array_equal(a, b)
+
+    def test_a_coordinate_beyond_float32_is_refused_and_nothing_is_written(self):
+        dst = _binary_stl(self.path('keep.stl'))
+        before = open(dst, 'rb').read()
+        v = np.array([[0, 0, 0], [1e39, 0, 0], [0, 1, 0]], np.float64)
+        mesh = Mesh(dst, dst, Kind.BINARY_STL, 1, True, None,
+                    Geometry(v, np.array([[0, 1, 2]], np.int64)))
+        with self.assertRaises(ValueError):
+            write(mesh)
+        self.assertEqual(open(dst, 'rb').read(), before)
+
     def test_triangle_count_comes_from_the_geometry(self):
         many = _TETRA * 1000
         loaded = load(probe(_binary_stl(self.path('m.stl'), triangles=many),
@@ -575,6 +599,15 @@ class TestWithGeometry(MeshIOCase):
                          "the count was carried over, not re-derived")
         self.assertEqual(loaded.triangles, 4, "the original was mutated")
 
+    def test_geometry_takes_float64_vertices_and_int64_faces_only(self):
+        """Every library takes float64 vertices; a float32 producer would put
+        a converted copy back in front of each call."""
+        v, f = np.zeros((3, 3)), np.array([[0, 1, 2]], np.int64)
+        for bad_v, bad_f in ((v.astype(np.float32), f), (v.astype('>f8'), f),
+                             (v, f.astype(np.int32))):
+            with self.subTest(v=bad_v.dtype, f=bad_f.dtype), self.assertRaises(TypeError):
+                Geometry(bad_v, bad_f)
+
     def test_the_path_is_carried_over(self):
         """A changed mesh still knows which file it came from."""
         loaded = load(probe(_binary_stl(self.path('a.stl')), self.path('out.stl')))
@@ -642,7 +675,7 @@ class TestPly(MeshIOCase):
         with open(ply, 'rb') as f:
             raw = bytearray(f.read())
         start = raw.find(b'end_header\n') + len(b'end_header\n')
-        raw[start:start + 4] = np.float32(np.nan).tobytes()
+        raw[start:start + 8] = np.float64(np.nan).tobytes()
         with open(ply, 'wb') as f:
             f.write(bytes(raw))
 
@@ -789,10 +822,10 @@ FLOAT_XYZ = ['float x', 'float y', 'float z']
 
 
 class TestPlyLayouts(MeshIOCase):
-    """The two accepted layouts (float32: write_ply/Blender; float64:
-    PyMeshLab/write_ply) and the strict rejection of everything else."""
+    """The two accepted layouts (float32: Blender; float64: PyMeshLab and
+    write_ply) and the strict rejection of everything else."""
 
-    def mesh(self, verts=TETRA_V, dtype=np.float32):
+    def mesh(self, verts=TETRA_V, dtype=np.float64):
         g = Geometry(np.asarray(verts, dtype), TETRA_F.astype(np.int64))
         return Mesh(self.path('m.stl'), self.path('o.stl'), Kind.BINARY_STL, 4, True, None, g)
 
@@ -814,16 +847,15 @@ class TestPlyLayouts(MeshIOCase):
                              save_wedge_texcoord=False, save_wedge_normal=False)
         back = read_ply(path, self.mesh())
         m = ms.current_mesh()
-        np.testing.assert_array_equal(back.geometry.verts, m.vertex_matrix().astype(np.float32))
+        np.testing.assert_array_equal(back.geometry.verts, m.vertex_matrix())
         np.testing.assert_array_equal(back.geometry.faces, m.face_matrix())
-        self.assertEqual(back.geometry.verts.dtype, np.float32)
+        self.assertEqual(back.geometry.verts.dtype, np.float64)
 
-    def test_float32_output_is_byte_identical_to_the_documented_layout(self):
-        path = self.path('f.ply')
-        write_ply(self.mesh(), path)
-        expected = ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices',
-                             TETRA_V.astype(np.float32), TETRA_F)
-        self.assertEqual(open(path, 'rb').read(), expected)
+    def test_float32_layout_is_widened_exactly(self):
+        v = (TETRA_V + 0.1).astype(np.float32)
+        back = self.read(ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', v, TETRA_F))
+        self.assertEqual(back.geometry.verts.dtype, np.float64)
+        np.testing.assert_array_equal(back.geometry.verts, v.astype(np.float64))
 
     def test_float64_is_written_as_double_without_loss(self):
         v = TETRA_V + 0.1                         # 0.1 is not exact in float32
@@ -834,15 +866,13 @@ class TestPlyLayouts(MeshIOCase):
         body = data.index(b'end_header\n') + len(b'end_header\n')
         self.assertEqual(data[body:body + 4 * 24], np.asarray(v, '<f8').tobytes())
         back = read_ply(path, self.mesh())
-        np.testing.assert_array_equal(back.geometry.verts, v.astype(np.float32))
+        np.testing.assert_array_equal(back.geometry.verts, v)
 
-    def test_a_big_endian_float64_array_is_still_written_as_little_endian_double(self):
-        v = (TETRA_V + 0.1).astype('>f8')
-        path = self.path('be.ply')
-        write_ply(self.mesh(v, '>f8'), path)
-        data = open(path, 'rb').read()
-        body = data.index(b'end_header\n') + len(b'end_header\n')
-        self.assertEqual(data[body:body + 4 * 24], np.asarray(v, '<f8').tobytes())
+    def test_a_double_beyond_float32_range_is_read_exactly(self):
+        v = np.vstack([TETRA_V[:3], [[1e300, 0, 0]]])
+        back = self.read(ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices', v, TETRA_F,
+                                   coord='<f8', index='<i4'))
+        np.testing.assert_array_equal(back.geometry.verts, v)
 
     def test_comments_are_ignored_even_one_naming_end_header(self):
         back = self.read(ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices', TETRA_V,
@@ -876,9 +906,6 @@ class TestPlyLayouts(MeshIOCase):
                              np.vstack([V[:3], [[np.nan, 0, 0]]]), F, coord='<f8', index='<i4'),
             'infinity': ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices',
                                   np.vstack([V[:3], [[np.inf, 0, 0]]]), F, coord='<f8', index='<i4'),
-            'beyond float32': ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices',
-                                        np.vstack([V[:3], [[1e300, 0, 0]]]), F, coord='<f8',
-                                        index='<i4'),
         }
         good = ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', V, F)
         header, body = good.split(b'end_header\n')

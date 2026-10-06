@@ -28,7 +28,7 @@ def rounding_weld(Vo, Fo, h):
     _, first, inv = np.unique(key, axis=0, return_index=True, return_inverse=True)
     Vo, Fo = Vo[first], inv.ravel()[Fo]
     Fo = Fo[(Fo[:, 0] != Fo[:, 1]) & (Fo[:, 1] != Fo[:, 2]) & (Fo[:, 0] != Fo[:, 2])]
-    return Geometry(Vo.astype(np.float32), Fo.astype(np.int64))
+    return Geometry(Vo.astype(np.float64), Fo.astype(np.int64))
 
 
 def report(tag, mesh):

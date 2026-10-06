@@ -22,7 +22,7 @@ FIXTURES = ds.fixtures()
 
 
 def as_mesh(v, f):
-    g = Geometry(np.asarray(v, np.float32), np.asarray(f, np.int64))
+    g = Geometry(np.asarray(v, np.float64), np.asarray(f, np.int64))
     return Mesh('/m.stl', '/m.stl', Kind.BINARY_STL, len(g.faces), True, None, g)
 
 
@@ -211,7 +211,7 @@ class TestComposites(unittest.TestCase):
         for name, fx in self.COMPOSITES.items():
             path = os.path.join(tmp, name + '.stl')
             mesh_io.write(Mesh(path, path, Kind.BINARY_STL, len(fx.faces), True, None,
-                               Geometry(fx.verts, fx.faces)))
+                               Geometry(fx.verts.astype(np.float64), fx.faces)))
             kept = splitter.by_shells(mesh_io.load(mesh_io.probe(path, path)))
             with self.subTest(name):
                 n = len(kept)

@@ -39,8 +39,8 @@ created — then:
      parameters). The relative path is lexical: a source that is a symlink
      to a file outside the input keeps its own name, so its cache stays
      under `<input>.decimated` and inside the startup overlap checks. The PLY keeps the decimator's vertex table, so the repair
-     pass gets it without re-welding (float32 until `Geometry` moves to
-     float64). Our loader, not PyMeshLab's STL reader, which holds ~4.5x the
+     pass gets it without re-welding, with the decimator's float64
+     coordinates unrounded. Our loader, not PyMeshLab's STL reader, which holds ~4.5x the
      mesh's memory (docs/errors/decimation-memory-path.md). The cache is
      reused by later runs (sources are assumed unmodified) and rebuilt if
      unreadable; it is read back with `mesh_io.read_ply` and
@@ -154,6 +154,25 @@ Prepare reserves 400 MB + 700 B per source face (join: 3.06 GB for 1.80 GB,
 open-edge counts and the same volume as the in-memory result. These are
 fits to these runs, not bounds; MeshFix-heavy multi-part models are not yet
 in the table.
+
+**Re-measured with float64 vertices (2026-10-05).** Same method, both code
+trees on the same machine in one session (before: `daa5687`, float32
+`Geometry`). The constants were kept: every peak moved by 0–4 %, and every
+estimate still exceeds its peak by at least 1.44×. Mirko is no longer on
+disk; its row above was not re-measured.
+
+| Model | Prepare peak, before → after | Repair peak, before → after | Estimate | Ratio after |
+|---|---|---|---|---|
+| foot1 | 130 → 130 MB | 2.77 → 2.82 GB | 4.04 GB | 1.44 |
+| sphere r 132 | 130 → 130 MB | 14.90 → 15.07 GB | 24.2 GB | 1.61 |
+| join_complication (→ 900 k) | 1.89 → 1.91 GB | 1.61 → 1.68 GB | 2.79 GB | 1.66 |
+| join_complication, cache hit | 326 → 331 MB | — | — | — |
+| join_complication, `max_faces` 0 | 0.90 → 0.92 GB | 1.94 → 1.97 GB | 3.40 GB | 1.72 |
+
+Prepare on join: 3.06 GB reserved for 1.91 GB, 1.60×. The "before" column
+differs from the 2026-10-04 table (join repair 1.47 → 1.61 GB) because the
+code changed in between (PLY cache, planarquadric decimation, chunked
+load); compare within this table only.
 
 ## Limits and observability
 

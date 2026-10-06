@@ -41,8 +41,9 @@ from .mesh_io import Mesh, require_geometry
 
 #: Interpreter, NumPy/SciPy/PyMeshLab/igl imports and a loaded process.
 CHILD_BASE_BYTES = 400_000_000
-#: One face of a loaded, indexed mesh kept resident (float32 vertices, int64
-#: faces, scans and copies made around it).
+#: One face of a loaded, indexed mesh kept resident (float64 vertices, int64
+#: faces, scans and copies made around it). Kept after the float64 move:
+#: re-measured peaks rose 0-4 % (orchestration.md, "Job memory").
 RESIDENT_BYTES_PER_FACE = 120
 #: Rebuilt faces per unit of A/h². Measured 2.6-3.2 on closed parts.
 REBUILT_FACES_PER_UNIT = 3.5
@@ -61,7 +62,7 @@ def prepare_bytes(source_faces: int) -> int:
 
 
 def _area(mesh: Mesh) -> float:
-    V = mesh.geometry.verts.astype(np.float64)
+    V = mesh.geometry.verts
     F = mesh.geometry.faces
     if len(F) == 0:
         return 0.0

@@ -25,7 +25,7 @@ TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
 
 
 def mesh(verts, faces, source='/in/body.stl', destination='/out/body.stl'):
-    geometry = Geometry(np.array(verts, dtype=np.float32),
+    geometry = Geometry(np.array(verts, dtype=np.float64),
                         np.array(faces, dtype=np.int64).reshape(-1, 3))
     return Mesh(source, destination, Kind.BINARY_STL, len(geometry.faces),
                 True, None, geometry)
@@ -57,6 +57,15 @@ class TestRepair(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertTrue(scanner.scan(result.mesh).is_clean)
 
+    def test_coordinates_it_does_not_move_come_back_exactly(self):
+        """0.1 is not exact in float32, so a rounding on the way back would
+        show."""
+        m = mesh(np.array(TETRA_VERTS, dtype=np.float64) + 0.1, TETRA_FACES)
+        result = repair(m)
+        self.assertTrue(result.ok, result.problem)
+        self.assertEqual(sorted(map(tuple, result.mesh.geometry.verts.tolist())),
+                         sorted(map(tuple, m.geometry.verts.tolist())))
+
     def test_the_input_is_not_mutated(self):
         m = holed()
         repair(m)
@@ -77,9 +86,9 @@ class TestRepair(unittest.TestCase):
         self.assertEqual(result.mesh.destination, m.destination)
 
     def test_arrays_come_back_in_our_dtypes(self):
-        """PyMeshFix works in float64/int32; Geometry is float32/int64."""
+        """PyMeshFix works in float64/int32; Geometry is float64/int64."""
         result = repair(holed())
-        self.assertEqual(result.mesh.geometry.verts.dtype, np.float32)
+        self.assertEqual(result.mesh.geometry.verts.dtype, np.float64)
         self.assertEqual(result.mesh.geometry.faces.dtype, np.int64)
 
     def test_faces_index_within_the_vertex_array(self):

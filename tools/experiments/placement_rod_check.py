@@ -33,7 +33,7 @@ from tests.tests.test_decimator import _sphere
 
 
 def mk(v, f):
-    return Mesh('/r', '/r', Kind.BINARY_STL, len(f), True, None, Geometry(v, f))
+    return Mesh('/r', '/r', Kind.BINARY_STL, len(f), True, None, Geometry(np.asarray(v, np.float64), np.asarray(f, np.int64)))
 
 
 def dist(P, G):

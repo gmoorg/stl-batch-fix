@@ -159,7 +159,7 @@ def main(argv):
     stats = {'band_points': 0, 'far_points': 0, 'lattice_queries': 0}
     Vo, Fo, n = reconstruct(V, F, h, blocks, phases, stats)
     out = Mesh(dst, dst, Kind.BINARY_STL, len(Fo), True, None,
-               Geometry(Vo.astype(np.float32), Fo.astype(np.int64)))
+               Geometry(Vo.astype(np.float64), Fo.astype(np.int64)))
     mesh_io.write(out)
     result = {
         'h': h, 'blocks': blocks ** 3, 'grid': n.tolist(), 'faces_out': int(len(Fo)),

@@ -27,7 +27,7 @@ class _Case(unittest.TestCase):
         v, f = ds.sphere(10.0, 40)                     # 3,040 faces
         self.faces = len(f)
         mesh_io.write(Mesh(str(self.source), str(self.source), Kind.BINARY_STL, len(f), True,
-                           None, Geometry(np.asarray(v, np.float32), np.asarray(f, np.int64))))
+                           None, Geometry(np.asarray(v, np.float64), np.asarray(f, np.int64))))
         self.destination = str(self.out / 'sub' / 'ball.stl')
 
     def cache(self, max_faces):

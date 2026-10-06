@@ -448,7 +448,7 @@ def _weld(Vo: np.ndarray, Fo: np.ndarray, edges: np.ndarray) -> Geometry:
     _, first, inv = np.unique(edges, axis=0, return_index=True, return_inverse=True)
     Vo, Fo = Vo[first], inv.ravel()[Fo]
     Fo = Fo[(Fo[:, 0] != Fo[:, 1]) & (Fo[:, 1] != Fo[:, 2]) & (Fo[:, 0] != Fo[:, 2])]
-    return Geometry(Vo.astype(np.float32), Fo.astype(np.int64))
+    return Geometry(Vo, Fo.astype(np.int64, copy=False))
 
 
 def _check(mesh: Mesh) -> None:
@@ -491,7 +491,7 @@ def step_winding_reconstruct(mesh: Mesh, config: "pipeconfig.StepConfig | None" 
         try:
             result = reconstruct(mesh, h, p.blocks_per_axis)
         except EmptyResult as exc:
-            empty = mesh.with_geometry(Geometry(np.zeros((0, 3), np.float32),
+            empty = mesh.with_geometry(Geometry(np.zeros((0, 3), np.float64),
                                                 np.zeros((0, 3), np.int64)))
             return True, empty, f'dropped: {exc}; {len(mesh.geometry.faces)} faces removed'
         # A second scan (reconstruct's own is internal): seconds, against a

@@ -200,7 +200,7 @@ from libs.mesh_io import Geometry, Kind, Mesh, load, probe
 from tests.tests.defect_spheres import load_keeping_degenerates
 
 def arrays(verts, faces):
-    g = Geometry(np.asarray(verts, np.float32), np.asarray(faces, np.int64))
+    g = Geometry(np.asarray(verts, np.float64), np.asarray(faces, np.int64))
     return Mesh('/in/x.stl', '/out/x.stl', Kind.BINARY_STL, len(g.faces), True, None, g)
 
 def run(mesh, target):
@@ -300,7 +300,7 @@ out = dict(with_face, same=(with_face['verts'] == by_hand['verts']
         """Dropping happens only on the way into PyMeshLab; a mesh that needs
         no decimation is returned exactly as it came."""
         verts = np.array([[10, 0, 0], [11, 0, 0], [10, 1, 0], [10, 0, 1],
-                          [0, 0, 0], [0.05, 0, 0]], np.float32)
+                          [0, 0, 0], [0.05, 0, 0]], np.float64)
         faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3], [4, 5, 4]])
         mesh = Mesh('/in/x.stl', '/out/x.stl', Kind.BINARY_STL, 5, True, None,
                     Geometry(verts, faces))
@@ -317,7 +317,7 @@ from libs import decimator, meshlab
 from libs.mesh_io import Geometry, Kind, Mesh
 from tests.tests.test_decimator import _sphere
 v, f = _sphere(subdivisions=4)
-m = Mesh('/s', '/s', Kind.BINARY_STL, len(f), True, None, Geometry(v, f))
+m = Mesh('/s', '/s', Kind.BINARY_STL, len(f), True, None, Geometry(v.astype(np.float64), f))
 if {contaminate}:
     meshlab.apply_filters(m, (('meshing_decimation_quadric_edge_collapse',
                                dict(targetfacenum=3000, preservetopology=True,
@@ -358,7 +358,7 @@ class TestShapeIsKept(unittest.TestCase):
         tolerance, not a general accuracy bound)."""
         verts, faces = _sphere(subdivisions=5)          # 20480 faces
         mesh = Mesh('/s', '/s', Kind.BINARY_STL, len(faces), True, None,
-                    Geometry(verts, faces))
+                    Geometry(verts.astype(np.float64), faces))
         result = decimate(mesh, max_faces=1000)
         self.assertIs(result.rung, Rung.MESHLAB)
         R = float(np.sqrt(1 + ((1 + 5 ** 0.5) / 2) ** 2))
@@ -378,7 +378,7 @@ class TestShapeIsKept(unittest.TestCase):
         h = 0.2
         rebuilt = winding.reconstruct(
             Mesh('/r', '/r', Kind.BINARY_STL, len(faces), True, None,
-                 Geometry(verts, faces)), h, 1)
+                 Geometry(verts.astype(np.float64), faces)), h, 1)
         result = decimate(rebuilt, max_faces=len(faces))
         self.assertIs(result.rung, Rung.MESHLAB)
         g = result.mesh.geometry

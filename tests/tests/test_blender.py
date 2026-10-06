@@ -34,7 +34,7 @@ TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
 
 
 def tetra():
-    geometry = Geometry(np.array(TETRA_VERTS, dtype=np.float32),
+    geometry = Geometry(np.array(TETRA_VERTS, dtype=np.float64),
                         np.array(TETRA_FACES, dtype=np.int64))
     return Mesh('/in/body.stl', '/out/body.stl', Kind.BINARY_STL,
                len(geometry.faces), True, None, geometry)

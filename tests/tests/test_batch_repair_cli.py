@@ -280,7 +280,7 @@ class TestBatchRepairCLI(unittest.TestCase):
 
         source = self.source / 'body.stl'
         geometry = Geometry(
-            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32),
+            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64),
             np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64))
         mesh_io.write(Mesh(str(source), str(source), Kind.BINARY_STL, 4, True, geometry=geometry))
         dest = self.output / 'out.stl'
@@ -334,7 +334,7 @@ class TestCleanGateFlags(unittest.TestCase):
         import numpy as np
         source = self.root / 'body.stl'
         geometry = Geometry(
-            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32),
+            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64),
             np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64))
         mesh_io.write(Mesh(str(source), str(source), Kind.BINARY_STL, 4, True, geometry=geometry))
         return source
@@ -455,7 +455,7 @@ class TestReconstructBudgetPlumbing(unittest.TestCase):
         from libs.mesh_io import Geometry, Kind, Mesh
         import numpy as np
         verts = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1],
-                          [10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]], np.float32)
+                          [10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]], np.float64)
         faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3],
                           [4, 6, 5], [4, 5, 7], [4, 7, 6], [5, 6, 7]], np.int64)
         m = Mesh('/a.stl', '/b.stl', Kind.BINARY_STL, 8, True, None, Geometry(verts, faces))
@@ -542,7 +542,7 @@ class TestMinShellFacesPlumbing(unittest.TestCase):
         import numpy as np
         source = self.root / 'a.stl'
         geometry = Geometry(
-            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32),
+            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64),
             np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64))
         mesh_io.write(Mesh(str(source), str(source), Kind.BINARY_STL, 4, True, geometry=geometry))
         dest = self.root / 'out' / 'a.stl'
@@ -714,7 +714,7 @@ class TestModelLog(unittest.TestCase):
         import numpy as np
         source = self.root / 'body.stl'
         geometry = Geometry(
-            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32),
+            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64),
             np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64))
         mesh_io.write(Mesh(str(source), str(source), Kind.BINARY_STL, 4, True, geometry=geometry))
         log = self.root / 'out' / 'body.log'

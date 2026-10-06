@@ -75,7 +75,7 @@ def repair(mesh: Mesh, fill_holes: bool = True) -> Result:
         return Result(mesh, False, "pymeshfix produced an empty mesh", elapsed)
 
     repaired = mesh.with_geometry(Geometry(
-        np.ascontiguousarray(verts, dtype=np.float32),
+        np.ascontiguousarray(verts, dtype=np.float64),
         np.ascontiguousarray(faces, dtype=np.int64)))
     return Result(repaired, True, None, elapsed)
 

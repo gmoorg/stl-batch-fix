@@ -14,7 +14,7 @@ BUDGET = 10_000_000_000
 def mesh_of(*parts):
     verts, faces, offset = [], [], 0
     for v, f in parts:
-        verts.append(np.asarray(v, np.float32)); faces.append(np.asarray(f, np.int64) + offset)
+        verts.append(np.asarray(v, np.float64)); faces.append(np.asarray(f, np.int64) + offset)
         offset += len(v)
     V, F = np.vstack(verts), np.vstack(faces)
     return Mesh('/m.stl', '/o.stl', Kind.BINARY_STL, len(F), True, None, Geometry(V, F))

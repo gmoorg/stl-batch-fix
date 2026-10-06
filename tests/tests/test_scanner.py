@@ -33,7 +33,7 @@ TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
 
 def mesh(verts, faces, path='/test.stl'):
     """A loaded Mesh from plain lists."""
-    geometry = Geometry(np.array(verts, dtype=np.float32),
+    geometry = Geometry(np.array(verts, dtype=np.float64),
                         np.array(faces, dtype=np.int64).reshape(-1, 3))
     return Mesh(path, path.replace('.stl', '.out.stl'), Kind.BINARY_STL,
                 len(geometry.faces), True, None, geometry)

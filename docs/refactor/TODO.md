@@ -16,10 +16,10 @@ NaN/inf and coincident-corner triangles dropped and counted (`mesh_io.load`,
 (owner): the load is not the job peak, and only the whole-file buffer was
 an allocation with no purpose.
 
-1. [ ] **float64 `Geometry.verts`**, as its own plan. Then re-fit
-   `jobmemory.prepare_bytes` (calibrated on the old array path). Weld stays
-   on float32 bits; convert the welded table (~12 B/triangle).
-2. Everything else: volume guard on open shells
+Also done (2026-10-05): float64 `Geometry.verts`, job memory re-measured
+(constants kept).
+
+1. Everything else: volume guard on open shells
    ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), recording
    the crash signal, MeshFix time/NM guard, the NM-only fast path below.
 

@@ -33,6 +33,8 @@ import sys
 import unittest
 from unittest import mock
 
+import numpy as np
+
 from libs import blender, execstep, mesh_io, meshfix, meshlab, repairer, scanner, welder
 from tests.tests import defect_spheres as ds
 
@@ -455,7 +457,7 @@ class TestToleranceScaling(unittest.TestCase):
         verts, faces = sphere(r=radius)
         verts, faces = build_tjunction(verts.copy(), faces.copy())
         return Mesh('/generated', '/out.stl', Kind.BINARY_STL, len(faces),
-                    True, None, Geometry(verts, faces))
+                    True, None, Geometry(verts.astype(np.float64), faces))
 
     def test_a_tjunction_is_found_at_every_scale(self):
         """One junction, one sphere, six sizes. **Fixed 2026-09-17.**

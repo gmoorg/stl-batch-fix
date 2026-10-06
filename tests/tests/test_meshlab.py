@@ -29,7 +29,7 @@ def clean_filters_combined() -> tuple[tuple[str, dict], ...]:
 
 
 def mesh(verts, faces):
-    geometry = Geometry(np.array(verts, dtype=np.float32),
+    geometry = Geometry(np.array(verts, dtype=np.float64),
                         np.array(faces, dtype=np.int64).reshape(-1, 3))
     return Mesh('/in/body.stl', '/out/body.stl', Kind.BINARY_STL,
                 len(geometry.faces), True, None, geometry)
@@ -42,14 +42,16 @@ def tetra():
 class TestMeshLab(unittest.TestCase):
 
     def test_conversion_helpers_preserve_the_dtype_contract(self):
-        geometry = Geometry(np.array(TETRA_VERTS, dtype=np.float32),
+        """Coordinates come back exactly: 0.1 is not exact in float32, so a
+        rounding on the way back would show."""
+        geometry = Geometry(np.array(TETRA_VERTS, dtype=np.float64) + 0.1,
                             np.array(TETRA_FACES, dtype=np.int64))
         native = meshlab.to_mesh(geometry)
         self.assertEqual(native.vertex_matrix().dtype, np.float64)
         self.assertEqual(native.face_matrix().dtype, np.int32)
 
         converted = meshlab.from_mesh(native)
-        self.assertEqual(converted.verts.dtype, np.float32)
+        self.assertEqual(converted.verts.dtype, np.float64)
         self.assertEqual(converted.faces.dtype, np.int64)
         self.assertTrue(converted.verts.flags.c_contiguous)
         self.assertTrue(converted.faces.flags.c_contiguous)
@@ -62,7 +64,7 @@ class TestMeshLab(unittest.TestCase):
         order, every vertex is kept, and the caller's arrays are untouched."""
         verts = TETRA_VERTS + [[5, 5, 5], [6, 5, 5]]
         faces = TETRA_FACES[:2] + [[4, 5, 4], [0, 0, 1]] + TETRA_FACES[2:] + [[2, 3, 3]]
-        geometry = Geometry(np.array(verts, dtype=np.float32),
+        geometry = Geometry(np.array(verts, dtype=np.float64),
                             np.array(faces, dtype=np.int64))
         verts_before, faces_before = geometry.verts.copy(), geometry.faces.copy()
 

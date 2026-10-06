@@ -63,7 +63,7 @@ def _polyhedron_to_geometry(poly) -> Geometry:
                 f"(degree {len(tri)}) — expected a pure triangle mesh")
         faces.append(tri)
 
-    return Geometry(np.array(verts, dtype=np.float32),
+    return Geometry(np.array(verts, dtype=np.float64),
                     np.array(faces, dtype=np.int64))
 
 

@@ -29,7 +29,7 @@ class TestProcessOneFile(unittest.TestCase):
     def fixture(self, name='a.stl'):
         path = self.root / name
         geometry = Geometry(
-            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32),
+            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64),
             np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64))
         mesh_io.write(Mesh(str(path), str(path), Kind.BINARY_STL, 4, True, geometry=geometry))
         return path

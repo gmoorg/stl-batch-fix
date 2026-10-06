@@ -50,10 +50,25 @@ class Geometry:
     real models).  Recovering that sharing is what `load` does, and it is a
     precondition of edge-based algorithms rather than an optimisation: quadric
     edge collapse works on edges, so it must know which faces meet where.
+
+    Vertices are float64 and faces int64, checked on construction (owner,
+    2026-10-04): every library we call takes float64 vertices (PyMeshLab,
+    libigl, pymeshfix) and libigl takes int64 faces, so a mesh is handed to
+    each without a converted copy and its results come back unrounded. STL is
+    float32 only at the edges: `load` welds on the float32 bits and converts
+    the welded table once; `write` rounds once.
     """
 
-    verts: np.ndarray                 # (n_verts, 3) float32
+    verts: np.ndarray                 # (n_verts, 3) float64
     faces: np.ndarray                 # (n_faces, 3) int64, indices into verts
+
+    def __post_init__(self):
+        # A dtype check only, no copy: a producer that forgets the dtype fails
+        # here instead of putting the per-library casts back.
+        if self.verts.dtype != np.float64:
+            raise TypeError(f"Geometry.verts must be float64, not {self.verts.dtype}")
+        if self.faces.dtype != np.int64:
+            raise TypeError(f"Geometry.faces must be int64, not {self.faces.dtype}")
 
 
 @dataclass(frozen=True)
@@ -402,7 +417,9 @@ def load(mesh: Mesh, *, chunk_triangles: int = CHUNK_TRIANGLES) -> Mesh:
     inv = np.empty(len(srt), dtype=np.int64)
     inv[order] = ids
     del order, ids
-    verts = srt[new].view(np.float32).reshape(-1, 3).copy()
+    # Welded on the float32 bits, then converted once: float64 holds every
+    # float32 exactly, so `write` gives back the file's coordinates bit for bit.
+    verts = srt[new].view(np.float32).reshape(-1, 3).astype(np.float64)
     del srt, new, bits, coords
 
     return replace(mesh.with_geometry(Geometry(verts, inv.reshape(kept, 3))),
@@ -454,13 +471,19 @@ def write(mesh: Mesh) -> None:
 
     There is no path override: output and marker names must agree. Face normals
     are computed from winding; degenerate faces receive zero normals.
+
+    A coordinate finite in float64 but beyond float32's range would become
+    infinite here, so it raises ValueError before anything is written.
     """
     require_geometry(mesh)
     path = mesh.destination
 
     verts, faces = mesh.geometry.verts, mesh.geometry.faces
     n = len(faces)
-    tv = verts[faces].astype(np.float32)               # (n, 3, 3)
+    with np.errstate(over='ignore'):
+        tv = verts[faces].astype(np.float32)           # (n, 3, 3); the one rounding
+    if not np.isfinite(tv).all():
+        raise ValueError(f"{path}: vertex coordinates are not finite in float32")
     nrm = np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0])
     ln = np.linalg.norm(nrm, axis=1)
     # Degenerate faces have no normal to speak of; leave those zeroed rather
@@ -491,12 +514,11 @@ def write(mesh: Mesh) -> None:
 #:
 #:   float32  `property float` x, y, z (extra float properties tolerated:
 #:            Blender may append them) and `list uchar uint` faces — what
-#:            `write_ply` writes for float32 geometry and Blender's
-#:            `wm.ply_export` writes back.
+#:            Blender's `wm.ply_export` writes back.
 #:   float64  exactly `property double` x, y, z, faces `list uchar int` or
 #:            `list uchar uint` — what PyMeshLab's `save_current_mesh` writes
 #:            with every extra turned off (VCG holds coordinates as float64),
-#:            and `write_ply` writes for float64 geometry.
+#:            and `write_ply` writes.
 #:
 #: **This is not a general PLY reader and must not become one** (owner,
 #: 2026-10-05: narrow is enough). Two fixed agreements, not a format: ASCII,
@@ -510,28 +532,22 @@ def write_ply(mesh: Mesh, path: str) -> None:
     """Write a narrow binary little-endian PLY.
 
     Unlike deliverable STL, PLY preserves the welded vertex table across a
-    boundary (the Blender subprocess today). Coordinates keep the geometry's
-    own precision: float64 is written as `double`, never cast down; anything
-    else as `float`, byte-identical to before. `path` is explicit because
-    this is a temporary file, not `mesh.destination`.
+    boundary (the Blender subprocess, the decimation cache). Coordinates are
+    written as `double`, `Geometry`'s float64, never cast down. `path` is
+    explicit because this is a temporary file, not `mesh.destination`.
     """
     require_geometry(mesh)
 
-    if mesh.geometry.verts.dtype.kind == 'f' and mesh.geometry.verts.dtype.itemsize == 8:
-        verts = np.ascontiguousarray(mesh.geometry.verts, dtype='<f8')
-        scalar = 'double'
-    else:
-        verts = np.ascontiguousarray(mesh.geometry.verts, dtype='<f4')
-        scalar = 'float'
+    verts = np.ascontiguousarray(mesh.geometry.verts, dtype='<f8')
     faces = np.ascontiguousarray(mesh.geometry.faces, dtype=np.uint32)
 
     header = (
         "ply\n"
         "format binary_little_endian 1.0\n"
         f"element vertex {len(verts)}\n"
-        f"property {scalar} x\n"
-        f"property {scalar} y\n"
-        f"property {scalar} z\n"
+        "property double x\n"
+        "property double y\n"
+        "property double z\n"
         f"element face {len(faces)}\n"
         "property list uchar uint vertex_indices\n"
         "end_header\n"
@@ -636,8 +652,8 @@ def read_ply(path: str, mesh: Mesh) -> Mesh:
 
     The vertex table is preserved, so no welding is needed. Anything outside
     the two layouts raises ValueError instead of being guessed at. Double
-    coordinates are rounded to float32, `Geometry`'s precision until it moves
-    to float64; a value finite in the file but beyond float32's range raises.
+    coordinates are kept exactly; float coordinates are widened to float64,
+    `Geometry`'s type.
     """
     with open(path, 'rb') as f:
         data = f.read()
@@ -652,10 +668,7 @@ def read_ply(path: str, mesh: Mesh) -> Mesh:
     # as a crash instead of a failed result.
     if not np.isfinite(coords).all():
         raise ValueError(f"{path} contains NaN or infinite vertex coordinates")
-    with np.errstate(over='ignore'):
-        verts = np.ascontiguousarray(coords, dtype=np.float32)
-    if not np.isfinite(verts).all():
-        raise ValueError(f"{path} has vertex coordinates beyond float32 range")
+    verts = np.ascontiguousarray(coords, dtype=np.float64)
 
     offset = layout.body + layout.n_verts * layout.width * int(layout.coord[-1])
     records = np.frombuffer(data, dtype=[('n', 'u1'), ('v', layout.index, 3)],
