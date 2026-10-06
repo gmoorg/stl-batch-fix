@@ -1,5 +1,32 @@
 """Run headless Blender with a deadline and captured output, optionally
-copying that output to a log after each run."""
+copying that output to a log after each run.
+
+Known deficiencies (2026-10-06):
+
+- **Blender outlives a SIGKILLed caller.** The deadline and the group kill
+  live in the caller's `Runner`; Blender gets no parent-death signal
+  (`proctree.exit_with_parent` covers only the repair children). Ctrl+C
+  runs the existing bounded cleanup (`cancel()`, `wait_for_idle`,
+  `reap_unresolved`), which can end unconfirmed. But when the batch runner
+  dies by `kill -9` or the OOM killer during intake conversion, Blender (its
+  own session) runs on with no deadline. Probe on a 2M-face OBJ, runner
+  killed 2 s in: Blender finished 9.8 s later with a size-complete export
+  and no `.partial` left, so the next run would reuse it. A second run
+  started while that orphan was still writing (0 s and 5 s after the kill)
+  converted into the same `.partial`: its conversion reported failure, and
+  the final export was header/size-consistent both times. That proves
+  neither byte equality nor safety: both writers share one `.partial`, one
+  can rename it while the other still writes, so overlapping conversions
+  race and the export's integrity is not guaranteed.
+- **`step_blender_repair` (not a default step) has the same gap one level
+  down.** Its Blender stays in the repair child's group, and the child's
+  parent-death signal reaches only the child, so a SIGKILLed runner would
+  leave that Blender running (from code reading; not measured).
+- Captured output reaches the log only after the run, so it is lost if the
+  caller dies mid-run.
+- The float64 PLY exchange used by `repair` is unverified against real
+  Blender (docs/refactor/modules.md, `blender` row).
+"""
 
 from __future__ import annotations
 
