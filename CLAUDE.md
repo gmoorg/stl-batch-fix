@@ -17,12 +17,11 @@
 >   coordinates (no axis change); stale exports accepted; triangles and
 >   quads only, a quad split on the diagonal that keeps both triangles
 >   inside; an OBJ face with 5+ vertices gets a `FAILED` marker (full
->   source copy) — a new marker path, since an intake conversion failure
->   is only a diagnostic today.
-> - **Open, ask one at a time:** (1) an ASCII STL facet without exactly
->   three vertices: also `FAILED`? (asked, not answered); (2) keep writing
->   exports to `<input>/<export dir>` or load OBJ/ASCII directly in
->   `mesh_io`.
+>   source copy), and so does an ASCII STL facet without exactly three
+>   vertices — a new marker path, since an intake conversion failure is
+>   only a diagnostic today.
+> - **Open:** keep writing exports to `<input>/<export dir>` or load
+>   OBJ/ASCII directly in `mesh_io`.
 > - **Code to read:** `mesh_io.kind` / `probe` / `Mesh.needs_conversion`
 >   (OBJ and ASCII STL get no triangle count until converted);
 >   `converter.prepare` (`pending` list, `convert_one`, `_conversion_failure`);

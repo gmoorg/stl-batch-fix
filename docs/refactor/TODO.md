@@ -89,7 +89,8 @@ parent's diagnosis ([orchestration.md](orchestration.md) step 5).
   failures: a full source copy, `.failed`). Today an intake conversion
   failure is only a diagnostic with no marker, so this adds a marker path
   at intake. ASCII STL has no n-gons by format (three `vertex` lines per
-  facet); a facet with any other count makes the file malformed. A quad
+  facet); a facet with any other count gets the same `FAILED` marker
+  (owner, 2026-10-06). A quad
   is split along whichever diagonal keeps both triangles inside it (the
   one through the reflex corner when concave; either when convex).
 
