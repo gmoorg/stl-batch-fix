@@ -32,7 +32,9 @@ Also done (2026-10-05): float64 `Geometry.verts`, job memory re-measured
 3. Everything else: volume guard on open shells
    ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), MeshFix
    time/NM guard ([post-wrap-meshfix-timeout.md](../errors/post-wrap-meshfix-timeout.md),
-   "Not yet done").
+   "Not yet done"). Idea only, not a requirement (owner, 2026-10-05): when
+   the decimated result has too many NM edges, alpha-wrap it before
+   PyMeshFix instead of handing MeshFix the NM edges.
 
 ## Reconstruction
 
