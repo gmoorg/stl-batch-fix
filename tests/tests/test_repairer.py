@@ -705,7 +705,7 @@ class TestRealTools(unittest.TestCase):
         self.assertTrue(scanner.scan(result.mesh).is_clean)
 
 
-class TestBlenderBeforePymeshfix(unittest.TestCase):
+class TestStepSequence(unittest.TestCase):
     """Composition and ordering behavior for an explicitly configured route.
 
     `repairer.PART_MESH_STEPS`/`_repair_part` (a fixed, always-composed
@@ -744,49 +744,49 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
             entries, mesh_in, None, steps, step=Step.PART)
         return outcome.ok, outcome.mesh, outcome.detail
 
-    def test_blender_runs_before_pymeshfix(self):
+    def test_steps_run_in_order(self):
         fake_steps = (('orient', self._record('orient')),
-                     ('blender', self._record('blender')),
+                     ('rebuild', self._record('rebuild')),
                      ('pymeshfix', self._record('pymeshfix')))
         ok, _, detail = self._run(fake_steps, tetra())
         self.assertTrue(ok, detail)
-        self.assertEqual(self.calls, ['orient', 'blender', 'pymeshfix'])
+        self.assertEqual(self.calls, ['orient', 'rebuild', 'pymeshfix'])
 
-    def test_pymeshfix_receives_blenders_output_not_the_original_part(self):
+    def test_the_next_step_receives_the_previous_output_not_the_original(self):
         """The composition must forward geometry, not just call order."""
         original = tetra()
-        blender_output = mesh([[9, 9, 9], [10, 9, 9], [9, 10, 9], [9, 9, 10]],
+        rebuilt = mesh([[9, 9, 9], [10, 9, 9], [9, 10, 9], [9, 9, 10]],
                               TETRA_FACES)
         seen_by_pymeshfix = []
 
         def fake_orient(m, config=None):
             return True, m, 'oriented'
 
-        def fake_blender(m, config=None):
-            return True, blender_output, 'blender ran'
+        def fake_rebuild(m, config=None):
+            return True, rebuilt, 'rebuild ran'
 
         def fake_pymeshfix(m, config=None):
             seen_by_pymeshfix.append(m)
             return True, m, 'pymeshfix ran'
 
-        fake_steps = (('orient', fake_orient), ('blender', fake_blender),
+        fake_steps = (('orient', fake_orient), ('rebuild', fake_rebuild),
                      ('pymeshfix', fake_pymeshfix))
         self._run(fake_steps, original)
 
         self.assertEqual(len(seen_by_pymeshfix), 1)
-        self.assertIs(seen_by_pymeshfix[0], blender_output)
+        self.assertIs(seen_by_pymeshfix[0], rebuilt)
         self.assertFalse(
             np.array_equal(seen_by_pymeshfix[0].geometry.verts,
                            original.geometry.verts),
-            "pymeshfix must see blender's changed geometry, not the input")
+            "pymeshfix must see the rebuilt geometry, not the input")
 
-    def test_a_hard_blender_failure_stops_before_pymeshfix(self):
+    def test_a_hard_failure_stops_the_sequence(self):
         fake_steps = (('orient', lambda m, config=None: (True, m, 'oriented')),
-                     ('blender', self._record('blender', ok=False)),
+                     ('rebuild', self._record('rebuild', ok=False)),
                      ('pymeshfix', self._record('pymeshfix')))
         ok, _, detail = self._run(fake_steps, tetra())
         self.assertFalse(ok)
-        self.assertEqual(self.calls, ['blender'])
+        self.assertEqual(self.calls, ['rebuild'])
         self.assertNotIn('pymeshfix', self.calls)
 
 class TestAlphaWrapBinding(unittest.TestCase):
@@ -1283,83 +1283,6 @@ class TestPartDecimation(unittest.TestCase):
         self.assertEqual(len([s for s in result.steps if s.step is Step.PART]), 1)
         result = repair(tetra(), min_shell_faces=0, part_steps=())
         self.assertEqual([s for s in result.steps if s.step is Step.PART], [])
-
-
-class TestNestedProcessGroupWiring(unittest.TestCase):
-    """Proves `repairer.repair(..., nested_process_group=True)` — the REAL
-    entry point, not a bypass — actually reaches `blender.step_blender_repair`
-    through `StepConfig`, deciding whether the Blender invocation it launches
-    gets its own process session.
-    """
-
-    def _stand_in(self, body: str) -> str:
-        import os
-        import stat
-        import tempfile
-        fd, path = tempfile.mkstemp(suffix='.sh')
-        with os.fdopen(fd, 'w') as f:
-            f.write("#!/bin/sh\n" + body)
-        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
-        self.addCleanup(lambda: os.unlink(path) if os.path.exists(path) else None)
-        return path
-
-    def _run_with_blender_step(self, nested_process_group):
-        import os
-        import tempfile
-        from libs import blender, mesh_io
-
-        # A stand-in that copies a pre-built valid PLY to Blender's own
-        # `--dst` argument (parsed out of the rendered script file, `$3`,
-        # since the script assigns `dst = '<path>'` — matching the shape
-        # `blender.REPAIR_SCRIPT.format` always produces): `repair()`
-        # requires the destination file to exist to accept the run.
-        source_ply = os.path.join(tempfile.mkdtemp(prefix='repairer-nested-test-'),
-                                  'canned.ply')
-        mesh_io.write_ply(mesh(TETRA_VERTS, TETRA_FACES), source_ply)
-        exe = self._stand_in(
-            "dst=$(sed -n \"s/^dst = '\\(.*\\)'$/\\1/p\" \"$3\")\n"
-            f"cp {source_ply} \"$dst\"\n"
-            "echo BLENDER_OK\n"
-            "exit 0\n"
-        )
-        captured = {}
-        real_popen = __import__('subprocess').Popen
-
-        def spy(*args, **kwargs):
-            captured['start_new_session'] = kwargs.get('start_new_session')
-            return real_popen(*args, **kwargs)
-
-        m = mesh(TETRA_VERTS, TETRA_FACES)
-        # `step_blender_repair` constructs its own `Runner` internally with
-        # no way to inject the stand-in executable — patch `Runner.__init__`
-        # to force our stand-in while preserving the constructor's own
-        # `own_process_group` argument, which is exactly the thing under
-        # test (it is `step_blender_repair`'s own decision, driven by
-        # `config.nested_process_group`, and must reach here unmodified).
-        orig_init = blender.Runner.__init__
-
-        def patched_init(self, executable='blender', own_process_group=True):
-            orig_init(self, exe, own_process_group)
-
-        with mock.patch('subprocess.Popen', spy), \
-             mock.patch.object(blender.Runner, '__init__', patched_init):
-            result = repair(
-                m, part_steps=(('blender_repair', blender.step_blender_repair),),
-                nested_process_group=nested_process_group)
-        self.assertTrue(result.ok, result.problem)
-        return captured['start_new_session']
-
-    def test_nested_true_does_not_take_its_own_session(self):
-        started_own_session = self._run_with_blender_step(nested_process_group=True)
-        self.assertFalse(started_own_session,
-                         "nested_process_group=True must reach Runner as "
-                         "own_process_group=False")
-
-    def test_nested_false_default_takes_its_own_session(self):
-        started_own_session = self._run_with_blender_step(nested_process_group=False)
-        self.assertTrue(started_own_session,
-                        "nested_process_group=False (the default) must "
-                        "reach Runner as own_process_group=True")
 
 
 if __name__ == '__main__':

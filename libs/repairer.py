@@ -223,7 +223,6 @@ def repair(mesh: Mesh,
            part_steps: tuple[tuple[str, Callable[..., tuple[bool, Mesh, str]]], ...] | None = None,
            step_logger: StepLogger = steplog.null_logger,
            source_name: str = '',
-           nested_process_group: bool = False,
            *,
            skip_clean: bool = False,
            reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
@@ -254,12 +253,6 @@ def repair(mesh: Mesh,
     contract — so an incremental record survives even a crash partway
     through. `source_name` identifies which file's steps these are, for a
     caller sharing one log across several files/processes.
-
-    `nested_process_group` is a caller-known fact (matching `min_shell_faces`'s
-    own style — supplied by the caller, not measured per mesh), threaded into
-    every part's own `StepConfig` so `blender.step_blender_repair`, if it
-    appears in `part_steps`, knows whether to give its Blender invocation its
-    own process session. See `pipeconfig.StepConfig.nested_process_group`.
 
     `skip_clean` turns on the `is_already_clean` gate, off by default because
     the gate is not yet validated on real models (docs/refactor/TODO.md). It
@@ -352,7 +345,6 @@ def repair(mesh: Mesh,
             target_faces = len(part.geometry.faces)
             part_config = pipeconfig.StepConfig(
                 faceCount=target_faces, whole_model_diag=whole_model_diag,
-                nested_process_group=nested_process_group,
                 reconstruct_memory_budget_bytes=reconstruct_budget_bytes)
             part_id = f'{index + 1}/{len(parts)}'
 
@@ -485,8 +477,8 @@ def _closing_result(mesh: Mesh, before: np.ndarray, steps: list[StepResult],
     skipped repair is measured exactly like a performed one. Raises on
     unmeasurable geometry; `repair` turns that into a failed `Result`.
     """
-    # A tool can hand back geometry that is not measurable — PyMeshFix,
-    # PyMeshLab and Blender all return arrays this module did not build.
+    # A tool can hand back geometry that is not measurable — PyMeshFix and
+    # PyMeshLab both return arrays this module did not build.
     # Checked before the closing measurements rather than after, because
     # `_count_lost` feeds those arrays to cKDTree, which raises on
     # non-finite input; that raise used to happen below this block and so

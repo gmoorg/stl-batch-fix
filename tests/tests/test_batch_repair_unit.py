@@ -124,32 +124,6 @@ class TestProcessOneFile(unittest.TestCase):
         self.assertEqual(result.category, 'write_failure')
         self.assertIn('disk failure', result.reason)
 
-    def test_nested_process_group_reaches_processor_process(self):
-        """`--managed-child`'s ultimate destination: `_process_one_file`'s
-        own `nested_process_group` parameter must reach `processor.process`
-        as the SAME keyword, unmodified."""
-        path = self.fixture()
-        dest = self.root / 'out.stl'
-        captured = {}
-
-        def fake_process(mesh, max_faces, **kwargs):
-            captured['nested_process_group'] = kwargs.get('nested_process_group')
-            return processor.Outcome(
-                Indicator.PROCESS, mesh_io.load(mesh_io.probe(str(path), str(dest))),
-                None, 'clean')
-
-        with mock.patch.object(processor, 'process', fake_process):
-            _process_one_file(str(path), str(dest), 0, nested_process_group=True)
-        self.assertTrue(captured['nested_process_group'])
-
-        with mock.patch.object(processor, 'process', fake_process):
-            _process_one_file(str(path), str(dest), 0, nested_process_group=False)
-        self.assertFalse(captured['nested_process_group'])
-
-        with mock.patch.object(processor, 'process', fake_process):
-            _process_one_file(str(path), str(dest), 0)   # default
-        self.assertFalse(captured['nested_process_group'])
-
 
 if __name__ == '__main__':
     unittest.main()

@@ -101,7 +101,7 @@ class TestSourceIdentity(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def _fake_process(self, mesh, max_faces, part_steps=None, step_logger=None,
-                      source_name='', nested_process_group=False, *,
+                      source_name='', *,
                       skip_clean=False, reconstruct_budget_bytes=None,
                       min_shell_faces=None):
         # A trivial stand-in for `processor.process` that still drives the
@@ -311,7 +311,6 @@ class TestReportingWriteFailure(unittest.TestCase):
             parser.add_argument('--destination', required=True)
             parser.add_argument('--max-faces', required=True)
             parser.add_argument('--result-file', required=True)
-            parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
             parser.add_argument('--mode', default='repair')
@@ -425,7 +424,6 @@ class TestSigkillRetention(unittest.TestCase):
             parser.add_argument('--destination', required=True)
             parser.add_argument('--max-faces', required=True)
             parser.add_argument('--result-file', required=True)
-            parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
             parser.add_argument('--mode', default='repair')
@@ -560,7 +558,6 @@ class TestRealRunProgressLog(unittest.TestCase):
             parser.add_argument('--destination', required=True)
             parser.add_argument('--max-faces', required=True)
             parser.add_argument('--result-file', required=True)
-            parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
             parser.add_argument('--mode', default='repair')

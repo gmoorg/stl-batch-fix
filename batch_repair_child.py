@@ -2,7 +2,7 @@
 """Internal: repair ONE file for `batch_repair.py`. Not for direct use.
 
 The batch runner spawns this script once per file, so a timeout, native
-crash, OOM kill or stray Blender descendant ends only this process. Every
+crash, OOM kill or stray descendant ends only this process. Every
 value it needs arrives on the command line from the parent; it never reads
 `batch_repair.toml`, so editing the config mid-run cannot change a running
 batch. `batch_repair.py` itself takes no arguments — this script is where
@@ -76,14 +76,6 @@ def run_one_file(args) -> int:
     child that dies before writing (OOM-killed, segfault inside CGAL,
     SIGKILL from the parent) simply never produces the file, which is
     itself the signal the parent's crash/reconciliation path acts on.
-
-    `args.managed_child` is the explicit marker that this run lives inside a
-    `proctree`-owned process group: `batch_repair._spawn_child` always sets
-    it. Present -> `nested_process_group=True` reaches `processor.process`,
-    so a nested `step_blender_repair` Blender does not get its own session
-    (staying part of the enclosing worker's own group, which
-    `terminate_and_confirm` can then still reach). Absent (a direct
-    diagnostic or test invocation) -> `False`, the safe default.
     """
     step_logger = _with_separators(steplog.open_step_log(args.log_file) if args.log_file
                                    else steplog.null_logger)
@@ -95,7 +87,7 @@ def run_one_file(args) -> int:
     else:
         result = batch_repair._process_one_file(
             args.one_file, args.destination, args.max_faces, step_logger,
-            nested_process_group=args.managed_child, skip_clean=args.skip_clean,
+            skip_clean=args.skip_clean,
             reconstruct_budget_bytes=args.reconstruct_budget_bytes,
             min_shell_faces=args.min_shell_faces,
             load_path=args.load_from)
@@ -142,7 +134,6 @@ def main(argv=None) -> int:
     parser.add_argument('--destination', required=True, metavar='DST')
     parser.add_argument('--result-file', required=True, metavar='PATH')
     parser.add_argument('--max-faces', required=True, type=_non_negative_int, metavar='N')
-    parser.add_argument('--managed-child', action='store_true')
     parser.add_argument('--log-file', metavar='PATH')
     parser.add_argument('--skip-clean', action='store_true')
     parser.add_argument('--reconstruct-budget-bytes', type=_positive_int, metavar='BYTES',

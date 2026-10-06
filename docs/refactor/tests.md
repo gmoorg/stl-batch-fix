@@ -21,7 +21,7 @@ tools/project_python.sh tests/tests/make_fixtures.py --check
 - Verify step order and that every split part reaches repair independently.
 - Compare controlled defects with a known-correct surface.
 - Separate wrapper tests from policy tests; native tool success is not pipeline success.
-- Use real Blender/PyMeshFix only where a stub cannot prove the boundary.
+- Use real native tools (PyMeshFix, PyMeshLab) only where a stub cannot prove the boundary.
 - Cover scale, opposite winding, component retention, invalid input, timeout/crash, atomic writes, and exactly-once reporting.
 
 High-priority probes are `small_valid_shell.stl`, `opposite_volume_shells.stl`, `decimation_lost_appendage.stl`, and `reversed_tjunction_chain.stl`. Their construction is tested; pipeline verdict tests remain missing.
@@ -69,8 +69,7 @@ produce; they protect behaviour, not composition.
 
 - Tool failure → result/step failure, not a crash: `test_alphawrap`
   (empty result), `test_decimator` (failure recorded), `test_meshfix`
-  (returned failure), `test_meshlab` (filter exception), `test_blender`
-  (returned failure / raised exception reported), `test_winding` (open
+  (returned failure), `test_meshlab` (filter exception), `test_winding` (open
   result rejected, invalid input rejected before native calls, failures are
   step results).
 - Libraries are not tested (owner, 2026-10-05): they are checked once when a
@@ -103,7 +102,7 @@ the pipeline is assembled, so every refactor rewrites them:
 |---|---|---|
 | `TestSequence` (order, one call per part, part whole, destination kept, single shell not split) | each part reaches repair intact; merge keeps destination | end-to-end: multi-shell sphere fixture → every shell present, published at the right path |
 | `TestPartIdentity` (part ids, `-` for split/merge) | log attribution | end-to-end: `batch.log` lines carry `1/2`, `2/2` |
-| `TestBlenderBeforePymeshfix.test_production_sequence_is_winding_decimate_meshfix` | default step list | end-to-end outcome on defect fixtures (sequence names unnecessary) |
+| `TestStepSequence.test_production_sequence_is_winding_decimate_meshfix` | default step list | end-to-end outcome on defect fixtures (sequence names unnecessary) |
 | `TestAlphaWrapBinding` (whole-mesh spacing, caps, custom tool bypasses CGAL) | spacing from WHOLE mesh, not per part | per-step: two shells of different size rebuilt with the same `h` (equal bevel / face density) |
 | `TestPartDecimation` (7) | one pass per part with its own target, skipped within target, never fails on a miss, a decimator error fails before MeshFix | per-step: covered for shape by `test_decimator.TestShapeIsKept` (rebuilt rod tip, round sphere); end-to-end `c_multishell_rod` |
 | `TestContract` (no remove-T-vertices, no re-orient filter) | removed MeshLab filters stay out | none needed — those tools are out of the default pipeline; delete with the unwired-tool suites |
@@ -112,7 +111,8 @@ the pipeline is assembled, so every refactor rewrites them:
 
 **Suites outside the default pipeline** (decide with item "remove tests of
 unwired tools"): `test_welder` (39), `test_meshlab` (5), alpha-wrap now explicit-use
-(`test_alphawrap`, 20), Blender repair parts of `test_blender`.
+(`test_alphawrap`, 20). Blender's tests were archived with the module
+(2026-10-06, modules.md `blender` note).
 
 Not a target: frozen-dataclass checks (10) — they protect immutability,
 which nothing else checks, and never churn. Exact duplicates were removed

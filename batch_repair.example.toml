@@ -108,8 +108,8 @@ workers = 0
 # Default: 3600.0
 per_file_timeout = 3600.0
 
-# Seconds to wait for a killed child (and anything it started, e.g. Blender)
-# to be confirmed gone. Must be a finite positive number.
+# Seconds to wait for a killed child (and anything it started) to be
+# confirmed gone. Must be a finite positive number.
 # Default: 10.0
 reap_deadline = 10.0
 

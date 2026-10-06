@@ -631,7 +631,7 @@ class TestDimensions(MeshIOCase):
 
 
 class TestPly(MeshIOCase):
-    """The Blender scratch boundary.
+    """The PLY boundary (the decimation cache; formerly Blender's too).
 
     PLY exists here for one reason: STL stores no vertex table, so a mesh
     written as STL arrives as loose triangles and has to be welded back by
@@ -663,8 +663,8 @@ class TestPly(MeshIOCase):
     def test_a_non_finite_vertex_is_refused(self):
         """A03, at the other entrance: `load` is not the only way in.
 
-        Rejecting NaN at `load` covers files.  Geometry also arrives from
-        Blender through this boundary, and a NaN that gets in here reaches
+        Rejecting NaN at `load` covers files.  Geometry also arrives
+        through this boundary, and a NaN that gets in here reaches
         `repairer._count_lost`, whose cKDTree raises from outside the repair
         sequence's own error handling — the crash the review recorded.
         """
@@ -731,7 +731,7 @@ class TestPly(MeshIOCase):
 
     def test_an_ascii_ply_is_rejected(self):
         """This reader handles one dialect deliberately — what `write_ply`
-        emits and Blender's exporter produces."""
+        emits and Blender's exporter produced (Blender retired 2026-10-06)."""
         mesh = self.loaded()
         path = self.path('ascii.ply')
         with open(path, 'wb') as f:
@@ -749,7 +749,7 @@ class TestPly(MeshIOCase):
             read_ply(path, mesh)
 
     def test_extra_float_vertex_properties_are_dropped(self):
-        """Blender may append normals depending on export flags. Extra float
+        """An exporter (Blender's did) may append normals. Extra float
         columns shift the stride and must be skipped, not misread as
         coordinates."""
         mesh = self.loaded()
@@ -776,7 +776,7 @@ class TestPly(MeshIOCase):
         self.assertTrue(np.array_equal(back.geometry.verts, verts))
 
     def test_a_non_triangular_face_is_rejected(self):
-        """Blender triangulates before export, so a quad means the file did
+        """Both layouts carry triangles only, so a quad means the file did
         not come from where it claims to have."""
         mesh = self.loaded()
         verts = mesh.geometry.verts
@@ -822,8 +822,8 @@ FLOAT_XYZ = ['float x', 'float y', 'float z']
 
 
 class TestPlyLayouts(MeshIOCase):
-    """The two accepted layouts (float32: Blender; float64: PyMeshLab and
-    write_ply) and the strict rejection of everything else."""
+    """The two accepted layouts (float32: the retired Blender's; float64:
+    PyMeshLab and write_ply) and the strict rejection of everything else."""
 
     def mesh(self, verts=TETRA_V, dtype=np.float64):
         g = Geometry(np.asarray(verts, dtype), TETRA_F.astype(np.int64))

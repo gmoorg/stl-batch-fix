@@ -35,7 +35,7 @@ from unittest import mock
 
 import numpy as np
 
-from libs import blender, execstep, mesh_io, meshfix, meshlab, repairer, scanner, welder
+from libs import execstep, mesh_io, meshfix, meshlab, repairer, scanner, welder
 from tests.tests import defect_spheres as ds
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -89,7 +89,7 @@ def load(name):
 
 def tool_call_parts(result):
     """The named per-part `Step.PART` entries for this suite's explicitly
-    configured sequence (orient, Blender, PyMeshFix — installed in
+    configured sequence (orient, PyMeshFix — installed in
     `ProbeCase.setUp` via `repairer.DEFAULT_PART_STEPS`).
 
     Each entry in the sequence produces its own `Step.PART` record (the
@@ -121,7 +121,6 @@ class ProbeCase(unittest.TestCase):
                  execstep.mesh_entry('clean_duplicate_faces', meshlab.step_clean_duplicate_faces),
                  execstep.mesh_entry('clean_unreferenced', meshlab.step_clean_unreferenced))
         parts = (execstep.mesh_entry('step_orient', meshlab.step_orient),
-                 execstep.mesh_entry('step_blender_repair', blender.step_blender_repair),
                  execstep.mesh_entry('step_meshfix_repair', meshfix.step_meshfix_repair))
         # `PART_MESH_STEPS` was renamed `DEFAULT_PART_STEPS` in the
         # uniform-step refactor (docs/refactor/TODO.md).
@@ -347,8 +346,8 @@ class TestTheSplitPath(ProbeCase):
     def test_merge_puts_the_parts_back(self):
         """`merge` concatenates; the face count must be the sum of the parts.
 
-        This suite's configured per-part sequence is (orient, Blender,
-        PyMeshFix) — see `ProbeCase.setUp` — so MERGE consumes the LAST
+        This suite's configured per-part sequence is (orient, PyMeshFix)
+        — see `ProbeCase.setUp` — so MERGE consumes the LAST
         entry's output (PyMeshFix's), one `Step.PART` record per part.
         """
         result = repairer.repair(load('two_shells'))

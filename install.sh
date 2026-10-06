@@ -127,18 +127,6 @@ else
     "$PYTHON" -m pip install numpy && ok "numpy installed" || fail "numpy install failed"
 fi
 
-# ── Blender ───────────────────────────────────────────────────────────────────
-echo "→ Blender"
-if command -v blender &>/dev/null; then
-    ver=$(blender --version 2>&1 | head -1 || echo "unknown")
-    ok "$ver"
-else
-    fail "Blender not found on PATH — it is REQUIRED: batch_repair.py converts OBJ and"
-    echo "   ASCII STL with it and will not start without it."
-    echo "   Download: https://www.blender.org/download/ and put 'blender' on your PATH."
-    exit 1
-fi
-
 echo
 echo "=== Done. First run: cp batch_repair.example.toml batch_repair.toml, edit it,"
 echo "    then: tools/project_python.sh batch_repair.py ==="

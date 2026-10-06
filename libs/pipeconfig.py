@@ -30,9 +30,10 @@ class StepConfig:
 
     Every mesh step has the signature `(mesh, config: StepConfig | None =
     None) -> (ok, mesh, detail)`. Most steps ignore `config` entirely;
-    decimation reads `faceCount`, alpha wrap reads `whole_model_diag`. Kept
-    to exactly these two fields "for now" (docs/refactor/TODO.md) — add a
-    field here only when a step actually needs it, not speculatively.
+    decimation reads `faceCount`, alpha wrap and winding reconstruction read
+    `whole_model_diag`, winding reconstruction reads
+    `reconstruct_memory_budget_bytes`. Add a field here only when a step
+    actually needs it, not speculatively.
 
     faceCount         target face count for a decimation step; 0 means "no
                       target for this call" (matches `decimator.decimate`'s
@@ -41,19 +42,6 @@ class StepConfig:
                       per `repair()` call after initial decimation and
                       before splitting, then carried unchanged into every
                       part's own `StepConfig` — see `repairer._repair_sequence`.
-    nested_process_group  read by `blender.step_blender_repair` to decide
-                      whether the Blender invocation it launches should get
-                      its own process session. `False` (the default) means
-                      "not nested — safe, this Blender invocation should own
-                      its own process group", matching `blender.Runner`'s own
-                      safe-by-default. `True` means this step is known to run
-                      nested inside another, enclosing `proctree`-managed
-                      process group (e.g. a batch worker), so the Blender it
-                      launches must NOT get its own session — otherwise the
-                      enclosing worker's own group-kill would no longer reach
-                      it. Threaded in from `repairer.repair`/`processor.process`,
-                      ultimately from `batch_repair.py`'s explicit
-                      `--managed-child` marker.
     reconstruct_memory_budget_bytes  per-part memory sizing target for
                       `winding.step_winding_reconstruct`, which picks the
                       fewest grid blocks whose ESTIMATED peak fits it
@@ -65,5 +53,4 @@ class StepConfig:
 
     faceCount: int = 0
     whole_model_diag: float | None = None
-    nested_process_group: bool = False
     reconstruct_memory_budget_bytes: int = 10_000_000_000

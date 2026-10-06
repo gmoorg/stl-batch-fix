@@ -43,7 +43,7 @@ def exit_with_parent(parent_pid: int) -> None:
       returns with the child alive; the child then dies when that worker
       thread exits — intended.
     - It reaches this process only, not its group. The default pipeline has
-      no descendants (Blender repair is not a default step).
+      no descendants.
 
     Raises `OSError` when `prctl` fails, so a child never runs unprotected
     without saying so.
@@ -112,8 +112,8 @@ def terminate_and_confirm(proc: subprocess.Popen, deadline: float
     `proc` must have been spawned with `start_new_session=True`, making its
     PID also its process group ID — `os.killpg(proc.pid, ...)` then reaches
     it and every descendant that has not itself called `setsid`/`setpgid`
-    (a documented, accepted limitation: this project's only descendant,
-    Blender via `libs/blender.py`'s `Runner`, does not do that).
+    (a documented, accepted limitation: the default pipeline's children
+    start no descendants).
 
     Confirmation requires BOTH the direct child being reaped (a `/proc`
     sweep alone can miss an unreaped zombie that is nonetheless the direct

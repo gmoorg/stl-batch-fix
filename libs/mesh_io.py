@@ -535,12 +535,14 @@ def write(mesh: Mesh) -> None:
 #:
 #: Deliberately bare: `x, y, z` and a triangle list, nothing else. No normals —
 #: `write` derives STL's from the winding, so they carry no information
-#: (measured: Blender's old normal vote reported "agree: 801, disagree: 0") —
+#: (measured with the retired Blender repair: its normal vote reported
+#: "agree: 801, disagree: 0") —
 #: and no colour, UVs or custom properties.
 #:
-#:   float32  `property float` x, y, z (extra float properties tolerated:
-#:            Blender may append them) and `list uchar uint` faces — what
-#:            Blender's `wm.ply_export` writes back.
+#:   float32  `property float` x, y, z (extra float properties tolerated)
+#:            and `list uchar uint` faces — what Blender's `wm.ply_export`
+#:            wrote back. Blender is retired (2026-10-06): nothing produces
+#:            this layout now; kept as a narrow, tested reader.
 #:   float64  exactly `property double` x, y, z, faces `list uchar int` or
 #:            `list uchar uint` — what PyMeshLab's `save_current_mesh` writes
 #:            with every extra turned off (VCG holds coordinates as float64),
@@ -558,7 +560,7 @@ def write_ply(mesh: Mesh, path: str) -> None:
     """Write a narrow binary little-endian PLY.
 
     Unlike deliverable STL, PLY preserves the welded vertex table across a
-    boundary (the Blender subprocess, the decimation cache). Coordinates are
+    boundary (the decimation cache). Coordinates are
     written as `double`, `Geometry`'s float64, never cast down. `path` is
     explicit because this is a temporary file, not `mesh.destination`.
     """
@@ -689,7 +691,7 @@ def read_ply(path: str, mesh: Mesh) -> Mesh:
                           offset=layout.body)
     coords = block.reshape(layout.n_verts, layout.width)[:, :3]
     # `load` guards the file entrance; this is the other one. A NaN arriving
-    # from Blender reaches `repairer._count_lost`, whose cKDTree raises from
+    # in a PLY reaches `repairer._count_lost`, whose cKDTree raises from
     # outside the repair sequence's own error handling, so the failure escapes
     # as a crash instead of a failed result.
     if not np.isfinite(coords).all():
@@ -702,7 +704,7 @@ def read_ply(path: str, mesh: Mesh) -> Mesh:
     if layout.n_faces and not np.all(records['n'] == 3):
         raise ValueError(
             f"{path} contains a non-triangular face — this boundary carries "
-            f"triangles only, and Blender triangulates before export")
+            f"triangles only")
     faces = records['v'].astype(np.int64)
     if layout.n_faces and (faces.min() < 0 or faces.max() >= layout.n_verts):
         raise ValueError(f"{path} has face indices outside its {layout.n_verts} vertices")

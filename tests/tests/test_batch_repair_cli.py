@@ -313,9 +313,9 @@ class TestBatchRepairCLI(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('--destination', result.stderr)
 
-    def test_spawn_child_argv_includes_managed_child_flag(self):
-        """`_spawn_child` (the ONLY code that knows the child will live
-        inside a proctree-owned group) must always add `--managed-child`."""
+    def test_spawn_child_passes_the_runner_pid(self):
+        """`_spawn_child` tells the child this runner's PID, so the child
+        dies with it (`proctree.exit_with_parent`)."""
         from libs.mesh_io import Kind, Mesh
         mesh = Mesh(str(self.source / 'a.stl'), str(self.output / 'a.stl'),
                    Kind.BINARY_STL, 4, True)
@@ -330,7 +330,6 @@ class TestBatchRepairCLI(unittest.TestCase):
             proc = batch_repair._spawn_child(
                 sys.executable, str(Path(batch_repair.__file__)), mesh, 0, '/tmp/result.json')
             proc.wait()
-        self.assertIn('--managed-child', captured['argv'])
         argv = captured['argv']
         self.assertEqual(argv[argv.index('--parent-pid') + 1], str(os.getpid()))
 
@@ -348,7 +347,7 @@ class TestBatchRepairCLI(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, str(script), '--one-file', str(source),
              '--destination', str(destination), '--result-file', str(result_file),
-             '--max-faces', '0', '--managed-child', '--parent-pid', str(not_my_parent)],
+             '--max-faces', '0', '--parent-pid', str(not_my_parent)],
             cwd=self.root, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, proctree.RUNNER_GONE_EXIT, result.stderr)
         self.assertIn('already gone', result.stderr)
@@ -373,54 +372,6 @@ class TestBatchRepairCLI(unittest.TestCase):
                     self.assertRaises(SystemExit):
                 batch_repair_child.main(base + ['--parent-pid', bad])
             arm.assert_not_called()
-
-    def test_managed_child_flag_present_reaches_processor_as_true(self):
-        """`batch_repair_child.run_one_file` invoked with `--managed-child` present (simulating
-        a `_spawn_child`-launched batch child) confirms `nested_process_group=True`
-        reaches `processor.process`."""
-        from libs import mesh_io, processor
-        from libs.mesh_io import Geometry, Kind, Mesh
-        import numpy as np
-
-        source = self.source / 'body.stl'
-        geometry = Geometry(
-            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64),
-            np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64))
-        mesh_io.write(Mesh(str(source), str(source), Kind.BINARY_STL, 4, True, geometry=geometry))
-        dest = self.output / 'out.stl'
-
-        class FakeArgs:
-            pass
-
-        captured = {}
-
-        def fake_process(mesh, max_faces, **kwargs):
-            captured['nested_process_group'] = kwargs.get('nested_process_group')
-            from libs.indicators import Indicator
-            return processor.Outcome(
-                Indicator.PROCESS, mesh_io.load(mesh_io.probe(str(source), str(dest))),
-                None, 'clean')
-
-        for flag_present, expected in ((True, True), (False, False)):
-            with self.subTest(flag_present=flag_present):
-                args = FakeArgs()
-                args.one_file = str(source)
-                args.destination = str(dest)
-                args.max_faces = 0
-                args.log_file = None
-                fd_result, result_path = tempfile.mkstemp()
-                import os
-                os.close(fd_result)
-                args.result_file = result_path
-                args.managed_child = flag_present
-                args.skip_clean = False
-                args.reconstruct_budget_bytes = 10 ** 10
-                args.min_shell_faces = 100
-                args.mode, args.cache_path, args.load_from = 'repair', None, None
-                with mock.patch.object(processor, 'process', fake_process):
-                    batch_repair_child.run_one_file(args)
-                os.unlink(result_path)
-                self.assertEqual(captured['nested_process_group'], expected)
 
 
 class TestCleanGateFlags(unittest.TestCase):
@@ -483,7 +434,6 @@ class TestCleanGateFlags(unittest.TestCase):
             args.max_faces = 0
             args.log_file = None
             args.result_file = str(self.root / 'result.json')
-            args.managed_child = False
             args.skip_clean = flag
             args.reconstruct_budget_bytes = 10 ** 10
             args.min_shell_faces = 100
@@ -493,8 +443,7 @@ class TestCleanGateFlags(unittest.TestCase):
         self.assertEqual(captured, [False, True])
 
     def test_real_child_script_with_gate_logs_and_publishes(self):
-        """Real child script and argparse: the flags parse, `--managed-child`
-        is accepted, and the gate's verdict lands in the step log."""
+        """Real child script and argparse: the flags parse, and the gate's verdict lands in the step log."""
         source = self._tetra_file()
         dest = self.root / 'out' / 'body.stl'
         log = self.root / 'steps.log'
@@ -503,7 +452,7 @@ class TestCleanGateFlags(unittest.TestCase):
             [sys.executable, str(script), '--one-file', str(source),
              '--destination', str(dest), '--max-faces', '0',
              '--result-file', str(self.root / 'result.json'),
-             '--managed-child', '--log-file', str(log), '--skip-clean'],
+             '--log-file', str(log), '--skip-clean'],
             cwd=self.root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         text = log.read_text()
@@ -666,7 +615,7 @@ class TestMinShellFacesPlumbing(unittest.TestCase):
         args.one_file, args.destination = str(source), str(dest)
         args.max_faces, args.log_file = 0, None
         args.result_file = str(self.root / 'result.json')
-        args.managed_child, args.skip_clean = False, False
+        args.skip_clean = False
         args.reconstruct_budget_bytes = 10 ** 10
         args.min_shell_faces = 250
         args.mode, args.cache_path, args.load_from = 'repair', None, None

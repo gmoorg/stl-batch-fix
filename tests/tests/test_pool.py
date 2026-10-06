@@ -300,7 +300,7 @@ class TestFailureHandling(unittest.TestCase):
         """The raise waits for the join, so a live handler is not abandoned.
 
         `start()` re-raises only after joining, which matters because a handler
-        holding a temp file or a Blender child must reach its own cleanup.
+        holding a temp file or a child process must reach its own cleanup.
         """
         handed_out = []
         running = threading.Event()

@@ -265,7 +265,6 @@ def _log_line(message: str) -> None:
 
 def _process_one_file(source_path: str, destination: str, max_faces: int,
                        step_logger: steplog.StepLogger = steplog.null_logger,
-                       nested_process_group: bool = False,
                        *,
                        skip_clean: bool = False,
                        reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
@@ -278,8 +277,6 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
     the repair pass loads what the prepare pass saved. Markers still copy
     `source_path`, the job's own source.
 
-    `nested_process_group` is threaded straight into `processor.process(...)` —
-    see `batch_repair_child.run_one_file`'s docstring for where it comes from.
     `skip_clean` comes from the opt-in `--skip-clean` flag; see
     `repairer.repair`.
     """
@@ -321,7 +318,6 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                 category = 'process_failure'
                 outcome = processor.process(loaded, max_faces,
                                            step_logger=step_logger, source_name=source_name,
-                                           nested_process_group=nested_process_group,
                                            skip_clean=skip_clean,
                                            reconstruct_budget_bytes=reconstruct_budget_bytes,
                                            min_shell_faces=min_shell_faces)
@@ -604,7 +600,7 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
     PID so the child dies with it (`proctree.exit_with_parent`)."""
     argv = [python, script, '--one-file', mesh.path, '--destination', mesh.destination,
            '--max-faces', str(max_faces), '--result-file', result_file,
-           '--managed-child', '--parent-pid', str(os.getpid())]
+           '--parent-pid', str(os.getpid())]
     if log_file:
         argv += ['--log-file', log_file]
     if skip_clean:

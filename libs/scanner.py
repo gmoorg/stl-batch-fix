@@ -96,7 +96,7 @@ def degenerate_mask(faces: np.ndarray) -> np.ndarray:
 def scan(mesh: Mesh) -> Scan:
     """Count the mesh's open and non-manifold edges.
 
-    The hot path: this runs after decimation, after Blender, and around every
+    The hot path: this runs after decimation and around every
     repair pass, so it is one `np.unique` over the edge array and nothing else.
     """
     _require_geometry(mesh)

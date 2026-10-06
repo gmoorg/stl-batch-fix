@@ -57,12 +57,10 @@ parent's diagnosis ([orchestration.md](orchestration.md) step 5).
 Done 2026-10-06: `textmesh` converts OBJ and ASCII STL in-process; the
 decisions (source coordinates, triangles and quads only, FAILED marker for
 malformed input, bowtie quads split anyway) and the Blender agreement
-measurement are in [modules](modules.md) (`textmesh` row).
-
-- [ ] Blender is now used only by `step_blender_repair` (not default):
-  decide whether the startup check (`libs.dependencies`) still requires it,
-  and whether `Runner.cancel`/`wait_for_idle`/`reap_unresolved` (built for
-  Blender intake, no production caller now) stay.
+measurement are in [modules](modules.md) (`textmesh` row). Blender itself
+was then retired (owner, 2026-10-06): module, script and tests archived
+outside the repository, startup check and `install.sh` section removed
+(modules.md, `blender` note).
 
 ## Reconstruction
 
@@ -156,7 +154,7 @@ that each combine many defects — replacing per-tool unit tests of geometry.
   cannot fail on demand, and config mistakes must stop a run before any write.
 - [ ] Then remove unit tests the end-to-end set covers, and all tests of tools
   absent from the default pipeline (welder, seam split, MeshLab filters,
-  Blender repair, `open_loops_are_printable`).
+  `open_loops_are_printable`).
   Justify each removal by the remaining coverage; never bless known geometry
   loss to make a test pass.
 - [ ] Split the suite into fast tests (robustness, config) and the slow
@@ -185,7 +183,7 @@ that each combine many defects — replacing per-tool unit tests of geometry.
   after a run over the full collection (the `meshfix` step records whether it
   ran).
 - [ ] Move step tuning values into `pipeconfig` (MeshFix clean/fill parameters,
-  lost-vertex tolerance, retained-volume threshold, Blender timeouts); decide
+  lost-vertex tolerance, retained-volume threshold); decide
   then whether any belong in `batch_repair.toml` (the shell floor already is:
   `min_shell_faces`).
 - [ ] Job memory calibration has no MeshFix-heavy multi-part model yet

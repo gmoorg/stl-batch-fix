@@ -37,7 +37,6 @@ FAKE_CHILD = textwrap.dedent('''
     parser.add_argument('--destination', required=True)
     parser.add_argument('--max-faces', required=True)
     parser.add_argument('--result-file', required=True)
-    parser.add_argument('--managed-child', action='store_true')
     parser.add_argument('--reconstruct-budget-bytes')
     parser.add_argument('--min-shell-faces')
     parser.add_argument('--mode', default='repair')
@@ -262,7 +261,6 @@ class TestBasicDispatch(_PoolTestCase):
             parser.add_argument('--destination', required=True)
             parser.add_argument('--max-faces', required=True)
             parser.add_argument('--result-file', required=True)
-            parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
             parser.add_argument('--mode', default='repair')
@@ -321,7 +319,6 @@ class TestBasicDispatch(_PoolTestCase):
             parser.add_argument('--destination', required=True)
             parser.add_argument('--max-faces', required=True)
             parser.add_argument('--result-file', required=True)
-            parser.add_argument('--managed-child', action='store_true')
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
             parser.add_argument('--mode', default='repair')
@@ -542,7 +539,6 @@ class TestCancellation(_PoolTestCase):
             "p.add_argument('--destination', required=True)\n"
             "p.add_argument('--max-faces', required=True)\n"
             "p.add_argument('--result-file', required=True)\n"
-            "p.add_argument('--managed-child', action='store_true')\n"
             "p.add_argument('--reconstruct-budget-bytes')\n"
             "p.add_argument('--min-shell-faces')\n"
             "p.add_argument('--mode', default='repair')\n"

@@ -11,7 +11,6 @@ never reports one (owner, 2026-10-05).
 from __future__ import annotations
 
 import importlib
-import subprocess
 from collections.abc import Callable
 
 
@@ -20,16 +19,6 @@ def importable(*modules: str) -> Callable[[], None]:
     def probe() -> None:
         for name in modules:
             importlib.import_module(name)
-    return probe
-
-
-def runs(command: str) -> Callable[[], None]:
-    """A probe that runs `command --version`; it must exit 0 within 30 s."""
-    def probe() -> None:
-        done = subprocess.run([command, '--version'], stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=30)
-        if done.returncode != 0:
-            raise RuntimeError(f'`{command} --version` exited {done.returncode}')
     return probe
 
 
@@ -42,7 +31,6 @@ LIBRARIES: tuple[tuple[str, bool, Callable[[], None]], ...] = (
     ('libigl', True, importable('igl')),
     ('PyMeshLab', True, importable('pymeshlab')),
     ('PyMeshFix', True, importable('pymeshfix')),
-    ('Blender', True, runs('blender')),
     ('CGAL', False, importable('CGAL.CGAL_Alpha_wrap_3', 'CGAL.CGAL_Kernel',
                                'CGAL.CGAL_Polyhedron_3')),
 )

@@ -1,7 +1,7 @@
 """Convert text meshes (ASCII STL, OBJ) to binary STL, in this process.
 
-Replaces Blender at intake (owner, 2026-10-06; evidence in TODO.md history and
-`blender`'s docstring): Blender rotated OBJ coordinates (Y-up -> Z-up) with
+Replaces Blender at intake (owner, 2026-10-06; Blender is retired, see the
+`blender` note in docs/refactor/modules.md): Blender rotated OBJ coordinates (Y-up -> Z-up) with
 float noise, dropped degenerate facets silently, and outlived a killed runner.
 This writes the coordinates the source has, rounded to float32 once, and
 applies `mesh_io.filter_triangles` — the same drop rule `mesh_io.load` uses —

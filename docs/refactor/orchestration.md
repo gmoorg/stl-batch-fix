@@ -94,8 +94,7 @@ or memory admission. Limits: the signal is tied to the worker thread that
 spawned the child, which reaps it before taking another job, so it never
 fires early; a child whose kill could not be confirmed dies when that worker
 exits. It reaches the child only, not its group: the default pipeline has
-no descendants, and Blender (`step_blender_repair`, not a default step) is
-not covered. Intake conversion runs in the runner itself, so it dies with it. Leftovers are
+no descendants. Intake conversion runs in the runner itself, so it dies with it. Leftovers are
 those of a timeout kill (pending marker, temp files); the next run redoes
 the job.
 
@@ -222,10 +221,11 @@ load); compare within this table only.
   rebuilt to 29 M faces and decimated for 353 s at 13.9 GB. Admission now
   reserves for it; reducing it is an open owner decision.
 - Process-group cleanup cannot cover descendants that deliberately leave the
-  group. Direct Blender use (`step_blender_repair`) has its own lifecycle limits.
+  group.
 - Startup checks every library once (`libs.dependencies.check_all`, from
-  `_check_environment`): NumPy, SciPy, libigl, PyMeshLab, PyMeshFix and
-  Blender required, CGAL optional (alpha-wrap is explicit-use; its flag
+  `_check_environment`): NumPy, SciPy, libigl, PyMeshLab and PyMeshFix
+  required (Blender is retired since 2026-10-06, see modules.md), CGAL
+  optional (alpha-wrap is explicit-use; its flag
   flips when alpha-wrap is wired back in). One line each: `[debug]` when
   available or an optional one is missing, `[error]` when a required one is,
   and the run stops. Library modules import their packages plainly, so a

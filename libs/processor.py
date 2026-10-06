@@ -241,7 +241,6 @@ def process(mesh: Mesh, max_faces: int,
             part_steps=None,
             step_logger: steplog.StepLogger = steplog.null_logger,
             source_name: str = '',
-            nested_process_group: bool = False,
             *,
             skip_clean: bool = False,
             reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
@@ -260,11 +259,6 @@ def process(mesh: Mesh, max_faces: int,
 
     Raises `ValueError` if the mesh is not loaded — a programming error at the
     call site.
-
-    `nested_process_group` is threaded straight into `repairer.repair(...)` —
-    a caller-known fact about whether this call runs inside an enclosing
-    `proctree`-managed process group. See
-    `pipeconfig.StepConfig.nested_process_group`.
 
     `step_logger`, when supplied, is called before and after the initial
     whole-mesh decimation pass — previously invisible to any log, since
@@ -300,7 +294,6 @@ def process(mesh: Mesh, max_faces: int,
 
     repaired = repairer.repair(decimated.mesh, part_steps=part_steps,
                                step_logger=step_logger, source_name=source_name,
-                               nested_process_group=nested_process_group,
                                skip_clean=skip_clean,
                                reconstruct_budget_bytes=reconstruct_budget_bytes,
                                min_shell_faces=min_shell_faces)

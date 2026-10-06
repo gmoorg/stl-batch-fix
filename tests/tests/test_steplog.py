@@ -5,7 +5,7 @@ stubs/callbacks (matching the pre-`part` shape) found none — every place a
 `step_logger=` is exercised in the existing suite either uses the module
 default (`steplog.null_logger`) or drives `execstep.run_sequence` without
 overriding `step_logger` at all (e.g. `test_repairer.py`'s
-`TestBlenderBeforePymeshfix`), so no existing test file needed updating for
+`TestStepSequence`), so no existing test file needed updating for
 the new required `part` parameter.
 """
 
