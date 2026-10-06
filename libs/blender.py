@@ -688,6 +688,19 @@ def step_blender_repair(mesh: Mesh, config: object | None = None) -> tuple[bool,
     Blender's output is written to this process's own stdout/stderr
     (`STDIO`) after the run. Inside a repair child those are the model's log,
     so the step logs itself without a path travelling through the pipeline.
+
+    Unverified since `Geometry` moved to float64 (2026-10-05): `write_ply`
+    now always writes `double` x/y/z, and no test runs real Blender here
+    (the step tests mock `repair()`). Possible issues:
+    - whether Blender 4.0.2's `wm.ply_import` reads `double` coordinates,
+      and how it fails if not (an error, or a wrong or empty mesh), is
+      unknown;
+    - Blender holds coordinates as float32, so every vertex comes back
+      rounded, untouched ones included (`read_ply` widens its float32 PLY;
+      the lost precision does not return);
+    - a coordinate beyond float32 range turns infinite inside Blender;
+      `read_ply` refuses it and the step fails.
+    Check with a real round trip before using this step.
     """
     try:
         nested = getattr(config, 'nested_process_group', False) if config is not None else False
