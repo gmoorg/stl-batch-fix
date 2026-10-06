@@ -1,27 +1,20 @@
 """Run headless Blender with a deadline and captured output, optionally
 copying that output to a log after each run.
 
+Used only by `step_blender_repair`, which is not a default step. Intake
+conversion moved to `textmesh` (2026-10-06): Blender rotated OBJ coordinates
+(Y-up -> Z-up), dropped degenerate facets silently, and outlived a SIGKILLed
+runner (a 2M-face OBJ probe: Blender finished 9.8 s after the runner was
+killed; overlapping reruns shared one `.partial`). `cancel`,
+`wait_for_idle` and `reap_unresolved` were built for that intake and have no
+production caller now.
+
 Known deficiencies (2026-10-06):
 
-- **Blender outlives a SIGKILLed caller.** The deadline and the group kill
-  live in the caller's `Runner`; Blender gets no parent-death signal
-  (`proctree.exit_with_parent` covers only the repair children). Ctrl+C
-  runs the existing bounded cleanup (`cancel()`, `wait_for_idle`,
-  `reap_unresolved`), which can end unconfirmed. But when the batch runner
-  dies by `kill -9` or the OOM killer during intake conversion, Blender (its
-  own session) runs on with no deadline. Probe on a 2M-face OBJ, runner
-  killed 2 s in: Blender finished 9.8 s later with a size-complete export
-  and no `.partial` left, so the next run would reuse it. A second run
-  started while that orphan was still writing (0 s and 5 s after the kill)
-  converted into the same `.partial`: its conversion reported failure, and
-  the final export was header/size-consistent both times. That proves
-  neither byte equality nor safety: both writers share one `.partial`, one
-  can rename it while the other still writes, so overlapping conversions
-  race and the export's integrity is not guaranteed.
-- **`step_blender_repair` (not a default step) has the same gap one level
-  down.** Its Blender stays in the repair child's group, and the child's
-  parent-death signal reaches only the child, so a SIGKILLed runner would
-  leave that Blender running (from code reading; not measured).
+- **Blender outlives a SIGKILLed runner.** Its Blender stays in the repair
+  child's group, and the child's parent-death signal
+  (`proctree.exit_with_parent`) reaches only the child, so a SIGKILLed
+  runner would leave that Blender running (from code reading; not measured).
 - Captured output reaches the log only after the run, so it is lost if the
   caller dies mid-run.
 - The float64 PLY exchange used by `repair` is unverified against real
@@ -86,10 +79,10 @@ class RunCancelled(Exception):
 
 
 class BlenderCleanupUnconfirmed(Exception):
-    """Raised by `convert()`/`repair()` when the underlying `Runner.run()`
-    came back with `Result.cleanup_confirmed is False` — a descendant was not
-    confirmed dead within the cleanup budget. Raised regardless of whether
-    the conversion/repair itself otherwise reported `ok=True`."""
+    """Raised by `repair()` when the underlying `Runner.run()` came back with
+    `Result.cleanup_confirmed is False` — a descendant was not confirmed dead
+    within the cleanup budget. Raised regardless of whether the repair itself
+    otherwise reported `ok=True`."""
 
     def __init__(self, result: Result, destination: str | None = None) -> None:
         super().__init__(
@@ -206,7 +199,7 @@ class Runner:
     `_RunRecord` in `self._active`, keyed by an incrementing `run_id`.
 
     `own_process_group=True` (the default) makes every unmodified direct
-    caller (`convert()`, `repair()`, a bare `Runner()`) launch Blender in its
+    caller (`repair()`, a bare `Runner()`) launch Blender in its
     own session (`start_new_session=True`) and kill/confirm via the whole
     group on any exit path — closing the gap where a descendant Blender
     spawns (e.g. via a driver subprocess) and outlives a killed or even
@@ -518,7 +511,7 @@ class Runner:
         Does NOT set cancellation — only `cancel()` does. This preserves
         `kill_current`'s existing, weaker, one-shot semantic for its
         existing caller while `cancel()` is the new, stronger, permanent
-        operation intake uses.
+        operation intake used.
         """
         with self._lock:
             for record in self._active.values():
@@ -528,7 +521,7 @@ class Runner:
             return False
 
     # ------------------------------------------------------------------
-    # Bounded shutdown wait, for intake.
+    # Bounded shutdown wait, built for intake (no production caller now).
     # ------------------------------------------------------------------
 
     def wait_for_idle(self, deadline_seconds: float) -> bool:
@@ -590,8 +583,6 @@ def load_script(name: str) -> str:
         return f.read()
 
 
-CONVERT_SCRIPT = load_script('convert')
-
 #: The repair script, lifted from the pre-refactor `stl_batch_fix.blender`
 #: (`old-script` branch) with two
 #: of its six steps disabled — see the comments at those sites in
@@ -613,49 +604,6 @@ CONVERT_SCRIPT = load_script('convert')
 REPAIR_SCRIPT = load_script('repair')
 
 
-def convert(source: str, destination: str, timeout: float = 600,
-            executable: str = 'blender', *,
-            runner: "Runner | None" = None,
-            output_log: "str | _Stdio | None" = None) -> tuple[bool, str]:
-    """Convert `source` to a binary STL at `destination`.
-
-    Accepts OBJ or STL in either encoding; always writes binary STL.  A
-    lossless container change — same triangles, same coordinates — so it is
-    generic Blender work rather than anything this project invented, which is
-    why it lives here and the repair and decimation scripts do not.
-
-    Returns `(ok, destination)`.  The full `Result` is deliberately not
-    returned: a caller almost always wants to know whether the file is there
-    now, and anyone who needs stdout can render `CONVERT_SCRIPT` and call
-    `Runner.run` directly.
-
-    The script writes to `<destination>.partial` and renames, so an interrupted
-    export cannot leave a file that a later run mistakes for a finished one —
-    existence is what decides whether an export is reused.
-
-    `runner`, when supplied, is used instead of constructing a fresh
-    `Runner(executable)` — letting a caller (e.g. intake) share one `Runner`
-    across many conversions so `cancel()` reaches all of them.
-
-    `output_log` is passed to `Runner.run` (Blender's output copied there
-    after the run). Success is still decided from the captured stdout only.
-
-    Raises `BlenderCleanupUnconfirmed` whenever the underlying `Runner.run()`
-    result has `cleanup_confirmed is False` — regardless of whether the
-    conversion itself would otherwise report `ok=True` or `ok=False`.
-    `cleanup_confirmed is None` (delegated mode) never raises this.
-    """
-    script = CONVERT_SCRIPT.format(src=source, dst=destination)
-    active_runner = runner if runner is not None else Runner(executable)
-    result = active_runner.run(script, timeout=timeout, output_log=output_log)
-    ok = (not result.is_timed_out
-          and result.exit_code == 0
-          and 'BLENDER_CONVERT_OK' in result.stdout_capture)
-    if result.cleanup_confirmed is False:
-        raise BlenderCleanupUnconfirmed(result, destination)
-    return ok, destination
-
-
 def repair(source: str, destination: str,
            timeout: float = 600, executable: str = 'blender', *,
            runner: "Runner | None" = None,
@@ -665,7 +613,7 @@ def repair(source: str, destination: str,
 
     Return `(ok, Result)`. `ok` means Blender wrote output with an accepted exit
     code, not that the result is clean. The caller rescans and judges volume loss.
-    Both paths must be PLY; `convert` separately writes binary STL.
+    Both paths must be PLY.
 
     `runner`, when supplied, is used instead of constructing a fresh
     `Runner(executable)`. `output_log` is passed to `Runner.run`.

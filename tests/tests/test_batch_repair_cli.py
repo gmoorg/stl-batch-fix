@@ -6,7 +6,6 @@ import io
 import json
 import os
 import signal
-import stat
 import threading
 import time
 from pathlib import Path
@@ -16,7 +15,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from libs import blender, converter
+from libs import converter, textmesh
 import batch_repair
 import batch_repair_child
 from libs.runconfig import RunConfig
@@ -169,31 +168,96 @@ class TestBatchRepairCLI(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.output.iterdir()),
                          ['progress.log'])
 
-    def test_conversion_failure_and_invalid_success(self):
+    def test_conversion_failure_is_a_diagnostic_without_a_marker(self):
+        """A source that converts to nothing (no faces) is retried on every
+        run: no export, no marker, one model-log note per attempt."""
         (self.source / 'body.obj').write_text('v 0 0 0\n')
-        for ok in (False, True):
-            with self.subTest(ok=ok):
-                def convert(source, export, **kwargs):
-                    Path(export).parent.mkdir(parents=True, exist_ok=True)
-                    Path(export).write_bytes(b'invalid')
-                    return ok, export
-                with mock.patch.object(batch_repair.blender, 'convert', side_effect=convert):
-                    code, text = self.invoke()
-                self.assertEqual(code, 1, text)
-                self.assertIn('intake_failure=1', text)
-                self.assertIn(f'conversion_failed={int(not ok)}', text)
-                self.assertIn(f'converted={int(ok)}', text)
-                self.assertIn('total=1, jobs=1', text)
-                (self.source / 'stl-exported/body.stl').unlink()
-        # See test_invalid_binary_is_intake_failure's comment: `--output`
-        # now always exists once `_run` starts (progress.log precedes
-        # intake), even though nothing was ever published. The model log
-        # holds one 'conversion' header per run — appended, not replaced.
+        for _ in range(2):
+            code, text = self.invoke()
+            self.assertEqual(code, 1, text)
+            for fragment in ('intake_failure=1', 'conversion_failed=1',
+                             'converted=0', 'malformed=0', 'total=1, jobs=1',
+                             'no triangles'):
+                self.assertIn(fragment, text)
+        exported = self.source / 'stl-exported'
+        self.assertEqual([p for p in exported.rglob('*') if p.is_file()]
+                         if exported.exists() else [], [])
         self.assertEqual(sorted(p.name for p in self.output.iterdir()),
                          ['body.log', 'progress.log'])
         log = (self.output / 'body.log').read_text()
-        self.assertEqual(log.count('conversion: '), 2)
-        self.assertIn(str(self.source / 'body.obj'), log)
+        self.assertEqual(log.count(f'conversion: {self.source / "body.obj"}'), 2)
+        self.assertEqual(log.count('conversion failed: ConversionError'), 2)
+
+    _PENTAGON = 'v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv -1 0.5 0\nf 1 2 3 4 5\n'
+
+    def test_a_malformed_source_gets_a_failed_marker_once(self):
+        """Owner, 2026-10-06: a full source copy as the FAILED marker; the
+        next run skips the source."""
+        source = self.source / 'body.obj'
+        source.write_text(self._PENTAGON)
+        code, text = self.invoke()
+        self.assertEqual(code, 1, text)
+        marker = self.output / 'body.failed.stl'
+        self.assertEqual(marker.read_bytes(), source.read_bytes())
+        for fragment in ('malformed=1', 'intake_failure=1', '5 vertices',
+                         'FAILED marker'):
+            self.assertIn(fragment, text)
+        self.assertIn('conversion failed: Malformed',
+                      (self.output / 'body.log').read_text())
+
+        code, text = self.invoke()
+        self.assertEqual(code, 0, text)
+        self.assertIn('skipped=1', text)
+        self.assertIn('total=0, jobs=0', text)
+        self.assertEqual(marker.read_bytes(), source.read_bytes())
+
+    def test_a_malformed_source_colliding_with_another_job_writes_nothing(self):
+        """`foo.obj` and `foo.stl` both publish to `foo*.stl`: both rejected,
+        whatever the walk order, and no marker is written."""
+        import struct
+        (self.source / 'body.obj').write_text(self._PENTAGON)
+        tri = struct.pack('<12f', 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0) + b'\0\0'
+        (self.source / 'body.stl').write_bytes(
+            b'\0' * 80 + struct.pack('<I', 1) + tri)
+        code, text = self.invoke()
+        self.assertEqual(code, 1, text)
+        self.assertIn('intake_failure=2', text)
+        self.assertEqual(text.count('destination path collision'), 2)
+        self.assertIn('no FAILED marker written', text)
+        self.assertFalse((self.output / 'body.failed.stl').exists())
+        self.assertFalse((self.output / 'body.stl').exists())
+
+    def test_a_marker_that_cannot_be_written_is_reported(self):
+        (self.source / 'body.obj').write_text(self._PENTAGON)
+        with mock.patch.object(batch_repair.shutil, 'copy2',
+                               side_effect=OSError('disk full')):
+            code, text = self.invoke()
+        self.assertEqual(code, 1, text)
+        self.assertIn('writing its FAILED marker failed: disk full', text)
+        self.assertFalse((self.output / 'body.failed.stl').exists())
+
+    def test_an_unwritable_model_log_does_not_stop_the_conversion(self):
+        source = self.source / 'body.obj'
+        source.write_text('v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n')
+        blocked = self.root / 'blocked'
+        blocked.write_text('a file where the log folder would be')
+        export = self.root / 'export.stl'
+        with redirect_stderr(io.StringIO()) as out:
+            batch_repair._convert_logged(
+                str(source), str(export),
+                model_destination=str(blocked / 'body.stl'), run_id='r')
+        self.assertIn('cannot write model log', out.getvalue())
+        self.assertEqual(export.stat().st_size, 84 + 50)
+
+    def test_an_obj_is_converted_and_repaired(self):
+        (self.source / 'body.obj').write_text(
+            'v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0.5 0.5 1\n'
+            'f 1 4 3 2\nf 1 2 5\nf 2 3 5\nf 3 4 5\nf 4 1 5\n')
+        code, text = self.invoke(extra={'skip_clean': 'true'})
+        self.assertEqual(code, 0, text)
+        self.assertIn('converted=1', text)
+        self.assertTrue((self.source / 'stl-exported' / 'body.stl').exists())
+        self.assertTrue((self.output / 'body.stl').exists())
 
     def test_companion_copy_failure(self):
         (self.source / 'notes.txt').write_text('notes')
@@ -217,9 +281,8 @@ class TestBatchRepairCLI(unittest.TestCase):
         self.assertNotIn('Run complete.', text)
 
     def test_keyboard_interrupt_at_intake_boundary(self):
-        """`_run` now catches `KeyboardInterrupt` from `converter.prepare`
-        itself (spec section 4d) — `cancel()`s the shared intake `Runner`,
-        waits for it to go idle, and returns 1 directly, WITHOUT reaching
+        """`_run` catches `KeyboardInterrupt` from `converter.prepare` itself
+        (spec section 4d) and returns 1 directly, WITHOUT reaching
         `_preflight`/dispatch. `main()`'s own outer `except KeyboardInterrupt`
         (for an interrupt anywhere else) is a separate, still-present path,
         exercised by `test_direct_script_help_and_required_arguments`-style
@@ -229,7 +292,6 @@ class TestBatchRepairCLI(unittest.TestCase):
             code, text = self.invoke()
         self.assertEqual(code, 1, text)
         self.assertIn('Intake interrupted', text)
-        self.assertIn('cleanup confirmed', text)
         self.assertNotIn('Run complete.', text)
         self.assertNotIn('Intake done:', text,
                          "an interrupted intake must not reach dispatch")
@@ -782,11 +844,10 @@ class TestModelLog(unittest.TestCase):
 
 
 class TestInterruptedIntakeIntegration(unittest.TestCase):
-    """A real, slow Blender-stand-in conversion, genuinely interrupted by a
-    real `SIGINT`-delivered `KeyboardInterrupt` during `converter.prepare` —
-    confirms `_run` returns early, nonzero, without reaching dispatch, and
-    that the in-flight Blender-stand-in process is actually killed (checked
-    via `/proc`, not a mock assertion).
+    """A real conversion, genuinely interrupted by a real `SIGINT`-delivered
+    `KeyboardInterrupt` during `converter.prepare` — confirms `_run` returns
+    early, nonzero, without reaching dispatch, and that the conversion's
+    staged export is gone (checked on disk, not by a mock assertion).
     """
 
     def setUp(self):
@@ -801,58 +862,29 @@ class TestInterruptedIntakeIntegration(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(
             batch_repair.dependencies, 'check_all', return_value=[]))
 
-    def _slow_blender_stand_in(self, pidfile: str) -> str:
-        fd, path = tempfile.mkstemp(suffix='.sh')
-        with os.fdopen(fd, 'w') as f:
-            f.write(
-                "#!/bin/sh\n"
-                f"echo $$ > {pidfile}\n"
-                "exec sleep 300\n"
-            )
-        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
-        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
-        return path
-
-    def test_keyboard_interrupt_during_real_slow_conversion_kills_it_and_stops_early(self):
-        (self.source / 'body.obj').write_text('v 0 0 0\n')
-        pidfile = str(self.root / 'blender.pid')
-        exe = self._slow_blender_stand_in(pidfile)
-
+    def test_keyboard_interrupt_during_a_conversion_leaves_no_export(self):
+        (self.source / 'body.obj').write_text('v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n')
         config = RunConfig(input=str(self.source), output=str(self.output),
                            max_faces=0, workers=1, per_file_timeout=30.0,
                            reap_deadline=5.0, memory_budget_bytes=10 ** 15)
+        writing = threading.Event()
+        real_add = textmesh._Writer.add
 
-        # `_run` constructs its own `intake_runner = blender.Runner()`
-        # internally (spec section 4d) with no way to inject our stand-in
-        # executable from outside — and `blender.convert(..., runner=...)`
-        # ignores its own `executable` argument entirely once a `runner` is
-        # supplied (the runner's OWN `.executable`, fixed at construction,
-        # is what is actually used). So the stand-in has to be installed by
-        # patching `Runner.__init__` to force it, while preserving
-        # everything else about the constructor (in particular
-        # `own_process_group`, which stays at its real default here — this
-        # test is proving real top-level intake behavior, not the nested
-        # containment case).
-        orig_init = blender.Runner.__init__
+        def slow_add(writer, corners):
+            # The staged export exists now; hold the conversion here until
+            # the interrupt arrives (sleep returns early on a signal).
+            real_add(writer, corners)
+            writing.set()
+            time.sleep(30)
 
-        def patched_init(self, executable='blender', own_process_group=True):
-            orig_init(self, exe, own_process_group)
-
-        def deliver_interrupt_once_running():
-            deadline = time.monotonic() + 10.0
-            while not os.path.exists(pidfile) and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertTrue(os.path.exists(pidfile),
-                            "the slow Blender stand-in never started")
-            # A real SIGINT into THIS process's main thread — signal
-            # delivery to the main thread is what actually raises
-            # KeyboardInterrupt inside `converter.prepare`'s own
-            # `Pool.start()`/`.join()`, matching how Ctrl+C really arrives.
+        def interrupt_once_writing():
+            self.assertTrue(writing.wait(10), "the conversion never started writing")
             os.kill(os.getpid(), signal.SIGINT)
 
-        interrupter = threading.Thread(target=deliver_interrupt_once_running, daemon=True)
-
-        with mock.patch.object(blender.Runner, '__init__', patched_init):
+        interrupter = threading.Thread(target=interrupt_once_writing, daemon=True)
+        started = time.monotonic()
+        with mock.patch.object(textmesh._Writer, 'add', slow_add), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as out:
             interrupter.start()
             try:
                 code = batch_repair._run(config)
@@ -860,15 +892,12 @@ class TestInterruptedIntakeIntegration(unittest.TestCase):
                 interrupter.join(timeout=15)
 
         self.assertEqual(code, 1)
-        with open(pidfile) as f:
-            blender_pid = int(f.read().strip())
-        # Real evidence: the Blender-stand-in process is actually gone.
-        deadline = time.monotonic() + 10.0
-        while os.path.exists(f'/proc/{blender_pid}') and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertFalse(os.path.exists(f'/proc/{blender_pid}'),
-                         "the in-flight Blender stand-in survived the "
-                         "interrupted intake")
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertIn('Intake interrupted', out.getvalue())
+        self.assertNotIn('Intake done:', out.getvalue())
+        exported = self.source / 'stl-exported'
+        self.assertEqual(list(exported.iterdir()) if exported.exists() else [], [],
+                         "an interrupted conversion left a file behind")
 
 
 if __name__ == '__main__':

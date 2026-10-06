@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import os
 import shutil
-import threading
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 from . import indicators, mesh_io
 from .indicators import Indicator
-from .mesh_io import Kind, Mesh
-from .pool import Pool
+from .mesh_io import Mesh
+from .textmesh import Malformed
 
 #: What the walk treats as a mesh, compared case-insensitively.  Content is
 #: never used to decide this: `mesh_io.kind` sniffs, and anything that does
@@ -35,7 +34,8 @@ class Summary:
     ignored: int = 0          # neither a mesh nor a companion; not touched
     emitted: int = 0          # handed to the consumer, valid or not
     converted: int = 0
-    conversion_failed: int = 0
+    conversion_failed: int = 0   # malformed ones included
+    malformed: int = 0           # the batch run writes their FAILED markers
 
 
 def _walk(root: str) -> Iterator[str]:
@@ -59,17 +59,18 @@ def _output_for(source: str, source_root: str, output_root: str) -> str:
     return os.path.join(output_root, base + out_ext)
 
 
-def _conversion_failure(source: str, destination: str, reason: str) -> Mesh:
+def _conversion_failure(source: str, destination: str, reason: str, *,
+                        malformed: bool = False) -> Mesh:
     """Build the invalid mesh record used when normalization did not happen."""
-    return Mesh(source, destination, mesh_io.kind(source), None, False, reason)
+    return Mesh(source, destination, mesh_io.kind(source), None, False, reason,
+                malformed=malformed)
 
 
 def prepare(source_root: str,
             output_root: str,
             emit: Callable[[Mesh], None],
             copy_extensions: Iterable[str] = (),
-            convert: Callable[..., tuple[bool, str]] | None = None,
-            workers: int = 4,
+            convert: Callable[..., None] | None = None,
             *,
             mesh_extensions: Iterable[str] = MESH_EXTENSIONS) -> Summary:
     """Classify everything under `source_root`, then feed `emit`.
@@ -80,21 +81,25 @@ def prepare(source_root: str,
     conversion, no copy, and no output, marker or export is consulted for it.
     An extension may not be in both sets.
 
-    `convert(source, export, *, model_destination) -> (ok, path)` does the
-    format conversion, writing `export`. `model_destination` is the output
-    path the converted file will be repaired to, so the converter can log
-    against that model (`libs.modellog`). Without `convert`, files needing
-    one are emitted as invalid rather than silently dropped.
+    `convert(source, export, *, model_destination)` does the format
+    conversion, writing `export`, and raises when it could not:
+    `textmesh.Malformed` emits an invalid mesh marked `malformed` (the batch
+    run writes its FAILED marker once no other job claims the same paths);
+    any other `Exception` emits a plain invalid mesh. `model_destination` is
+    the output path the converted file will be repaired to, so the converter
+    can log against that model (`libs.modellog`). Without `convert`, files
+    needing one are emitted as invalid rather than silently dropped.
 
     Two phases, because a converted file's triangle count does not exist until
-    Blender has written it:
+    its conversion has been written:
 
     1. **Walk.** Classify every file.  Copy the companions, emit the binary
-       STLs, set the rest aside.  Copies happen here rather than in the pool:
-       they are fast enough not to matter and keeping them inline is less
-       machinery.
-    2. **Convert.** Drain the set-aside files through a pool, probing each
-       result and emitting it.
+       STLs, set the rest aside.
+    2. **Convert.** Convert the set-aside files one at a time in this thread,
+       probing each result and emitting it. Not a thread pool: the converter
+       is Python holding the GIL, so threads would not run it faster, and in
+       this thread a Ctrl+C stops the conversion itself (its staged export is
+       removed) instead of leaving a worker publishing after the caller gave up.
     """
     copy_set = frozenset(e.lower() for e in copy_extensions)
     mesh_set = frozenset(e.lower() for e in mesh_extensions)
@@ -104,15 +109,9 @@ def prepare(source_root: str,
     summary = Summary()
     pending: list[tuple[str, str, str]] = []   # (source, export path, destination)
 
-    # One lock for both the consumer and the counters.  The conversion phase
-    # runs several workers and `Pool` serialises only its selector, so
-    # everything shared goes through here.  Uncontended during the walk.
-    emit_lock = threading.Lock()
-
     def emit_one(mesh: Mesh) -> None:
-        with emit_lock:
-            summary.emitted += 1
-            emit(mesh)
+        summary.emitted += 1
+        emit(mesh)
 
     for source in _walk(source_root):
         summary.scanned += 1
@@ -162,51 +161,29 @@ def prepare(source_root: str,
 
         emit_one(probed)
 
-    if not pending:
-        return summary
-
-    if convert is None:
-        for source, _, destination in pending:
+    for source, export, destination in pending:
+        if convert is None:
             summary.conversion_failed += 1
             emit_one(_conversion_failure(
                 source, destination,
                 "needs conversion but no converter was supplied"))
-        return summary
-
-    def next_item(done, error):
-        return pending.pop(0) if pending else None
-
-    def convert_one(item):
-        source, export, destination = item
+            continue
         try:
-            ok, path = convert(source, export, model_destination=destination)
+            convert(source, export, model_destination=destination)
+        except Malformed as exc:
+            summary.conversion_failed += 1
+            summary.malformed += 1
+            emit_one(_conversion_failure(source, destination,
+                                         f"malformed source: {exc}",
+                                         malformed=True))
         except Exception as exc:          # noqa: BLE001 — emitted, not raised
-            # A converter that throws and one that returns False report the
-            # same event: this file was not converted.  Handled here rather
-            # than through the pool's `error` argument, because the pool hands
-            # that to the *selector*, which knows only that an item finished —
-            # not which result it should have produced.  Catching it beside the
-            # call keeps the failure attached to its own source.
-            ok, path = False, export
-            reason = f"conversion raised {type(exc).__name__}: {exc}"
+            # One file that cannot be converted costs that file only; it is
+            # emitted invalid, so it is reported rather than vanishing.
+            summary.conversion_failed += 1
+            emit_one(_conversion_failure(
+                source, destination,
+                f"conversion failed: {type(exc).__name__}: {exc}"))
         else:
-            reason = "conversion failed"
-        result = (mesh_io.probe(path, destination) if ok else
-              _conversion_failure(source, destination, reason))
-        # Everything shared goes through emit_one's lock, including these
-        # counters.  Two cleverer arrangements were tried first and both were
-        # wrong: counting inside the pool's selector looks free, since the pool
-        # serialises that call — but the selector is told only *that* an item
-        # finished, not which result it produced, so pairing a completion with
-        # its outcome meant popping a shared list, and workers finishing out of
-        # order attributed the wrong ones.  One lock needs no reasoning about
-        # which call the pool happens to serialise.
-        with emit_lock:
-            if ok:
-                summary.converted += 1
-            else:
-                summary.conversion_failed += 1
-        emit_one(result)
-
-    Pool(workers, next_item, convert_one).start()
+            summary.converted += 1
+            emit_one(mesh_io.probe(export, destination))
     return summary

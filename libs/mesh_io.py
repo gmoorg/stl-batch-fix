@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import math
 import os
+import re
 import struct
 import tempfile
 from dataclasses import dataclass, replace
@@ -20,6 +21,10 @@ HEADER_BYTES = 84
 
 #: How much of the file `kind()` reads to tell ASCII from binary.
 _SNIFF_BYTES = 256
+
+#: An ASCII facet's first keywords, any whitespace between them (owner,
+#: 2026-10-06) — the `textmesh` parser accepts the same.
+_FACET_NORMAL = re.compile(rb'facet\s+normal')
 
 #: Triangles `load` reads per chunk: a 51 KB buffer (owner, 2026-10-05).
 #: The chunks replace one whole-file read, an allocation of 50 B/triangle
@@ -100,6 +105,10 @@ class Mesh:
                 None when no STL load produced it (a probe, a PLY read).
                 Kept by `with_geometry`/`with_destination`; read once, for
                 the job's step note
+    malformed   True when intake conversion found the source's content
+                malformed (`textmesh.Malformed`): the batch run writes its
+                FAILED marker (owner, 2026-10-06). Only an invalid mesh can
+                be malformed; construction raises otherwise
 
     Frozen, and every operation returns a new one.  `load` does not fill in
     geometry on the mesh you hand it — it gives you back a second mesh that has
@@ -116,6 +125,11 @@ class Mesh:
     problem: str | None = None
     geometry: Geometry | None = None
     load_drops: LoadDrops | None = None
+    malformed: bool = False
+
+    def __post_init__(self):
+        if self.malformed and self.is_valid:
+            raise ValueError(f"{self.path}: a malformed mesh cannot be valid")
 
     @property
     def needs_conversion(self) -> bool:
@@ -136,9 +150,7 @@ class Mesh:
         is taken from the faces rather than carried over, because the whole
         point of those steps is that it changed.
         """
-        return Mesh(self.path, self.destination, self.kind,
-                    len(geometry.faces), self.is_valid, self.problem, geometry,
-                    self.load_drops)
+        return replace(self, triangles=len(geometry.faces), geometry=geometry)
 
 
     def with_destination(self, destination: str) -> Mesh:
@@ -150,8 +162,7 @@ class Mesh:
         needs its own destination or their markers collide.  This is how a
         part gets one.
         """
-        return Mesh(self.path, destination, self.kind, self.triangles,
-                    self.is_valid, self.problem, self.geometry, self.load_drops)
+        return replace(self, destination=destination)
 
 
 def require_geometry(mesh: Mesh) -> None:
@@ -186,7 +197,7 @@ def kind(path: str) -> Kind:
         return Kind.UNKNOWN
 
     looks_ascii = (head.lstrip()[:5].lower() == b'solid'
-                   and b'facet normal' in head.lower())
+                   and _FACET_NORMAL.search(head.lower()) is not None)
     if not looks_ascii:
         return Kind.BINARY_STL
     if len(head) >= HEADER_BYTES:
@@ -260,7 +271,7 @@ def probe(path: str, destination: str) -> Mesh:
         if empty:
             return Mesh(path, destination, file_kind, None, False,
                         "OBJ file is empty")
-        # No count without parsing; Blender validates at import.
+        # No count without parsing; `textmesh` validates while converting.
         return Mesh(path, destination, file_kind, None, True)
 
     if file_kind is Kind.ASCII_STL:
@@ -287,10 +298,13 @@ def _read_fully(f, view: memoryview) -> int:
     return got
 
 
-def _filter_chunk(corners: np.ndarray) -> tuple[np.ndarray, int, int]:
-    """One chunk's kept triangles from its (n, 9) corner view: contiguous,
-    -0.0 folded to 0.0. Also returns how many were dropped for a NaN/inf
-    coordinate and how many (finite) for coincident corners."""
+def filter_triangles(corners: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """One chunk's kept triangles from its (n, 9) float32 corner view:
+    contiguous, -0.0 folded to 0.0. Also returns how many were dropped for a
+    NaN/inf coordinate and how many (finite) for coincident corners.
+
+    The one drop rule for STL triangles: `load` applies it to binary STL and
+    `textmesh` to the text formats it converts."""
     # One contiguous copy that also folds -0.0 to 0.0: adding 0.0 leaves
     # every other value, NaN and infinity included, untouched. The fold comes
     # before the coincidence test because -0.0 and 0.0 differ in bits.
@@ -380,7 +394,7 @@ def load(mesh: Mesh, *, chunk_triangles: int = CHUNK_TRIANGLES) -> Mesh:
                     return invalid(
                         f"short read: expected {count * BYTES_PER_TRIANGLE:,} "
                         f"bytes, got {done * BYTES_PER_TRIANGLE + got:,}")
-                good, bad_nonfinite, bad_degenerate = _filter_chunk(
+                good, bad_nonfinite, bad_degenerate = filter_triangles(
                     np.frombuffer(buffer, dtype=_RECORD, count=n)['corners'])
                 coords[kept:kept + len(good)] = good
                 kept += len(good)
@@ -466,6 +480,28 @@ def staged_write(path: str):
         raise
 
 
+def stl_records(tv: np.ndarray) -> np.ndarray:
+    """Binary STL records, (n, 50) uint8, for float32 corners `tv` (n, 3, 3).
+
+    Normals come from the winding; degenerate faces get zero normals. The
+    caller makes sure the corners are finite (`write` checks, `textmesh`
+    filters).
+    """
+    n = len(tv)
+    nrm = np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0])
+    ln = np.linalg.norm(nrm, axis=1)
+    # Degenerate faces have no normal to speak of; leave those zeroed rather
+    # than dividing by zero and writing NaNs into the file.
+    ok = ln > 1e-20
+    nrm[ok] /= ln[ok][:, None]
+    nrm[~ok] = 0.0
+
+    buf = np.zeros((n, BYTES_PER_TRIANGLE), dtype=np.uint8)
+    buf[:, 0:12] = nrm.astype(np.float32).view(np.uint8)
+    buf[:, 12:48] = np.ascontiguousarray(tv).reshape(n, 9).view(np.uint8)
+    return buf
+
+
 def write(mesh: Mesh) -> None:
     """Write loaded geometry as binary STL to `mesh.destination`.
 
@@ -484,17 +520,7 @@ def write(mesh: Mesh) -> None:
         tv = verts[faces].astype(np.float32)           # (n, 3, 3); the one rounding
     if not np.isfinite(tv).all():
         raise ValueError(f"{path}: vertex coordinates are not finite in float32")
-    nrm = np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0])
-    ln = np.linalg.norm(nrm, axis=1)
-    # Degenerate faces have no normal to speak of; leave those zeroed rather
-    # than dividing by zero and writing NaNs into the file.
-    ok = ln > 1e-20
-    nrm[ok] /= ln[ok][:, None]
-    nrm[~ok] = 0.0
-
-    buf = np.zeros((n, BYTES_PER_TRIANGLE), dtype=np.uint8)
-    buf[:, 0:12] = nrm.astype(np.float32).view(np.uint8)
-    buf[:, 12:48] = tv.reshape(n, 9).view(np.uint8)
+    buf = stl_records(tv)
 
     with staged_write(path) as staged:
         with open(staged, 'wb') as f:

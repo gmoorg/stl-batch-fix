@@ -19,6 +19,7 @@ import datetime
 import functools
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -32,7 +33,7 @@ from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
-from libs import blender, childresult, converter, decimator, dependencies, pipeconfig, winding  # noqa: E402
+from libs import childresult, converter, decimator, dependencies, pipeconfig, textmesh, winding  # noqa: E402
 from libs import meshfix, meshlab, mesh_io, modellog, processor, publication, runconfig, runstate, steplog  # noqa: E402
 from libs import indicators, jobmemory, splitter                          # noqa: E402
 from libs.childresult import ChildResult                                  # noqa: E402
@@ -522,11 +523,19 @@ def _preflight(emitted: list[Mesh]) -> tuple[list[Mesh], list[tuple[Mesh, str]]]
     expected-path set already has something on disk (a residual stray
     marker, distinct from ordinary rerun-skipping which already happened
     inside `converter.prepare`).
-    """
-    valid = [m for m in emitted if m.is_valid]
-    invalid = [(m, m.problem or 'invalid intake mesh') for m in emitted if not m.is_valid]
 
-    collisions = publication.find_collisions(valid)
+    A malformed source (`Mesh.malformed`, from intake conversion) is checked
+    the same way, because it publishes too: its FAILED marker is written here
+    (owner, 2026-10-06) only when no other job claims any of its paths and
+    none exists yet — so a malformed `foo.obj` and a `foo.stl` beside it are
+    both rejected and neither writes. It is rejected either way; the reason
+    says whether the marker was written.
+    """
+    candidates = [m for m in emitted if m.is_valid or m.malformed]
+    invalid = [(m, m.problem or 'invalid intake mesh')
+               for m in emitted if not m.is_valid and not m.malformed]
+
+    collisions = publication.find_collisions(candidates)
     mesh_to_claimed_paths: dict[int, set[str]] = {}
     for path, group in collisions.items():
         for m in group:
@@ -534,19 +543,45 @@ def _preflight(emitted: list[Mesh]) -> tuple[list[Mesh], list[tuple[Mesh, str]]]
 
     rejected = list(invalid)
     dispatchable = []
-    for mesh in valid:
+    for mesh in candidates:
+        unmarked = '; no FAILED marker written' if mesh.malformed else ''
         claimed = mesh_to_claimed_paths.get(id(mesh))
         if claimed:
             rejected.append(
-                (mesh, f'destination path collision with another job: {sorted(claimed)}'))
+                (mesh, f'destination path collision with another job: '
+                       f'{sorted(claimed)}{unmarked}'))
             continue
         existing = publication.preexisting_paths(mesh)
         if existing:
             rejected.append(
-                (mesh, f'already exists before this run started: {sorted(existing)}'))
+                (mesh, f'already exists before this run started: '
+                       f'{sorted(existing)}{unmarked}'))
+            continue
+        if mesh.malformed:
+            rejected.append((mesh, _mark_malformed(mesh)))
             continue
         dispatchable.append(mesh)
     return dispatchable, rejected
+
+
+def _mark_malformed(mesh: Mesh) -> str:
+    """Write a malformed source's FAILED marker; the rejection reason."""
+    try:
+        marker = _copy_source_marker(mesh, Indicator.FAILED)
+    except OSError as exc:
+        return f'{mesh.problem}; writing its FAILED marker failed: {exc}'
+    return f'{mesh.problem}; FAILED marker {marker!r}'
+
+
+def _copy_source_marker(mesh: Mesh, indicator: Indicator) -> str:
+    """Publish a full copy of the SOURCE file as `indicator`'s marker for
+    `mesh.destination` — never empty or a hardlink: it is the fallback print
+    an operator would actually use. Returns the marker path; raises OSError."""
+    base, _ = os.path.splitext(mesh.destination)
+    marker = base + indicators.marker_suffix(indicator)
+    with mesh_io.staged_write(marker) as staged:
+        shutil.copy2(mesh.path, staged)
+    return marker
 
 
 def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
@@ -648,14 +683,9 @@ def _write_synthetic_marker(mesh: Mesh, cause: str, label: str) -> dict:
     fallback print an operator would actually use. `cause` alone picks the
     marker; `label` (the cause plus how the child ended) is only reported.
     """
-    import shutil
     indicator = Indicator.TIMED_OUT if cause == 'timed_out' else Indicator.FAILED
-    suffix = '.timeout.stl' if cause == 'timed_out' else '.failed.stl'
-    base, _ = os.path.splitext(mesh.destination)
-    marker = base + suffix
     try:
-        with mesh_io.staged_write(marker) as staged:
-            shutil.copy2(mesh.path, staged)
+        marker = _copy_source_marker(mesh, indicator)
     except OSError as exc:
         return {'mesh': mesh, 'category': 'write_failure', 'indicator': None,
                 'reason': f'writing fallback marker for {label} failed: {exc}', 'recovered': True}
@@ -1015,23 +1045,37 @@ def _reserved_logs(config: RunConfig) -> tuple[str, ...]:
 
 
 def _convert_logged(source: str, export: str, *, model_destination: str,
-                    runner: blender.Runner, run_id: str,
-                    reserved: tuple[str, ...] = ()) -> tuple[bool, str]:
-    """Intake conversion, with Blender's output appended to the model log.
+                    run_id: str, reserved: tuple[str, ...] = ()) -> None:
+    """Intake conversion (`textmesh.convert`), noted in the model log.
 
     Writes a 'conversion' header to the log beside `model_destination`, then
-    lets `blender.convert` copy Blender's output there after the run. A log
-    that cannot be written only loses the logging, with a visible warning;
-    it never stops or repeats the conversion.
+    one line with what was written and dropped, or why it failed. A log that
+    cannot be written only loses the logging, with a visible warning; it
+    never stops or repeats the conversion. Conversion failures propagate to
+    `converter.prepare`, which decides what they mean.
     """
     log = modellog.path_for(model_destination, reserved)
     try:
         modellog.write_header(log, run_id, 'conversion', source)
     except OSError as exc:
         _log_line(f'[warning] cannot write model log {log}: {exc}; '
-                  f'conversion output for {source} will not be logged')
+                  f'conversion notes for {source} will not be logged')
         log = None
-    return blender.convert(source, export, runner=runner, output_log=log)
+
+    def note(text: str) -> None:
+        if log is None:
+            return
+        try:
+            modellog.write_note(log, text)
+        except OSError as exc:
+            _log_line(f'[warning] cannot write model log {log}: {exc}')
+
+    try:
+        stats = textmesh.convert(source, export)
+    except Exception as exc:
+        note(f'conversion failed: {type(exc).__name__}: {exc}')
+        raise
+    note(f'conversion: {stats.summary()}')
 
 
 def _progress_log_path(config: RunConfig) -> str:
@@ -1077,79 +1121,24 @@ def _run(config: RunConfig) -> int:
     scanning_message = f'Scanning {config.input} ...'
     _log_line(scanning_message)
     reporter.write({'kind': 'progress', 'message': scanning_message})
-    # `intake_runner` is shared across every conversion `converter.prepare`
-    # drives during this call — `own_process_group=True` by default: intake
-    # is definitionally top-level, never nested inside another
-    # `proctree`-managed group. Sharing one `Runner` (rather than the
-    # per-call default `blender.convert` would otherwise construct) is what
-    # lets a single `cancel()` reach every conversion in flight, including
-    # ones launched after this call started but before it returns.
-    intake_runner = blender.Runner()
     try:
         summary = converter.prepare(
             config.input, config.output, collect,
             copy_extensions={'.png', '.jpg', '.jpeg', '.gif', '.txt', ".pdf", ".tif", ".tiff", ".url", ".webp"},
-            convert=functools.partial(_convert_logged, runner=intake_runner, run_id=run_id,
+            convert=functools.partial(_convert_logged, run_id=run_id,
                                       reserved=_reserved_logs(config)),
-            workers=1,
             mesh_extensions=converter.MESH_EXTENSIONS,
         )
     except KeyboardInterrupt:
-        # Reuses the EXISTING pattern the main dispatch loop below already
-        # applies around its own `Pool(...).start()` call, applied here to
-        # `converter.prepare`'s internal `Pool.start()`. `Pool.start()`'s own
-        # docstring: `KeyboardInterrupt` (main-thread-only signal delivery)
-        # propagates out of `converter.prepare` uncaught, deliberately.
-        intake_runner.cancel()
-        idle = intake_runner.wait_for_idle(60.0)   # same 60s constant the
-                                                    # dispatch loop's own
-                                                    # post-cancel wait uses
-        if not idle:
-            intake_runner.reap_unresolved(10.0)
-            idle = intake_runner.wait_for_idle(0.0)
-        message = (f'Intake interrupted; Blender cleanup '
-                  f"{'confirmed' if idle else 'NOT confirmed within budget'}.")
+        # Conversion runs in this thread (`converter.prepare`), so the
+        # interrupt stopped it where it was and its staged export was
+        # removed; nothing keeps running. An interrupted intake must not
+        # proceed to repair dispatch.
+        message = 'Intake interrupted.'
         _log_line(message)
         reporter.write({'kind': 'progress', 'message': message})
-        # `collect` (this closure) may still be invoked by the daemon worker
-        # thread AFTER this function returns via the early return below —
-        # CONFIRMED HARMLESS: `collect`/`emit_one` only touch the local
-        # `emitted` list, never `ProgressReporter`/any finalized-reporting
-        # write (those only happen in this function's OWN code, after
-        # `converter.prepare` returns) — so a late callback call cannot race
-        # any reporting write. `Pool`'s own philosophy ("killing mid-work is
-        # safe... next run redoes it") already covers the abandoned pending
-        # item itself; no attempt is made here to join the daemon worker
-        # thread (no API exists to do so without changing `Pool`, out of
-        # scope).
         reporter.finalize({'kind': 'final', 'incomplete': True,
-                           'intake_interrupted': True, 'cleanup_confirmed': idle})
-        return 1   # early return — NEVER reaches _preflight/dispatch: an
-                   # interrupted intake must not proceed to repair dispatch.
-    except blender.BlenderCleanupUnconfirmed as error:
-        # A conversion's own cleanup came back unconfirmed even without a
-        # KeyboardInterrupt. `converter.prepare`'s own internal
-        # `try/except Exception` around `convert_one` already converts this
-        # (like any other raised exception) into the standard
-        # `_conversion_failure` path FOR THAT ONE FILE — so this outer catch
-        # cannot actually be reached from inside the pool-driven conversion
-        # phase; it exists only for defense (e.g. a future call site that
-        # invokes `blender.convert` directly, outside `convert_one`'s guard)
-        # and to stop further intake launches via `cancel()`, not to
-        # duplicate a failure `converter.prepare` already recorded.
-        intake_runner.cancel()
-        idle = intake_runner.wait_for_idle(60.0)
-        if not idle:
-            intake_runner.reap_unresolved(10.0)
-            idle = intake_runner.wait_for_idle(0.0)
-        message = (f'Run incomplete: intake raised '
-                  f'{type(error).__name__}: {error}; Blender cleanup '
-                  f"{'confirmed' if idle else 'NOT confirmed within budget'}.")
-        _log_line(message)
-        reporter.write({'kind': 'progress', 'message': message})
-        reporter.finalize({'kind': 'final',
-                           'intake_exception': f'{type(error).__name__}: {error}',
-                           'incomplete': True, 'cleanup_confirmed': idle})
+                           'intake_interrupted': True})
         return 1
     except Exception as error:
         message = f'Run incomplete: intake raised {type(error).__name__}: {error}'

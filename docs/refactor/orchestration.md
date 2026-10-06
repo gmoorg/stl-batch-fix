@@ -14,13 +14,19 @@ input/output folders and dependencies — all before any output or log is
 created — then:
 
 1. `converter.prepare`: walk input, check indicators, copy companions, convert
-   OBJ/ASCII STL with Blender, and collect probed binary meshes. Only `.stl`
-   and `.obj` (any letter case, `converter.MESH_EXTENSIONS`) are meshes;
-   files that are neither a mesh nor a companion are counted as `ignored`
-   before any indicator check and never touched. Intake uses one conversion
-   worker; it precedes isolated repair dispatch.
+   OBJ/ASCII STL in-process (`textmesh`, one at a time in the runner's main
+   thread, so Ctrl+C stops a conversion and removes its staged export), and
+   collect probed binary meshes. Only `.stl` and `.obj` (any letter case,
+   `converter.MESH_EXTENSIONS`) are meshes; files that are neither a mesh
+   nor a companion are counted as `ignored` before any indicator check and
+   never touched. Intake precedes isolated repair dispatch.
 2. Preflight rejects invalid jobs, colliding destination/marker paths, and
-   pre-existing publication paths among emitted jobs. Sort by triangle count.
+   pre-existing publication paths among emitted jobs. A malformed source
+   (`textmesh.Malformed`: a 5+-vertex OBJ face, a facet without three
+   vertices, a bad index, a truncated facet) takes part in the collision and
+   pre-existing checks, then gets its FAILED marker (full source copy) here
+   when it passed both; otherwise it is rejected without one. Sort by
+   triangle count.
 3. Two sequential passes over the same `_Runner` (same pool, timeouts,
    cleanup and Ctrl+C handling). `pool.Pool` threads reserve memory via
    `RunState` and spawn one isolated `batch_repair_child.py` subprocess per
@@ -88,8 +94,8 @@ or memory admission. Limits: the signal is tied to the worker thread that
 spawned the child, which reaps it before taking another job, so it never
 fires early; a child whose kill could not be confirmed dies when that worker
 exits. It reaches the child only, not its group: the default pipeline has
-no descendants, and Blender (intake conversion, run by the runner itself;
-`step_blender_repair`, not a default step) is not covered. Leftovers are
+no descendants, and Blender (`step_blender_repair`, not a default step) is
+not covered. Intake conversion runs in the runner itself, so it dies with it. Leftovers are
 those of a timeout kill (pending marker, temp files); the next run redoes
 the job.
 
@@ -202,8 +208,8 @@ load); compare within this table only.
 - Each model has a raw log beside its output (`foo.log`): intake conversion
   and every repair attempt append a dated header; a repair child's stdout and
   stderr go straight into it (all tools, crash messages, faulthandler
-  traceback), with a separator line before and after each step. Blender's
-  output is copied in after each Blender run. A log that cannot be written
+  traceback), with a separator line before and after each step. Intake
+  conversion adds one line with what it wrote and dropped, or why it failed. A log that cannot be written
   only produces a warning.
 - Incremental step logging exists (`batch.log`), and `progress.log` persists
   run/progress/job/final records; the terminal summary is printed separately.
@@ -216,7 +222,7 @@ load); compare within this table only.
   rebuilt to 29 M faces and decimated for 353 s at 13.9 GB. Admission now
   reserves for it; reducing it is an open owner decision.
 - Process-group cleanup cannot cover descendants that deliberately leave the
-  group. Conversion intake and direct Blender use have separate lifecycle limits.
+  group. Direct Blender use (`step_blender_repair`) has its own lifecycle limits.
 - Startup checks every library once (`libs.dependencies.check_all`, from
   `_check_environment`): NumPy, SciPy, libigl, PyMeshLab, PyMeshFix and
   Blender required, CGAL optional (alpha-wrap is explicit-use; its flag

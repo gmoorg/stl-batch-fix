@@ -3,9 +3,9 @@
 `out/sub/foot.stl` gets `out/sub/foot.log`. A repair child's stdout and
 stderr are pointed straight at it, so whatever any library prints — CGAL,
 PyMeshLab, PyMeshFix, a crash message, a faulthandler traceback —
-lands there as it is written. Blender copies its captured output there after
-each run. The file is appended to across runs; each attempt starts with a
-header line, and each step inside a repair is bracketed by separator lines.
+lands there as it is written. Intake conversion (`textmesh`) adds one line
+with what it wrote and dropped, or why it failed. The file is appended to
+across runs; each attempt starts with a header line, and each step inside a repair is bracketed by separator lines.
 When a child leaves no trusted result, the parent appends one closing
 `parent:` line saying how the child ended (signal, exit status, timeout).
 

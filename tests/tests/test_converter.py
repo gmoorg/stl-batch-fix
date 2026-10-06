@@ -1,8 +1,8 @@
 """Tests for libs.converter — the preparation walk.
 
-No Blender: `convert` is injected, so a fake one records what it was asked to
-do and writes whatever the test needs. Meshes are generated binary STLs, as in
-test_mesh_io.
+`convert` is injected, so a fake one records what it was asked to do and
+writes whatever the test needs; `TestRealConversion` uses `textmesh` itself.
+Meshes are generated binary STLs, as in test_mesh_io.
 """
 
 import os
@@ -10,11 +10,10 @@ import shutil
 import struct
 import tempfile
 import threading
-import time
 import unittest
 from unittest import mock
 
-from libs import converter
+from libs import converter, textmesh
 from libs.converter import Summary, prepare
 from libs.indicators import EXPORT_DIRNAME, export_path
 from libs.mesh_io import Kind
@@ -88,10 +87,9 @@ class ConverterCase(unittest.TestCase):
     def o(self, *parts):
         return os.path.join(self.out, *parts)
 
-    def run_prepare(self, convert=None, workers=4):
+    def run_prepare(self, convert=None):
         return prepare(self.src, self.out, self.emit,
-                       copy_extensions=COPY_EXTS, convert=convert,
-                       workers=workers)
+                       copy_extensions=COPY_EXTS, convert=convert)
 
     def by_path(self):
         return {os.path.basename(m.path): m for m in self.seen}
@@ -208,7 +206,6 @@ class TestConversion(ConverterCase):
         def convert(source, export, **kwargs):
             seen.append(kwargs)
             _binary_stl(export)
-            return True, export
 
         self.run_prepare(convert=convert)
         self.assertEqual(seen, [{'model_destination': self.o('Leia', 'head.stl')}])
@@ -219,9 +216,8 @@ class TestConversion(ConverterCase):
                 with self.lock:
                     record.append((source, destination))
             if not succeed:
-                return False, destination
+                raise textmesh.ConversionError('no triangles')
             _binary_stl(destination)
-            return True, destination
         return convert
 
     def test_ascii_is_converted_then_measured(self):
@@ -333,13 +329,8 @@ class TestConversion(ConverterCase):
                          "a partial companion copy will be called ALREADY_COPIED")
 
     def test_a_raising_conversion_is_emitted_not_dropped(self):
-        """R01/T04: returning False was handled; raising was not.
-
-        A converter that throws is the same event as one that returns False —
-        the file was not converted — but the exception reached the pool, which
-        reports it through `error`, and `next_item` ignored that argument.  The
-        file then left no trace at all: not emitted, not counted, not failed.
-        """
+        """R01/T04: a converter that throws must not make the file vanish:
+        it is emitted invalid, with the reason, and counted."""
         _ascii_stl(self.s('Leia', 'head.stl'))
 
         def explode(source, export, **kwargs):
@@ -361,48 +352,88 @@ class TestConversion(ConverterCase):
     def test_many_conversions_are_all_emitted_once(self):
         for n in range(20):
             _ascii_stl(self.s('Leia', f'part{n}.stl'))
-        summary = self.run_prepare(convert=self._fake_convert(), workers=4)
+        summary = self.run_prepare(convert=self._fake_convert())
         self.assertEqual(len(self.seen), 20)
         self.assertEqual(summary.converted, 20)
         self.assertEqual(summary.emitted, 20)
 
-    def test_emit_is_never_called_concurrently(self):
-        """The guarantee the caller relies on — a deliberately unsafe consumer.
+    def test_a_malformed_source_is_emitted_marked_not_written(self):
+        """`prepare` only reports it; the batch run decides about the marker,
+        once it knows no other job claims the same paths."""
+        _ascii_stl(self.s('Leia', 'head.stl'))
 
-        Without this, nothing in the suite would fail if the lock were removed:
-        the count tests only check totals, which a racing emit usually still
-        gets right.
-        """
-        for n in range(40):
+        def malformed(source, export, **kwargs):
+            raise textmesh.Malformed('line 3: a facet with 2 vertices')
+
+        summary = self.run_prepare(convert=malformed)
+        self.assertEqual(len(self.seen), 1)
+        mesh = self.seen[0]
+        self.assertFalse(mesh.is_valid)
+        self.assertTrue(mesh.malformed)
+        self.assertIn('a facet with 2 vertices', mesh.problem)
+        self.assertEqual((summary.conversion_failed, summary.malformed), (1, 1))
+        self.assertEqual(os.listdir(self.out), [])
+
+    def test_other_failures_are_not_marked_malformed(self):
+        _ascii_stl(self.s('Leia', 'head.stl'))
+        self.run_prepare(convert=self._fake_convert(succeed=False))
+        self.assertFalse(self.seen[0].malformed)
+
+    def test_an_interrupt_stops_the_conversion_phase(self):
+        """Conversion runs in the caller's thread: Ctrl+C leaves `prepare`
+        at once and no later file is converted."""
+        for n in range(3):
             _ascii_stl(self.s(f'p{n}.stl'))
+        asked = []
 
-        inside = {'now': 0, 'max': 0}
-        guard = threading.Lock()
+        def interrupt(source, export, **kwargs):
+            asked.append(source)
+            raise KeyboardInterrupt
 
-        def unsafe_consumer(mesh):
-            with guard:
-                inside['now'] += 1
-                inside['max'] = max(inside['max'], inside['now'])
-            time.sleep(0.002)              # widen the window for an overlap
-            with guard:
-                inside['now'] -= 1
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_prepare(convert=interrupt)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(self.seen, [])
 
-        prepare(self.src, self.out, unsafe_consumer,
-                copy_extensions=COPY_EXTS,
-                convert=self._fake_convert(), workers=8)
-        self.assertEqual(inside['max'], 1,
-                         "emit ran concurrently — the consumer would need its "
-                         "own lock, which the contract says it does not")
 
-    def test_counts_are_exact_under_concurrency(self):
-        """The counters are touched from worker threads; they must not race."""
-        for n in range(40):
-            _ascii_stl(self.s(f'ok{n}.stl'))
-        summary = self.run_prepare(convert=self._fake_convert(), workers=8)
-        self.assertEqual(summary.converted, 40)
-        self.assertEqual(summary.conversion_failed, 0)
-        self.assertEqual(summary.emitted, 40)
-        self.assertEqual(len(self.seen), 40)
+class TestRealConversion(ConverterCase):
+    """`prepare` with the real converter, as the batch run uses it."""
+
+    @staticmethod
+    def convert(source, export, **kwargs):
+        textmesh.convert(source, export)
+
+    def test_ascii_stl_and_obj_are_converted_and_measured(self):
+        _ascii_stl(self.s('Leia', 'head.stl'))
+        _touch(self.s('Leia', 'hand.obj'),
+               'v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\n'
+               'f 1 4 3 2\nf 1 2 5\nf 2 3 5\nf 3 4 5\nf 4 1 5\n')
+        summary = self.run_prepare(convert=self.convert)
+        found = {m.destination: m for m in self.seen}
+        self.assertEqual(found[self.o('Leia', 'head.stl')].triangles, 4)
+        self.assertEqual(found[self.o('Leia', 'hand.stl')].triangles, 6)
+        self.assertEqual(summary.converted, 2)
+
+    def test_ascii_stl_with_odd_keyword_spacing_is_converted(self):
+        """`mesh_io.kind` must sniff it as ASCII, or it never reaches the
+        converter (owner, 2026-10-06)."""
+        path = _ascii_stl(self.s('Leia', 'head.stl'))
+        with open(path) as f:
+            text = f.read()
+        with open(path, 'w') as f:
+            f.write(text.replace('facet normal', 'facet\t  normal'))
+        summary = self.run_prepare(convert=self.convert)
+        self.assertEqual(summary.converted, 1)
+        self.assertEqual(self.seen[0].triangles, 4)
+
+    def test_a_five_vertex_face_is_malformed(self):
+        _touch(self.s('pent.obj'), 'v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n'
+                                   'v -1 0.5 0\nf 1 2 3 4 5\n')
+        summary = self.run_prepare(convert=self.convert)
+        self.assertTrue(self.seen[0].malformed)
+        self.assertIn('5 vertices', self.seen[0].problem)
+        self.assertEqual(summary.malformed, 1)
+        self.assertFalse(os.path.exists(export_path(self.s('pent.obj'), self.src)))
 
 
 class TestMixedTree(ConverterCase):
@@ -418,7 +449,6 @@ class TestMixedTree(ConverterCase):
 
         def convert(source, destination, **kwargs):
             _binary_stl(destination)
-            return True, destination
 
         summary = self.run_prepare(convert=convert)
         emitted = sorted(os.path.basename(m.path) for m in self.seen)
@@ -453,12 +483,11 @@ class TestMeshFilter(ConverterCase):
         def convert(source, export, *, model_destination):
             converted.append(os.path.basename(source))
             _binary_stl(export)
-            return True, export
 
         with mock.patch.object(converter.indicators, 'check', check), \
                 mock.patch.object(converter.mesh_io, 'probe', probe):
             summary = prepare(self.src, self.out, self.emit, copy_extensions=COPY_EXTS,
-                              convert=convert, workers=1, **kwargs)
+                              convert=convert, **kwargs)
         return summary, checked, probed, converted
 
     def test_mesh_extensions_match_in_any_case(self):

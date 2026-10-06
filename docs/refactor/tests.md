@@ -82,7 +82,9 @@ produce; they protect behaviour, not composition.
   counted once, interrupted copy leaves nothing, each mesh emitted once),
   `test_batch_repair_cli` (config rejected before intake, malformed TOML,
   intake exception incomplete, companion copy failure, model log
-  unwritable / unopenable), `test_batch_repair_progress` (launch failure
+  unwritable / unopenable, FAILED marker write fails, real SIGINT during a
+  conversion leaves no export), `test_textmesh` (interrupt mid-write
+  publishes nothing), `test_batch_repair_progress` (launch failure
   elapsed), `test_batch_repair_run` (SIGINT during pool start),
   `test_runstate` (spawn/cancel race), `test_runconfig` (`resolve`: autos,
   fraction, zero budget, sysconf unavailable; example lists every field).
