@@ -22,9 +22,9 @@ reported with its signal or exit status, and the model log gets the
 parent's diagnosis ([orchestration.md](orchestration.md) step 5).
 
 1. [ ] **Test the `is_already_clean` gate** (`skip_clean = true`) on real
-   models (owner, 2026-10-05: wanted, on in the owner's config). Confirm
-   Amidara base (`/mnt/sda2/Amidara_Blustmorn_1-12_base.stl`) fails it
-   and that gated output slices and prints. Keep it off by default until
+   models (owner, 2026-10-05: wanted, on in the owner's config). Amidara
+   base fails it (confirmed 2026-10-06, below). Confirm that gated output
+   slices and prints. Keep it off by default until
    then. The NM-only fast path (Reconstruction below) widens the same
    gate and is tested with it.
    - [ ] Run the gated sample outputs through an online repair/analysis
@@ -42,7 +42,15 @@ parent's diagnosis ([orchestration.md](orchestration.md) step 5).
        (4/14 parts), `nutshell-atelier-belly-dancer-nsfw/3rd-02.stl` (1/2),
        `Kuton Figurines - Hebe/Unsupported_STL/cloth.stl` (6/7),
        `CA3D/Cleopatra + NSFW/1-9 Scale Uncut Cleopatra_NSFW/model.stl` (6/7);
-     - control, fully repaired (not gated): `Shadaloo Studios - Madelyne Pryor nsfw/Madelyne_NM_Body.stl`.
+     - control, fully repaired (not gated): `Shadaloo Studios - Madelyne Pryor nsfw/Madelyne_NM_Body.stl`;
+     - Amidara base, confirmed failing the gate (2026-10-06, HEAD `bcceb5f`,
+       same settings, child run directly): no NM or open edges but 922
+       winding seams, so both gates said "not clean"; repaired by winding
+       (1,848,928 faces, 42 s) → decimate (315,482, 1 NM edge) → MeshFix
+       (315,070) → PROCESS, 100.00% volume, 0 seams; 1 min 20 s, 2.1 GB
+       peak. Output: `Amidara/Amidara_Blustmorn_1-12_base.stl` (source
+       `/mnt/sda2/Amidara_Blustmorn_1-12_base.stl`). Still to check: it
+       slices and prints.
 2. Everything else: volume guard on open shells
    ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), MeshFix
    time/NM guard ([post-wrap-meshfix-timeout.md](../errors/post-wrap-meshfix-timeout.md),
