@@ -193,8 +193,10 @@ class TestRunSigint(unittest.TestCase):
         from libs import publication
         (self.root / 'out' / 'a.stl').write_bytes(b'x')
         (self.root / 'out' / 'a.failed.stl').write_bytes(b'y')
-        outcome = batch_repair._reconcile(mesh, frozenset(), 'crashed')
+        outcome = batch_repair._reconcile(mesh, frozenset(), 'crashed',
+                                          detail='killed by SIGSEGV')
         self.assertEqual(outcome['category'], 'write_failure')
+        self.assertIn('after child crashed (killed by SIGSEGV)', outcome['reason'])
         self.assertTrue(outcome['recovered'])
         self.assertIsNone(outcome['indicator'])
 
@@ -250,7 +252,7 @@ class TestRunSigint(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('Diagnostic:', printed)
         self.assertIn(str(mesh.path), printed)
-        self.assertIn('recovered after child crashed', printed)
+        self.assertIn('recovered after child crashed (exit status 137)', printed)
 
 
 class TestCleanGateDispatch(unittest.TestCase):

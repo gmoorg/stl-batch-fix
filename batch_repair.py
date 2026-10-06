@@ -610,11 +610,42 @@ def _build_launch_failure_result(mesh: Mesh, exc: Exception) -> dict:
             'reason': f'failed to launch child: {type(exc).__name__}: {exc}', 'recovered': False}
 
 
-def _write_synthetic_marker(mesh: Mesh, cause: str) -> dict:
+def _exit_detail(cause: str, returncode: int, wait_failure: str | None) -> str | None:
+    """How a child with no trusted result ended, for its reason text only.
+
+    Called after `terminate_and_confirm` reaped the child, so `returncode`
+    is set. It is only the child's own exit when `communicate()` returned
+    (`cause == 'exited'`): that already reaped the child, and the group
+    SIGKILL sent afterwards cannot change its status. After a timeout or a
+    failed wait the status may be our own SIGKILL — or the child's own exit
+    racing it — so it is not reported. Cancellation kills never get here:
+    `RunState` sets its cancelled flag before killing, and `_run_one`
+    checks that flag first.
+
+    No out-of-memory claim: a SIGKILL is only named as such (owner,
+    2026-10-05: the signal is enough; the kernel log tells OOM apart).
+    """
+    if cause == 'timed_out':
+        return None
+    if cause == 'wait_error':
+        return f'exit cause unknown: waiting for it failed ({wait_failure})'
+    if returncode < 0:
+        try:
+            name = signal.Signals(-returncode).name
+        except ValueError:
+            name = f'signal {-returncode}'
+        return f'killed by {name}'
+    if returncode > 0:
+        return f'exit status {returncode}'
+    return 'exited normally without a valid result'
+
+
+def _write_synthetic_marker(mesh: Mesh, cause: str, label: str) -> dict:
     """Nothing was published; the parent writes the fallback marker itself.
 
     A full copy of the SOURCE file, never empty or a hardlink — this is the
-    fallback print an operator would actually use.
+    fallback print an operator would actually use. `cause` alone picks the
+    marker; `label` (the cause plus how the child ended) is only reported.
     """
     import shutil
     indicator = Indicator.TIMED_OUT if cause == 'timed_out' else Indicator.FAILED
@@ -626,23 +657,26 @@ def _write_synthetic_marker(mesh: Mesh, cause: str) -> dict:
             shutil.copy2(mesh.path, staged)
     except OSError as exc:
         return {'mesh': mesh, 'category': 'write_failure', 'indicator': None,
-                'reason': f'writing fallback marker for {cause} failed: {exc}', 'recovered': True}
+                'reason': f'writing fallback marker for {label} failed: {exc}', 'recovered': True}
     return {'mesh': mesh, 'category': 'published', 'indicator': indicator.name,
-            'reason': f'{cause}: parent wrote fallback marker {marker!r}', 'recovered': True}
+            'reason': f'{label}: parent wrote fallback marker {marker!r}', 'recovered': True}
 
 
-def _reconcile(mesh: Mesh, baseline: frozenset[str], cause: str) -> dict:
+def _reconcile(mesh: Mesh, baseline: frozenset[str], cause: str, *,
+               detail: str | None) -> dict:
+    """`detail` is `_exit_detail`'s text; required so no caller drops it."""
+    label = cause if detail is None else f'{cause} ({detail})'
     recon = publication.reconcile(mesh, baseline)
     if recon.kind == 'RECOVERED':
         indicator = publication.marker_indicator_for_path(mesh.destination, recon.path)
         return {'mesh': mesh, 'category': 'published', 'indicator': indicator.name,
-                'reason': f'recovered after child {cause}, confirmed via filesystem: {recon.path}',
+                'reason': f'recovered after child {label}, confirmed via filesystem: {recon.path}',
                 'recovered': True}
     if recon.kind == 'INCONSISTENT':
         return {'mesh': mesh, 'category': 'write_failure', 'indicator': None,
-                'reason': f'inconsistent publication state after child {cause}: {recon.detail}',
+                'reason': f'inconsistent publication state after child {label}: {recon.detail}',
                 'recovered': True}
-    return _write_synthetic_marker(mesh, cause)
+    return _write_synthetic_marker(mesh, cause, label)
 
 
 class _Runner:
@@ -833,12 +867,14 @@ class _Runner:
                 result['elapsed_seconds'] += handoff['elapsed_seconds']
         self.run_state.complete_once(token, self._report, result)
 
-    def _start_model_log(self, mesh: Mesh):
-        """Write this attempt's header to the model log and return the log
-        opened for binary append, for the child's stdout/stderr — or None,
-        with a visible warning, when either step fails. Both happen here, in
-        one guarded place, so logging can never stop a repair."""
-        path = modellog.path_for(mesh.destination, _reserved_logs(self.config))
+    def _model_log_path(self, mesh: Mesh) -> str:
+        return modellog.path_for(mesh.destination, _reserved_logs(self.config))
+
+    def _start_model_log(self, path: str, mesh: Mesh):
+        """Write this attempt's header to the model log at `path` and return
+        the log opened for binary append, for the child's stdout/stderr — or
+        None, with a visible warning, when either step fails. Both happen
+        here, in one guarded place, so logging can never stop a repair."""
         try:
             modellog.write_header(path, self.run_id, 'repair', mesh.path)
             return open(path, 'ab')
@@ -847,11 +883,22 @@ class _Runner:
                       f'tool output for {mesh.path} will not be logged')
             return None
 
+    def _note_model_log(self, path: str, mesh: Mesh, text: str) -> None:
+        """Append the parent's own diagnosis to the model log — the child
+        may have died without writing a word there. Warning-only, like
+        `_start_model_log`: the outcome stands whether or not this lands."""
+        try:
+            modellog.write_note(path, text)
+        except OSError as exc:
+            self._log(f'[warning] cannot write model log {path}: {exc}; '
+                      f'the parent diagnosis for {mesh.path} is not in it')
+
     def _run_one(self, token, mesh):
         fd, result_file = tempfile.mkstemp(prefix='.stlfix-result-', suffix='.json')
         os.close(fd)
         try:
-            output_log = self._start_model_log(mesh)
+            model_log = self._model_log_path(mesh)
+            output_log = self._start_model_log(model_log, mesh)
             mode = self.mode
             handoff = self.prepared.get(mesh.path) if mode == 'repair' else None
             try:
@@ -892,12 +939,14 @@ class _Runner:
 
             self._log(f'[start] {mesh.path} ({mode})')
             cause = 'exited'
+            wait_failure = None
             try:
                 proc.communicate(timeout=self.config.per_file_timeout)
             except subprocess.TimeoutExpired:
                 cause = 'timed_out'
-            except Exception:
+            except Exception as exc:
                 cause = 'wait_error'
+                wait_failure = f'{type(exc).__name__}: {exc}'
 
             confirmed, detail = terminate_and_confirm(proc, self.config.reap_deadline)
             if not confirmed:
@@ -936,7 +985,9 @@ class _Runner:
                 return
             marker_cause = 'timed_out' if cause == 'timed_out' else 'crashed'
             baseline = self.baselines[mesh.path]
-            outcome = _reconcile(mesh, baseline, marker_cause)
+            outcome = _reconcile(mesh, baseline, marker_cause,
+                                 detail=_exit_detail(cause, proc.returncode, wait_failure))
+            self._note_model_log(model_log, mesh, outcome['reason'])
             self._complete(token, outcome)
         finally:
             try:

@@ -31,12 +31,18 @@ entries between Azula's `start decimate` (15:47:29) and the kill.
 ## Why nothing is logged
 
 SIGKILL can't be caught, so faulthandler never runs and the child writes
-nothing. The parent sees an abnormal exit and records only "crashed". It
-doesn't report the signal (SIGKILL / -9) or point at the OOM killer.
+nothing. The parent saw an abnormal exit and recorded only "crashed",
+without the signal (SIGKILL / -9). Since 2026-10-05 it reports the signal
+(item 1 below); it still doesn't point at the OOM killer.
 
 ## Two separate problems
 
-1. **Diagnostics:** the parent could record the child's exit signal. SIGKILL
+1. **Diagnostics (done 2026-10-05):** the parent now reports the child's
+   signal or exit status in the job reason and the model log, e.g.
+   `crashed (killed by SIGKILL)`; see
+   [orchestration.md](../refactor/orchestration.md) step 5. The owner chose
+   the signal only: an OOM kill is still read from the kernel log by hand
+   (`journalctl -k`, "Out of memory: Killed process <pid>"). SIGKILL
    alone doesn't mean out of memory: the parent's own timeout and
    cancellation also kill children. Say "out of memory" only with kernel or
    cgroup evidence. Keep the existing rule that a validated child result is

@@ -30,7 +30,7 @@ from libs.runconfig import RunConfig
 from batch_repair import _Runner
 
 FAKE_CHILD = textwrap.dedent('''
-    import argparse, json, os, sys, time
+    import argparse, json, os, signal, sys, time
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--one-file', required=True)
@@ -66,7 +66,13 @@ FAKE_CHILD = textwrap.dedent('''
     if name.startswith('hang_'):
         time.sleep(600)
     if name.startswith('crash_'):
-        os._exit(137)          # simulate SIGKILL-style abnormal exit, no result written
+        os._exit(137)          # exit STATUS 137 (not a signal death), no result written
+    if name.startswith('segv_'):
+        os.kill(os.getpid(), signal.SIGSEGV)     # a real signal death, no result written
+    if name.startswith('sigkill_'):
+        os.kill(os.getpid(), signal.SIGKILL)
+    if name.startswith('exit0_'):
+        os._exit(0)            # "success" status, but no result written
     if name.startswith('slow_'):
         time.sleep(0.3)
 
@@ -88,6 +94,8 @@ FAKE_CHILD = textwrap.dedent('''
     with open(staged, 'w') as f:
         json.dump(result, f)
     os.replace(staged, args.result_file)
+    if name.startswith('okkill_'):
+        os.kill(os.getpid(), signal.SIGKILL)     # dies AFTER its result is committed
 ''')
 
 
@@ -146,6 +154,76 @@ class TestBasicDispatch(_PoolTestCase):
         marker = str(self.root / 'out' / 'crash_a.failed.stl')
         self.assertTrue(os.path.exists(marker))
         self.assertEqual(Path(marker).read_bytes(), Path(mesh.path).read_bytes())
+        self.assertIn('crashed (exit status 137)', result['reason'])
+        self.assertNotIn('killed by', result['reason'])
+
+    def run_one(self, name, **arg_overrides):
+        """Run one job named `name` with a real source file; its result."""
+        mesh = self.mesh(name)
+        (self.root / 'in').mkdir(parents=True, exist_ok=True)
+        Path(mesh.path).write_bytes(b'source bytes for ' + name.encode())
+        runner = self.make_runner([mesh], **arg_overrides)
+        from libs.pool import Pool
+        Pool(1, runner.selector, runner.handler).start()
+        self.assertEqual(len(runner.results), 1)
+        return runner.results[0]
+
+    def test_signal_death_names_the_signal(self):
+        for name, signame in (('segv_a.stl', 'SIGSEGV'), ('sigkill_a.stl', 'SIGKILL')):
+            with self.subTest(signame):
+                result = self.run_one(name)
+                self.assertEqual(result['indicator'], 'FAILED')
+                self.assertTrue(result['recovered'])
+                self.assertIn(f'crashed (killed by {signame})', result['reason'])
+                marker = self.root / 'out' / (name[:-4] + '.failed.stl')
+                self.assertEqual(marker.read_bytes(), (self.root / 'in' / name).read_bytes())
+
+    def test_exit_zero_without_result_is_described(self):
+        result = self.run_one('exit0_a.stl')
+        self.assertEqual(result['indicator'], 'FAILED')
+        self.assertIn('crashed (exited normally without a valid result)', result['reason'])
+
+    def test_model_log_ends_with_the_parent_diagnosis(self):
+        self.run_one('segv_a.stl')
+        log = (self.root / 'out' / 'segv_a.log').read_text()
+        last = log.rstrip('\n').splitlines()[-1]
+        self.assertIn('parent: crashed (killed by SIGSEGV)', last)
+
+    def test_unwritable_model_log_note_keeps_the_outcome(self):
+        """The note failing only warns: one result, unchanged, no cancel."""
+        logged = []
+        with mock.patch.object(batch_repair.modellog, 'write_note',
+                               side_effect=OSError('disk full')), \
+             mock.patch.object(batch_repair, '_log_line', logged.append):
+            result = self.run_one('segv_a.stl')
+        self.assertEqual(result['indicator'], 'FAILED')
+        self.assertIn('killed by SIGSEGV', result['reason'])
+        self.assertTrue(any('[warning]' in line and 'disk full' in line for line in logged))
+
+    def test_failed_marker_write_still_names_the_signal(self):
+        with mock.patch.object(batch_repair.mesh_io, 'staged_write',
+                               side_effect=OSError('read-only')):
+            result = self.run_one('segv_a.stl')
+        self.assertEqual(result['category'], 'write_failure')
+        self.assertIn('crashed (killed by SIGSEGV)', result['reason'])
+
+    def test_valid_result_then_signal_is_trusted(self):
+        result = self.run_one('okkill_a.stl')
+        self.assertEqual(result['category'], 'published')
+        self.assertEqual(result['indicator'], 'PROCESS')
+        self.assertEqual(result['reason'], 'fake ok')
+        self.assertFalse(result.get('recovered', False))
+
+    def test_wait_error_reports_an_unknown_cause(self):
+        """A failed wait says so; the status after our own kill is not
+        reported as the child's."""
+        with mock.patch.object(subprocess.Popen, 'communicate',
+                               side_effect=OSError('boom')):
+            result = self.run_one('hang_a.stl')
+        self.assertEqual(result['indicator'], 'FAILED')
+        self.assertIn('exit cause unknown', result['reason'])
+        self.assertIn('OSError: boom', result['reason'])
+        self.assertNotIn('killed by', result['reason'])
 
     def test_timeout_publishes_fallback_marker_with_timeout_indicator(self):
         mesh = self.mesh('hang_a.stl')
@@ -161,6 +239,9 @@ class TestBasicDispatch(_PoolTestCase):
         marker = str(self.root / 'out' / 'hang_a.timeout.stl')
         self.assertTrue(os.path.exists(marker))
         self.assertEqual(Path(marker).read_bytes(), Path(mesh.path).read_bytes())
+        # Our own kill is not reported as the child's death.
+        self.assertTrue(result['reason'].startswith('timed_out: '), result['reason'])
+        self.assertNotIn('SIGKILL', result['reason'])
 
     def test_valid_result_trusted_despite_nonzero_exit_code(self):
         # Regression test for the removed exit-code gate: a child that
@@ -384,7 +465,7 @@ class TestTwoPasses(_PoolTestCase):
         """A prepare child that dies without a result is reconciled like a
         crashed repair child: a source-copy fallback marker, no handoff."""
         script = self.root / 'dies.py'
-        script.write_text('import os\nos._exit(137)\n')
+        script.write_text('import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n')
         mesh = self.mesh('a.stl')
         Path(mesh.path).parent.mkdir(parents=True, exist_ok=True)
         Path(mesh.path).write_bytes(b'source bytes')
@@ -396,6 +477,7 @@ class TestTwoPasses(_PoolTestCase):
         self.assertEqual(len(runner.results), 1)
         self.assertEqual(runner.prepared, {})
         self.assertEqual(runner.results[0]['indicator'], 'FAILED')
+        self.assertIn('crashed (killed by SIGSEGV)', runner.results[0]['reason'])
 
     def test_no_repair_pass_after_cancellation(self):
         """The barrier: `_run` does not start pass 2 once cancelled."""

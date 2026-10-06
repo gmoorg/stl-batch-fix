@@ -611,7 +611,7 @@ class TestModelLog(unittest.TestCase):
     def test_each_attempt_appends_its_own_header(self):
         runner, mesh = self.runner(), self.mesh()
         for _ in range(2):
-            handle = runner._start_model_log(mesh)
+            handle = runner._start_model_log(runner._model_log_path(mesh), mesh)
             self.assertEqual(handle.name, str(self.root / 'out' / 'sub' / 'body.log'))
             handle.close()
         text = (self.root / 'out' / 'sub' / 'body.log').read_text()
@@ -622,7 +622,8 @@ class TestModelLog(unittest.TestCase):
         (self.root / 'out' / 'sub').write_text('a file where the folder should be')
         runner = self.runner()
         with mock.patch.object(runner, '_log') as log:
-            self.assertIsNone(runner._start_model_log(self.mesh()))
+            mesh = self.mesh()
+            self.assertIsNone(runner._start_model_log(runner._model_log_path(mesh), mesh))
         self.assertIn('cannot write model log', log.call_args.args[0])
 
     def test_header_written_but_log_cannot_be_opened_still_repairs(self):
@@ -639,7 +640,7 @@ class TestModelLog(unittest.TestCase):
 
         with mock.patch('builtins.open', open_fails_for_append), \
              mock.patch.object(runner, '_log') as log:
-            self.assertIsNone(runner._start_model_log(mesh))
+            self.assertIsNone(runner._start_model_log(runner._model_log_path(mesh), mesh))
         self.assertIn('cannot write model log', log.call_args.args[0])
         # ...and the repair still launches, exactly once, without a log.
         spawned = []

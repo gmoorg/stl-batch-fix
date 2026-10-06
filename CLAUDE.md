@@ -1,35 +1,5 @@
 # Claude Code instructions
 
-> **Temporary handoff (2026-10-05).** Read this, then delete this note when
-> the next task's first commit lands.
->
-> - **State:** branch `error-fixes`, pushed, tree clean. Today: `05968d5`
->   float64 `Geometry.verts` (`Geometry` raises `TypeError` on any other
->   dtype; `load` welds on float32 bits then converts once; `read_ply`
->   keeps PyMeshLab doubles; `write` rounds once and refuses values beyond
->   float32 range). Job memory re-measured, constants kept. Then TODO and
->   doc notes only. Full suite: 954 tests, ~14 min.
-> - **Next:** [TODO](docs/refactor/TODO.md) priority 1, **record the crash
->   signal**. New task: run `tools/reset_codex.sh`, then INTERPRETATION with
->   full context. Background: [oom-kill-silent.md](docs/errors/oom-kill-silent.md),
->   "Two separate problems", item 1 only (item 2, memory, is out of scope:
->   Azula). Code: `batch_repair.py`, `_Runner` wait/reap block (~line 895):
->   a child with no valid result becomes `marker_cause` `'crashed'` or
->   `'timed_out'` and goes to `_reconcile` (~line 634), whose reasons say
->   only "child crashed". The exit status is never read: after
->   `terminate_and_confirm`, `proc.returncode` < 0 is the signal. Keep:
->   a validated child result is trusted whatever the exit code; say "out of
->   memory" only with kernel/cgroup evidence (SIGKILL also comes from our
->   own timeout and cancellation kills, so tell those apart).
-> - **After that:** priority 2, test the `skip_clean` gate on real models
->   together with the NM-only fast path (owner has `skip_clean = true` in
->   the local `batch_repair.toml`; Amidara `base.stl` not yet located).
-> - **Owner decisions this session:** Blender and the PLY dialects were out
->   of scope for the float64 task; the Blender double-PLY round trip is
->   noted as unverified (modules.md, `step_blender_repair`). Ideas recorded,
->   not requirements: chunked STL writes; alpha-wrap → decimate → MeshFix
->   when the NM count is high.
-
 Treat the directory containing this file as the project root. Return to it before project commands; do not derive project paths from the shell's inherited working directory. Start with [README.md](README.md) and follow only the compact documentation needed.
 
 Read only task-relevant sections linked from README; do not preload every

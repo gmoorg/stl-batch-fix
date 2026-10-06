@@ -63,6 +63,12 @@ created — then:
    the bounded result file regardless of exit code. With no trusted result:
    one new publication is recovered; multiple are inconsistent; none causes
    a source-copy timeout/failure marker, subject to cancellation authorization.
+   That reason says how the child ended: `killed by SIGSEGV`, `exit status 3`,
+   `exited normally without a valid result`, or, when the wait itself failed,
+   `exit cause unknown`. A timeout says only `timed_out`: the status after our
+   own SIGKILL is not the child's. No out-of-memory claim is made (owner,
+   2026-10-05: the signal is enough; check the kernel log for an OOM kill).
+   The same reason is appended to the model log as a `parent:` line.
 6. Exactly-once reporting and counters produce the terminal summary. Recovered
    results get diagnostics even if the recovered output was clean.
 

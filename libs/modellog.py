@@ -6,6 +6,8 @@ PyMeshLab, PyMeshFix, a crash message, a faulthandler traceback —
 lands there as it is written. Blender copies its captured output there after
 each run. The file is appended to across runs; each attempt starts with a
 header line, and each step inside a repair is bracketed by separator lines.
+When a child leaves no trusted result, the parent appends one closing
+`parent:` line saying how the child ended (signal, exit status, timeout).
 
 This is raw tool output, not the structured step log (`steplog`,
 `batch.log`), and nothing reads it back: no outcome, rerun or recovery
@@ -51,6 +53,17 @@ def write_header(path: str, run_id: str, stage: str, source: str) -> None:
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     with open(path, 'a', encoding='utf-8', errors='replace') as handle:
         handle.write(header(run_id, stage, source))
+
+
+def write_note(path: str, text: str) -> None:
+    """Append one line from the parent itself, after the child is gone —
+    e.g. how a child that left no result ended. Raises OSError; the caller
+    decides what a log that cannot be written means."""
+    stamp = datetime.datetime.now().strftime('%H:%M:%S')
+    text = ' '.join(text.split())               # one line, whatever the text holds
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(path, 'a', encoding='utf-8', errors='replace') as handle:
+        handle.write(f'==== {stamp}  parent: {text} ====\n')
 
 
 def separator(event: str, step: str, part: str, duration: float | None,
