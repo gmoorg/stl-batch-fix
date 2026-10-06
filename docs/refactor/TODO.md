@@ -105,6 +105,16 @@ that each combine many defects — replacing per-tool unit tests of geometry.
 
 ## Deferred (not critical now)
 
+- [ ] Investigate chunked STL writes (owner, 2026-10-05). `mesh_io.write`
+  builds the whole file in memory: from code reading (not measured), per
+  face a float64 `verts[faces]` gather (72 B), its float32 copy (36 B), the
+  edge differences, cross product and normals (~40 B), the 50 B record
+  buffer, and `buf.tobytes()`, a second 50 B copy of that buffer, made only
+  to pass to `f.write` (which accepts the array itself). Writing in chunks,
+  like `load` reads, would bound all of it by the chunk size. Measure first
+  whether the write is ever near a job's peak (the merged model is written
+  after every part is done); the `tobytes` copy is waste either way.
+
 - [ ] Low priority: check that initial decimation keeps meaningful detail.
   Detail too small to survive decimation is usually too small to print, so
   this matters only for thin but long features — antennae, sword blades,
