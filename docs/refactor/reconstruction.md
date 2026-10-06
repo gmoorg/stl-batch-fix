@@ -275,9 +275,32 @@ Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
   (default 10). The per-block winding-number octree rebuild still makes many
   blocks slow on very large inputs.
 - **Memory floor.** In the module, memory falls with blocks (Mirko 10.0 →
-  1.1 GB) down to a floor set by the input's search trees and the output
-  held for the final weld (~3 GB for the 3.8 M-face join_complication).
-  Streaming each block's piece out would lower it.
+  1.1 GB) down to a floor. Where that floor sits was measured per phase on
+  2026-10-06 (`tools/experiments/winding_phases.py`: a probed copy of
+  `reconstruct`, VmHWM reset per phase, each run in a fresh process; an
+  unmodified run gave the same peak within 1 %). Peak per phase, GB (phase
+  peaks overlap; they are not additive costs):
+
+  | Model, blocks | Whole run | Block field | Marching cubes | Weld | Final scan |
+  |---|---|---|---|---|---|
+  | join_complication (3.8 M in, 2.0 M out), 2³ | 2.97 | **2.99** | 2.70 | 2.15 | 2.33 |
+  | join_complication, 3³ | 3.01 | **3.05** | 2.44 | 2.39 | 2.57 |
+  | sphere r 60 (5,120 in, 6.0 M out), 2³ | 4.29 | 1.72 | **4.29** | 1.57 | 2.08 |
+  | sphere r 60, 4³ | 1.90 | 0.67 | 1.01 | 1.41 | **1.91** |
+  | sphere r 132 (5,120 in, 29.2 M out), 5³ | 8.66 | 2.58 | 4.42 | 6.14 | **8.67** |
+  | sphere r 132, 8³ | 8.54 | 2.02 | 2.47 | 6.07 | **8.54** |
+
+  An input-dominated model peaks in the block field; a large output peaks
+  in `_check`'s `scanner.scan`, which runs on the whole result with the
+  block lists still alive. The scan's row-wise `np.unique(axis=0)` adds
+  ~197 B and ~3.7 µs per face (29.2 M faces: +5.74 GB, 107 s; winding
+  calls it twice). One int64 key per edge (low·n + high), sorted in place,
+  gives identical counts with +34 B per face (+0.99 GB, 2.3 s;
+  `tools/experiments/scan_memory.py`). Fixing the scan comes first; the
+  weld (~6.1 GB on sphere r 132) is then the predicted peak, and a cheaper
+  weld or streaming each block's piece out is the next lever — to be
+  measured then, not assumed. The winding-number calls take 53 of 100 s on
+  join_complication at 2³ (octree rebuilt per call).
 - **Band mask cost** — bucket the samples by block once instead of scanning
   them per block.
 - **Grid spacing** — 0.15 mm matched alpha-wrap's quality on Mirko by eye;

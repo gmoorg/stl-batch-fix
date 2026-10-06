@@ -79,9 +79,11 @@ outside the repository, startup check and `install.sh` section removed
 
 - [ ] Winding-number reconstruction (`libs/winding.py`, default part step
   since 2026-10-03) follow-ups, details in [reconstruction](reconstruction.md):
-  more broken models (large holes); stream each block's output to lower the
-  memory floor; avoid the per-block winding-number octree rebuild on large
-  inputs. Post-reconstruction decimation is bounded by no budget (memory and
+  more broken models (large holes); lower the memory floor — measured
+  2026-10-06: the final `scanner.scan` is the peak for large outputs (fix
+  it first: int64 edge keys, 6× less memory, ~45× faster), then the weld /
+  streaming each block's output; avoid the per-block winding-number octree
+  rebuild (`igl.FastWindingNumberBVH`, cached). Post-reconstruction decimation is bounded by no budget (memory and
   time follow ~3·A/h² rebuilt faces; sphere r 132: 29 M faces, 353 s,
   13.9 GB) — admission reserves for it, reducing it needs an owner decision
   (e.g. per-part spacing from area, or decimating blocks before the weld).
