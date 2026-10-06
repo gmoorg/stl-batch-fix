@@ -34,7 +34,9 @@ Also done (2026-10-05): float64 `Geometry.verts`, job memory re-measured
    time/NM guard ([post-wrap-meshfix-timeout.md](../errors/post-wrap-meshfix-timeout.md),
    "Not yet done"). Idea only, not a requirement (owner, 2026-10-05): when
    the decimated result has too many NM edges, alpha-wrap it before
-   PyMeshFix instead of handing MeshFix the NM edges.
+   PyMeshFix instead of handing MeshFix the NM edges. The wrap rebuilds the
+   surface with many faces, so it needs the post decimation again after it
+   (wrap → decimate → MeshFix).
 
 ## Reconstruction
 
