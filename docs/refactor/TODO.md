@@ -19,13 +19,20 @@ an allocation with no purpose.
 Also done (2026-10-05): float64 `Geometry.verts`, job memory re-measured
 (constants kept).
 
-1. [ ] **Test the `is_already_clean` gate** (`skip_clean = true`) on real
+1. [ ] **Record the crash signal** (owner, 2026-10-05: first). The parent
+   records a dead child only as "crashed"; report its exit signal (SIGSEGV,
+   SIGKILL, ...). SIGKILL alone is not proof of out-of-memory: the parent's
+   own timeout and cancellation kill children too. Details:
+   [oom-kill-silent.md](../errors/oom-kill-silent.md), "Two separate problems".
+2. [ ] **Test the `is_already_clean` gate** (`skip_clean = true`) on real
    models (owner, 2026-10-05: wanted, on in the owner's config). Confirm
    Amidara base fails it and that gated output slices and prints. Keep it
-   off by default until then.
-2. Everything else: volume guard on open shells
-   ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), recording
-   the crash signal, MeshFix time/NM guard, the NM-only fast path below.
+   off by default until then. Together with it: the NM-only fast path
+   (Reconstruction below), which widens the same gate.
+3. Everything else: volume guard on open shells
+   ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), MeshFix
+   time/NM guard ([post-wrap-meshfix-timeout.md](../errors/post-wrap-meshfix-timeout.md),
+   "Not yet done").
 
 ## Reconstruction
 
