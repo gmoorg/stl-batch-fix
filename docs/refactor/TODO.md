@@ -52,6 +52,66 @@ parent's diagnosis ([orchestration.md](orchestration.md) step 5).
    surface with many faces, so it needs the post decimation again after it
    (wrap → decimate → MeshFix).
 
+## Intake conversion without Blender
+
+- [ ] Convert OBJ and ASCII STL to binary STL in our own code instead of
+  `blender.convert` (owner, 2026-10-06; priority not set). Why, from a
+  probe through `blender.convert` on Blender 4.0.2 (2026-10-06) and code
+  reading:
+  - OBJ comes out rotated, `(x, y, z)` → `(x, −z, y)` (the importer's
+    default Y-up → Z-up), with float noise (3 → −2.9999998). The
+    `convert` docstring claims "same coordinates".
+  - Not "same triangles" either: a degenerate ASCII STL facet was dropped,
+    OBJ quads/n-gons are triangulated.
+  - The script uses the legacy `import_mesh.stl` / `export_mesh.stl`
+    operators; the legacy STL add-on is believed to be no longer bundled
+    from Blender 4.2 (release notes, not verified here), and the startup
+    check only runs `blender --version`.
+  - Blender outlives a SIGKILLed runner (no deadline; overlapping reruns
+    share one `.partial`); conversion has no memory admission and a
+    fixed 600 s timeout outside the config. See the `blender` row in
+    [modules](modules.md).
+
+  Decided (owner, 2026-10-06): write the coordinates the source file has,
+  no axis change. A stale export (reused by existence alone,
+  `indicators.check`, after the source was edited) is accepted: the owner
+  controls the sources.
+
+  N-gons must be triangulated safely for concave faces. Blender, probed
+  2026-10-06: a quad split on its first diagonal, (1,2,3)+(1,3,4); a
+  concave pentagon gave (5,1,2), (2,3,4), (2,4,5), avoiding the fan
+  triangle (1,2,3) that lies outside the notch; a convex hexagon gave
+  ears (11,6,7), (7,8,9), (9,10,11), (7,9,11), not a fan. That is ear
+  clipping (projected to the face's plane), not a fan.
+
+  Decided (owner, 2026-10-06): accept only triangles and quads. An OBJ
+  with any face of 5+ vertices gets a `FAILED` marker (like other
+  failures: a full source copy, `.failed`). Today an intake conversion
+  failure is only a diagnostic with no marker, so this adds a marker path
+  at intake. ASCII STL has no n-gons by format (three `vertex` lines per
+  facet); a facet with any other count makes the file malformed. A quad
+  is split along whichever diagonal keeps both triangles inside it (the
+  one through the reflex corner when concave; either when convex).
+
+  Open decisions, one at a time: whether to keep writing exports to
+  `<input>/<export dir>` or load OBJ/ASCII directly in `mesh_io` (then
+  probe needs a triangle count without a full parse).
+
+  Scope to cover: ASCII STL with several `solid` blocks, odd whitespace and
+  case, a truncated file; OBJ `f` forms `v`, `v/vt`, `v//vn`, `v/vt/vn`,
+  negative (relative) indices, several objects/groups, comments, `\`
+  line continuation, faces with fewer than 3 vertices, out-of-range
+  indices. Degenerate and non-finite triangles handled as `mesh_io.load`
+  does (dropped and counted). Memory bounded like the chunked binary
+  load. Tests: fixtures per case, plus agreement with today's Blender
+  output on real models after undoing its OBJ rotation (`(x, −z, y)` →
+  `(x, y, z)`), within float32 rounding; a quad's diagonal may differ
+  from Blender's (first diagonal), so compare covered area and that both
+  triangles lie inside the quad. Fixtures include a concave quad and a
+  5-gon (must be FAILED).
+  Afterwards Blender is used only by `step_blender_repair` (not default):
+  decide whether the startup check still requires it.
+
 ## Reconstruction
 
 - [ ] Winding-number reconstruction (`libs/winding.py`, default part step
