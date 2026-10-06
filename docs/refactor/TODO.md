@@ -19,7 +19,11 @@ an allocation with no purpose.
 Also done (2026-10-05): float64 `Geometry.verts`, job memory re-measured
 (constants kept).
 
-1. Everything else: volume guard on open shells
+1. [ ] **Test the `is_already_clean` gate** (`skip_clean = true`) on real
+   models (owner, 2026-10-05: wanted, on in the owner's config). Confirm
+   Amidara base fails it and that gated output slices and prints. Keep it
+   off by default until then.
+2. Everything else: volume guard on open shells
    ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), recording
    the crash signal, MeshFix time/NM guard, the NM-only fast path below.
 
@@ -121,9 +125,6 @@ that each combine many defects — replacing per-tool unit tests of geometry.
   fingers, cables — which can be printable yet lose their tips or break into
   pieces when the face budget is tight. Total retained volume cannot show
   this: a lost antenna is a tiny share of the volume.
-- [ ] Evaluate the `is_already_clean` gate on real models (`skip_clean = true`):
-  confirm Amidara base fails it and that gated output slices and prints. It
-  may not be used at all; keep it off by default.
 - [ ] How often MeshFix is needed after decimation: read it from `batch.log`
   after a run over the full collection (the `meshfix` step records whether it
   ran).
