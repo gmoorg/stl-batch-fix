@@ -52,9 +52,11 @@ outside the repository, startup check and `install.sh` section removed
   since 2026-10-03) follow-ups, details in [reconstruction](reconstruction.md):
   more broken models (large holes); lower the memory floor — the final
   `scanner.scan` peak is fixed (2026-10-06, int64 edge keys) and the whole
-  run re-measured: on large outputs the weld's row-wise `np.unique` is now
-  the peak (sphere r 132: 5.30 GB, +1.9 GB over its input, 23 s); next an
-  int64 key in the weld, then streaming each block's output; avoid the per-block winding-number octree
+  run re-measured; the weld's row-wise `np.unique` is fixed too (2026-10-06,
+  one int64 key per vertex, byte-identical output; sphere r 132: 5.31 →
+  4.07 GB whole run). The peak on large outputs is now the weld's reindex,
+  with one block's marching cubes 2 % below it; next streaming each block's
+  output; avoid the per-block winding-number octree
   rebuild (`igl.FastWindingNumberBVH`, cached). Post-reconstruction decimation is bounded by no budget (memory and
   time follow ~3·A/h² rebuilt faces; sphere r 132: 29 M faces, 353 s,
   13.9 GB) — admission reserves for it, reducing it needs an owner decision

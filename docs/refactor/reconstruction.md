@@ -55,7 +55,12 @@ first, so blocks can be processed independently and still form a solid.
    edge. Marching cubes reports each vertex's edge (`E2V`: the edge's two
    corner indices); offset by the block's origin, that gives a global edge
    id, so seam copies merge exactly and vertices on different edges never
-   merge, however close. (Until 2026-10-05 vertices were merged by
+   merge, however close. The id is one int64 key per vertex,
+   `((axis·NX + x)·NY + y)·NZ + z` for the edge's axis and lower corner on
+   the global grid; it orders edges exactly as the former (axis, x, y, z)
+   rows did, so the weld's output did not change (2026-10-06, see "Memory
+   floor"). A grid whose largest key, 3·P − 1 for P grid points, would not
+   fit int64 is refused when the grid is set up. (Until 2026-10-05 vertices were merged by
    coordinates rounded to `h · 1e-4`, which partially merged near-node
    clusters into non-manifold edges; see
    [winding-non-manifold.md](../errors/winding-non-manifold.md).)
@@ -325,7 +330,8 @@ Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
   weld's `np.unique(Eo, axis=0)` over the per-vertex edge ids — the same
   row-wise unique the scan used: on sphere r 132 it rises from 3.37 GB
   (after the vstack) to 5.31 GB and takes 23 s. An int64 key per edge id,
-  as in the scan, is the measured next lever; it was not tried yet. Input-
+  as in the scan, was the measured next lever; done the same day (below,
+  "After the weld keys"). Input-
   dominated models still peak in the block field (unchanged), and 2³ on a
   large output peaks in marching cubes (one block's output). The
   winding-number calls take ~52 of 92 s on join_complication at 2³ (octree
@@ -339,6 +345,28 @@ Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
   r 132: 6.15 vs 5.30 GB). Found because the plain peak was below a probed
   phase; confirmed by sampling RSS from outside the process every 2 ms;
   fixed in `winding_phases.py`.
+
+  **After the weld keys** (2026-10-06, working tree on HEAD `b7d4d05`,
+  same method; 238 GiB swap is now installed, so every run also checked
+  `/proc/vmstat` `pswpin`/`pswpout` before and after: unchanged, no swap I/O,
+  so VmHWM is the whole peak). `_edge_ids` now returns one int64 key per
+  vertex instead of a 4-column row and `_weld` takes a 1-D `np.unique`.
+  Old = HEAD in a separate worktree, new = the change, each `--plain` in a
+  fresh process; both models' outputs saved and compared: **byte-identical**
+  vertices and faces (dtype, shape, bytes).
+
+  | Model, blocks | Whole run old → new | Time old → new |
+  |---|---|---|
+  | sphere r 132, 5³ | 5.31 → **4.07** | 531 → 506 s |
+  | join_complication, 2³ | 2.98 → 2.94 | 86 → 86 s |
+
+  Probed copy, sphere r 132 5³ (new): block field 2.21, marching cubes
+  3.98, join 2.63, weld unique **3.49** (was 5.31; 1.0 s, was 23 s), weld
+  reindex **4.07**, final scan 3.50. The peak is now the reindex
+  (`Vo[first]`, `inv[Fo]` while the joined arrays are still alive), with one
+  block's marching cubes 2 % below it; the time gain is an observation, the
+  rest of the run is unchanged. join_complication peaks in the block field,
+  which the change does not touch.
 - **Band mask cost** — bucket the samples by block once instead of scanning
   them per block.
 - **Grid spacing** — 0.15 mm matched alpha-wrap's quality on Mirko by eye;

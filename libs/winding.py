@@ -134,7 +134,21 @@ def _grid(V: np.ndarray, h: float) -> tuple[np.ndarray, tuple[int, int, int]]:
     shape = tuple(int(n) for n in np.ceil((V.max(0) + 2.5 * h - lo) / h).astype(np.int64) + 1)
     if max(shape) >= 2 ** 31 - 1 or np.prod(shape, dtype=np.float64) >= 2 ** 62:
         raise ValueError(f'grid {shape} is too large to index')
+    _check_edge_keys(shape)
     return lo, shape
+
+
+def _check_edge_keys(shape) -> None:
+    """Refuse a grid whose edge keys (`_edge_ids`) would overflow int64.
+
+    There are 3·P edge keys for P grid points (one per axis per point), the
+    largest 3·P − 1, so they fit when 3·P ≤ 2**63, i.e. P ≤ 3_074_457_345_618_258_602
+    (≈ 2**61.4). `_grid`'s own bound (P < 2**62) does not imply it. Computed
+    with Python ints, so the check itself cannot overflow; it runs before any
+    key is built, so an oversize grid raises instead of colliding.
+    """
+    if 3 * math.prod(int(n) for n in shape) > 2 ** 63:
+        raise ValueError(f'grid {tuple(shape)} is too large for int64 edge keys')
 
 
 def max_blocks_per_axis(shape) -> int:
@@ -296,12 +310,12 @@ def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
                 if len(mf):
                     pieces_v.append(mv)
                     pieces_f.append(mf + offset)
-                    pieces_e.append(_edge_ids(e2v, len(mv), block_shape, r0))
+                    pieces_e.append(_edge_ids(e2v, len(mv), block_shape, r0, shape))
                     offset += len(mv)
     if not pieces_f:
         _raise_empty(mesh, V, F)
     out = mesh.with_geometry(_weld(np.vstack(pieces_v), np.vstack(pieces_f),
-                                   np.vstack(pieces_e)))
+                                   np.concatenate(pieces_e)))
     _check(out)
     return out
 
@@ -393,17 +407,27 @@ def _raise_empty(mesh: Mesh, V: np.ndarray, F: np.ndarray) -> None:
     raise EmptyResult(f'closed part thinner than the grid (volume {enclosed:.4g})')
 
 
-def _edge_ids(e2v: dict, n_verts: int, block_shape, r0) -> np.ndarray:
-    """The global grid edge of each vertex marching cubes made for one block:
-    rows of (axis, x, y, z), the edge's axis and its lower corner, in vertex
-    order.
+def _edge_ids(e2v: dict, n_verts: int, block_shape, r0, shape) -> np.ndarray:
+    """The global grid edge of each vertex marching cubes made for one block,
+    as one int64 key per vertex, in vertex order:
+    `((axis·NX + x)·NY + y)·NZ + z` for the edge's axis and its lower corner
+    (x, y, z) on the global grid of `shape` (NX, NY, NZ).
 
     Marching cubes places every vertex on one grid edge and reports which in
     `e2v`: key `(i << 32) | j` for the edge's two corners, indexed
     `x + y·nx + z·nx·ny` within the block, mapped to the vertex index. Edge
     identity therefore comes as integers — no coordinates are rounded. Raises
-    RuntimeError if the map does not describe one unit grid edge per vertex.
+    RuntimeError if the map does not describe one unit grid edge per vertex,
+    and ValueError if `shape`'s keys could overflow (`_check_edge_keys`).
+
+    The key is the mixed-radix number of the (axis, x, y, z) rows this
+    returned before (0 ≤ x < NX etc.), so sorting keys orders edges exactly
+    as sorting those rows lexicographically did: the weld's output is
+    unchanged, array for array. One key is 8 bytes per vertex instead of a
+    32-byte row, and lets the weld sort one int64 array instead of rows
+    (see `_weld`).
     """
+    _check_edge_keys(shape)
     if len(e2v) != n_verts:
         raise RuntimeError(f'marching cubes reported {len(e2v)} edges for {n_verts} vertices')
     keys = np.fromiter(e2v.keys(), dtype=np.uint64, count=n_verts)
@@ -422,13 +446,18 @@ def _edge_ids(e2v: dict, n_verts: int, block_shape, r0) -> np.ndarray:
     step = np.abs(corners[1] - corners[0])
     if not (step.sum(axis=1) == 1).all():
         raise RuntimeError('marching cubes edge is not one grid step on one axis')
-    ids = np.empty((n_verts, 4), np.int64)
-    ids[verts, 0] = np.argmax(step, axis=1)
-    ids[verts, 1:] = np.minimum(corners[0], corners[1]) + r0
+    lower = np.minimum(corners[0], corners[1]) + r0
+    del corners
+    keys = np.argmax(step, axis=1).astype(np.int64)
+    for a in range(3):
+        keys *= int(shape[a])
+        keys += lower[:, a]
+    ids = np.empty(n_verts, np.int64)
+    ids[verts] = keys
     return ids
 
 
-def _weld(Vo: np.ndarray, Fo: np.ndarray, edges: np.ndarray) -> Geometry:
+def _weld(Vo: np.ndarray, Fo: np.ndarray, keys: np.ndarray) -> Geometry:
     """Merge the vertices that lie on the same grid edge and drop faces that
     collapsed.
 
@@ -444,8 +473,15 @@ def _weld(Vo: np.ndarray, Fo: np.ndarray, edges: np.ndarray) -> Geometry:
 
     One marching-cubes triangle never has two corners on one edge, so no face
     should collapse; the filter is a guard.
+
+    `keys` holds one int64 edge key per vertex (`_edge_ids`). It replaced
+    rows of (axis, x, y, z) and `np.unique(edges, axis=0)`, the row-wise
+    unique, which was the whole reconstruction's peak on large outputs
+    (reconstruction.md "Memory floor"). The output is identical: the keys
+    sort in the rows' order, and with `return_index` numpy sorts stably on
+    both paths, so the first copy of each edge is the one kept.
     """
-    _, first, inv = np.unique(edges, axis=0, return_index=True, return_inverse=True)
+    _, first, inv = np.unique(keys, return_index=True, return_inverse=True)
     Vo, Fo = Vo[first], inv.ravel()[Fo]
     Fo = Fo[(Fo[:, 0] != Fo[:, 1]) & (Fo[:, 1] != Fo[:, 2]) & (Fo[:, 0] != Fo[:, 2])]
     return Geometry(Vo, Fo.astype(np.int64, copy=False))

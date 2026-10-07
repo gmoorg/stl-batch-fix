@@ -37,7 +37,7 @@ from libs import mesh_io, scanner, winding
 from libs.mesh_io import Geometry, Mesh, Kind
 
 #: sha256 of inspect.getsource of reconstruct + _weld + _check this copy follows.
-SOURCE_SHA = 'b509e4d0c82629ee60f1fa33d3a39c5a1293e61c2bd8b8a71ad08bf45d51f9e1'
+SOURCE_SHA = '85b8804f40a5606c83985b4afc9cd6b6c714f98ef4f5ab9972d8a6d458c84f5e'
 
 
 def status():
@@ -159,15 +159,15 @@ def probed_reconstruct(mesh, h, blocks_per_axis, probe):
                 if len(mf):
                     pieces_v.append(mv)
                     pieces_f.append(mf + offset)
-                    pieces_e.append(w._edge_ids(e2v, len(mv), block_shape, r0))
+                    pieces_e.append(w._edge_ids(e2v, len(mv), block_shape, r0, shape))
                     offset += len(mv)
                 probe('block: mc+edge ids')  # mv, mf, e2v live on into the next block, as in production
     if not pieces_f:
         w._raise_empty(mesh, V, F)
-    Vo, Fo, Eo = np.vstack(pieces_v), np.vstack(pieces_f), np.vstack(pieces_e)
-    probe('vstack (lists alive)')
+    Vo, Fo, Eo = np.vstack(pieces_v), np.vstack(pieces_f), np.concatenate(pieces_e)
+    probe('join (lists alive)')
     # _weld's body. The lists stay alive during the weld and the check, as in
-    # production (reconstruct holds them until it returns). The vstacked
+    # production (reconstruct holds them until it returns). The joined
     # arrays are NOT held by the caller: since Python 3.11 the callee's frame
     # owns its arguments, so rebinding Vo and Fo below frees the originals,
     # here as in production (measured 2026-10-06 on Python 3.12: a temporary
@@ -175,7 +175,7 @@ def probed_reconstruct(mesh, h, blocks_per_axis, probe):
     # them alive and overstated the weld by ~0.2 GB on sphere r 60, 4^3).
     # `_weld`'s own `_` is a separate local; reconstruct's `_` (triangle
     # areas) stays alive until reconstruct returns.
-    _unique, first, inv = np.unique(Eo, axis=0, return_index=True, return_inverse=True)
+    _unique, first, inv = np.unique(Eo, return_index=True, return_inverse=True)
     probe('weld: unique')
     Vo, Fo = Vo[first], inv.ravel()[Fo]
     Fo = Fo[(Fo[:, 0] != Fo[:, 1]) & (Fo[:, 1] != Fo[:, 2]) & (Fo[:, 0] != Fo[:, 2])]
