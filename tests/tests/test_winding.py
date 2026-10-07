@@ -488,6 +488,29 @@ class TestWeld(unittest.TestCase):
         self.assertEqual(ids.tolist(), edge_keys([[0, 11, 21, 31]], shape).tolist())
 
 
+class TestBlockOutput(unittest.TestCase):
+    """Per-block arrays built with fewer copies, byte for byte as before."""
+
+    def test_block_points_match_the_meshgrid_build(self):
+        lo = np.array([-3.7, 0.25, 12.1])
+        for r0, r1, h in (((2, 5, 7), (4, 8, 11), 0.15),     # 3 x 4 x 5, nonzero r0
+                          ((0, 0, 0), (6, 0, 2), 0.1),       # a singleton axis
+                          ((9, 1, 3), (9, 1, 3), 1 / 3)):    # one point
+            r0, r1 = np.array(r0), np.array(r1)
+            axes = [lo[a] + h * np.arange(r0[a], r1[a] + 1) for a in range(3)]
+            want = np.column_stack([g.ravel('F') for g in np.meshgrid(*axes, indexing='ij')])
+            got = winding._block_points(lo, h, r0, r1)
+            with self.subTest(r0=r0.tolist(), r1=r1.tolist()):
+                self.assertEqual((got.dtype, got.shape), (want.dtype, want.shape))
+                self.assertEqual(got.tobytes(), want.tobytes())
+
+    def test_take_joins_and_empties_the_list(self):
+        pieces = [np.arange(6).reshape(2, 3), np.arange(6, 9).reshape(1, 3)]
+        joined = winding._take(pieces)
+        np.testing.assert_array_equal(joined, np.arange(9).reshape(3, 3))
+        self.assertEqual(pieces, [])
+
+
 class TestEdgeKeyBound(unittest.TestCase):
     """Edge keys must fit int64: 3·P ≤ 2**63 for P grid points."""
 

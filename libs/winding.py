@@ -277,7 +277,7 @@ def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
     A, B, C, _, L, H = _triangle_frames(V, F)
     n1, n2, bound = _sample_counts(L, H, h)
     keys = _surface_keys(A, B, C, n1, n2, bound, lo, h, shape)
-    del A, B, C, L, H, n1, n2, bound
+    del A, B, C, _, L, H, n1, n2, bound
 
     # Inside is decided by the winding number, which follows face orientation:
     # an inside-out solid reads about -1 inside and a shell with some faces
@@ -303,8 +303,7 @@ def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
                     raise RuntimeError(f'block {block_shape} has too many grid points '
                                        'for marching cubes edge keys')
                 field = _block_field(V, F, tree, keys, r0, r1, lo, h, ny, nz, far_value)
-                axes = [lo[a] + h * np.arange(r0[a], r1[a] + 1) for a in range(3)]
-                grid = np.column_stack([g.ravel('F') for g in np.meshgrid(*axes, indexing='ij')])
+                grid = _block_points(lo, h, r0, r1)
                 mv, mf, e2v = _igl.marching_cubes(field.ravel('F'), grid, *field.shape, 0.0)
                 del grid, field
                 if len(mf):
@@ -314,10 +313,44 @@ def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
                     offset += len(mv)
     if not pieces_f:
         _raise_empty(mesh, V, F)
-    out = mesh.with_geometry(_weld(np.vstack(pieces_v), np.vstack(pieces_f),
-                                   np.concatenate(pieces_e)))
+    # Nothing below needs the input or the last block's output; `mv` would
+    # also pin the last vertex piece after `_take` empties the list.
+    del V, F, tree, keys, mv, mf, e2v
+    # The joined arrays are call temporaries, so `_weld` owns them and frees
+    # each when it rebinds it; joined into locals here they would stay alive
+    # beside the welded copies.
+    out = mesh.with_geometry(_weld(_take(pieces_v), _take(pieces_f), _take(pieces_e)))
     _check(out)
     return out
+
+
+def _block_points(lo, h, r0, r1) -> np.ndarray:
+    """Coordinates of grid points r0..r1 (inclusive), x fastest — the
+    order `igl.marching_cubes` reads them in — as one (N, 3) float64 array.
+
+    Each column is written in place through an (nx, ny, nz) Fortran-order
+    view, so the array is the only allocation. The former
+    `np.column_stack([g.ravel('F') for g in np.meshgrid(..., indexing='ij')])`
+    built the same bytes with two extra full copies on the way (meshgrid's
+    arrays, then their Fortran-order ravels) and peaked at twice the result.
+    """
+    shape = tuple(int(n) for n in np.asarray(r1) - np.asarray(r0) + 1)
+    points = np.empty((math.prod(shape), 3), np.float64)
+    for a in range(3):
+        along = [1, 1, 1]
+        along[a] = shape[a]
+        points[:, a].reshape(shape, order='F')[...] = (
+            lo[a] + h * np.arange(r0[a], r1[a] + 1)).reshape(along)
+    return points
+
+
+def _take(pieces: list) -> np.ndarray:
+    """Join `pieces` along axis 0 and empty the list, consuming it: the
+    pieces are freed as soon as their joined copy exists, instead of living
+    on in the list beside it."""
+    joined = np.concatenate(pieces)
+    pieces.clear()
+    return joined
 
 
 def _block_field(V, F, tree, keys, r0, r1, lo, h, ny, nz, far_value) -> np.ndarray:

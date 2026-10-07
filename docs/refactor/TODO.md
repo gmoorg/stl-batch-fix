@@ -54,9 +54,11 @@ outside the repository, startup check and `install.sh` section removed
   `scanner.scan` peak is fixed (2026-10-06, int64 edge keys) and the whole
   run re-measured; the weld's row-wise `np.unique` is fixed too (2026-10-06,
   one int64 key per vertex, byte-identical output; sphere r 132: 5.31 →
-  4.07 GB whole run). The peak on large outputs is now the weld's reindex,
-  with one block's marching cubes 2 % below it; next streaming each block's
-  output; avoid the per-block winding-number octree
+  4.07 GB whole run), then the per-block grid copies and the pieces held
+  through the weld (3.50–3.85 GB, median 3.59; the run-to-run spread is
+  unexplained). The peak on large outputs is still the weld's reindex
+  (3.51 probed; marching cubes 3.27); next streaming each block's output;
+  avoid the per-block winding-number octree
   rebuild (`igl.FastWindingNumberBVH`, cached). Post-reconstruction decimation is bounded by no budget (memory and
   time follow ~3·A/h² rebuilt faces; sphere r 132: 29 M faces, 353 s,
   13.9 GB) — admission reserves for it, reducing it needs an owner decision

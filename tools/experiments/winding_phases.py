@@ -8,8 +8,8 @@ calibration) or `sphereR` for an icosphere of radius R (subdivisions 4,
 5,120 faces: a small input that rebuilds to a large output). The grid
 spacing is the batch's, from the model's diagonal.
 
-Default: a copy of `reconstruct` / `_weld` / `_check` with probes at phase
-boundaries. Each probe prints the phase's peak RSS (VmHWM, then reset via
+Default: a copy of `reconstruct` / `_weld` / `_check` (calling the module's
+own helpers) with probes at phase boundaries. Each probe prints the phase's peak RSS (VmHWM, then reset via
 /proc/self/clear_refs) and the RSS left when it ends, plus wall time. The
 copy keeps production's array lifetimes; it refuses to run if the module's
 source no longer matches the copy (SOURCE_SHA). Per-block phases are
@@ -36,8 +36,9 @@ import numpy as np
 from libs import mesh_io, scanner, winding
 from libs.mesh_io import Geometry, Mesh, Kind
 
-#: sha256 of inspect.getsource of reconstruct + _weld + _check this copy follows.
-SOURCE_SHA = '85b8804f40a5606c83985b4afc9cd6b6c714f98ef4f5ab9972d8a6d458c84f5e'
+#: sha256 of inspect.getsource of reconstruct + _block_points + _take + _weld +
+#: _check this copy follows.
+SOURCE_SHA = '831e16c9f8df77d29feaccfca887e25e8e65b03bd6bbe97de825aa9ee3f722ec'
 
 
 def status():
@@ -112,7 +113,8 @@ def wrap_igl():
 
 
 def source_sha():
-    src = ''.join(inspect.getsource(f) for f in (winding.reconstruct, winding._weld, winding._check))
+    src = ''.join(inspect.getsource(f) for f in (winding.reconstruct, winding._block_points,
+                                                  winding._take, winding._weld, winding._check))
     return hashlib.sha256(src.encode()).hexdigest()
 
 
@@ -130,7 +132,7 @@ def probed_reconstruct(mesh, h, blocks_per_axis, probe):
     A, B, C, _, L, H = w._triangle_frames(V, F)
     n1, n2, bound = w._sample_counts(L, H, h)
     keys = w._surface_keys(A, B, C, n1, n2, bound, lo, h, shape)
-    del A, B, C, L, H, n1, n2, bound
+    del A, B, C, _, L, H, n1, n2, bound
     probe('surface keys')
 
     F = w._oriented(V, F)
@@ -152,8 +154,7 @@ def probed_reconstruct(mesh, h, blocks_per_axis, probe):
                                        'for marching cubes edge keys')
                 field = w._block_field(V, F, tree, keys, r0, r1, lo, h, ny, nz, far_value)
                 probe('block: field')
-                axes = [lo[a] + h * np.arange(r0[a], r1[a] + 1) for a in range(3)]
-                grid = np.column_stack([g.ravel('F') for g in np.meshgrid(*axes, indexing='ij')])
+                grid = w._block_points(lo, h, r0, r1)
                 mv, mf, e2v = w._igl.marching_cubes(field.ravel('F'), grid, *field.shape, 0.0)
                 del grid, field
                 if len(mf):
@@ -164,17 +165,17 @@ def probed_reconstruct(mesh, h, blocks_per_axis, probe):
                 probe('block: mc+edge ids')  # mv, mf, e2v live on into the next block, as in production
     if not pieces_f:
         w._raise_empty(mesh, V, F)
-    Vo, Fo, Eo = np.vstack(pieces_v), np.vstack(pieces_f), np.concatenate(pieces_e)
-    probe('join (lists alive)')
-    # _weld's body. The lists stay alive during the weld and the check, as in
-    # production (reconstruct holds them until it returns). The joined
-    # arrays are NOT held by the caller: since Python 3.11 the callee's frame
-    # owns its arguments, so rebinding Vo and Fo below frees the originals,
-    # here as in production (measured 2026-10-06 on Python 3.12: a temporary
-    # argument rebound to a copy is freed; an earlier `held` tuple here kept
-    # them alive and overstated the weld by ~0.2 GB on sphere r 60, 4^3).
-    # `_weld`'s own `_` is a separate local; reconstruct's `_` (triangle
-    # areas) stays alive until reconstruct returns.
+    del V, F, tree, keys, mv, mf, e2v
+    # The joins in production are call temporaries consumed by `_weld`
+    # (`_weld(_take(...), ...)`): since Python 3.11 the callee's frame owns
+    # its arguments, so rebinding Vo and Fo below frees the originals, here
+    # as in production (measured 2026-10-06 on Python 3.12). Each list is
+    # emptied as soon as it is joined.
+    Vo = w._take(pieces_v)
+    Fo = w._take(pieces_f)
+    Eo = w._take(pieces_e)
+    probe('join')
+    # _weld's body.
     _unique, first, inv = np.unique(Eo, return_index=True, return_inverse=True)
     probe('weld: unique')
     Vo, Fo = Vo[first], inv.ravel()[Fo]
@@ -196,8 +197,6 @@ def probed_reconstruct(mesh, h, blocks_per_axis, probe):
             f'reconstruction is not closed: open={scan.open_edges}, '
             f'degenerate={scan.degenerate}, non_manifold={scan.non_manifold}')
     probe('check: scan')
-    # production: freed when reconstruct returns
-    del pieces_v, pieces_f, pieces_e, mv, mf, e2v, _
     print(f"open={scan.open_edges} degenerate={scan.degenerate} nm={scan.non_manifold}")
     return out
 
