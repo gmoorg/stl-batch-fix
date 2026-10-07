@@ -386,17 +386,21 @@ Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
 
   | Model, blocks | Whole run old → new | Time old → new |
   |---|---|---|
-  | sphere r 132, 5³ | 4.08 → **3.50–3.85** (5 runs, median 3.59) | 499 → 440–444 s |
+  | sphere r 132, 5³ | 4.07–4.08 (5 runs) → **3.50–3.85** (8 runs, median 3.63) | ~500 → 440–445 s |
   | join_complication, 2³ | 2.98 → 2.94 | 84 → 83 s |
 
   Probed copy, sphere r 132 5³, old → new: marching cubes 3.98 → 3.27,
   join 2.63 → 2.54, weld unique 3.49 → 2.58, weld reindex 4.07 → **3.51**,
-  final scan 3.50 → 2.92. The peak is still the weld's reindex. Three of
-  the five whole runs were sampled from outside every 2 ms: each peaks 3.6 s
-  before the end (the reindex; 3.50–3.65 GB) and stays at 3.27–3.32 GB
-  before the weld. The spread between runs (0.35 GB) is new — the old code
-  gave 4.071 and 4.077 — and its cause was not measured. join_complication
-  still peaks in the block field (unchanged).
+  final scan 3.50 → 2.92. The peak is still the weld's reindex. Six of
+  the eight new whole runs were sampled from outside every 2 ms: each peaks
+  3.6 s before the end (the reindex; 3.50–3.81 GB) and stays at
+  3.26–3.32 GB before the weld. The spread between runs (0.35 GB) is new
+  and lies entirely in the weld: a rerun on 2026-10-07 alternated old and
+  new three times each — old 4.066, 4.067, 4.067 GB (peak in the weld,
+  3.98–3.99 before it), new 3.81, 3.61, 3.70. Its cause was not measured
+  (untested guess: where the allocator places the weld's large arrays
+  after the many freed block pieces). join_complication still peaks in the
+  block field (unchanged).
 - **Band mask cost** — bucket the samples by block once instead of scanning
   them per block.
 - **Grid spacing** — 0.15 mm matched alpha-wrap's quality on Mirko by eye;
