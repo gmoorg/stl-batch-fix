@@ -46,7 +46,8 @@ overrides it). Run summary/progress also goes to the terminal.
 Each part is rebuilt as a solid by winding-number reconstruction
 (`libs/winding.py`; alpha-wrap stays available but is no longer the default);
 `reconstruct_memory_budget_gb` (default 10) sizes it per part and worker.
-`skip_clean = true` (opt-in, not yet validated) skips repair for an
+`skip_clean = true` (opt-in; sample outputs passed Bambu's recommended
+repair tool, slicing and printing unconfirmed) skips repair for an
 already-clean decimated model, or otherwise for its individual clean parts;
 a part whose only defect is non-manifold edges tries MeshFix alone first.
 

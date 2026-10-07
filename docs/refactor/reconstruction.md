@@ -290,6 +290,10 @@ Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
   | sphere r 132 (5,120 in, 29.2 M out), 5³ | 8.66 | 2.58 | 4.42 | 6.14 | **8.67** |
   | sphere r 132, 8³ | 8.54 | 2.02 | 2.47 | 6.07 | **8.54** |
 
+  (Pre-fix table, kept as the evidence for the scan fix below. Its weld
+  column is overstated: the probed copy then held the vstacked weld inputs
+  alive, which production does not — see the next table.)
+
   An input-dominated model peaks in the block field; a large output peaked
   in `_check`'s `scanner.scan`, which runs on the whole result with the
   block lists still alive. The scan's row-wise `np.unique(axis=0)` added
@@ -298,12 +302,43 @@ Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
   int64 key per edge (low·n + high, n = largest face index + 1), sorted in
   place: identical counts, +34 B per face (sphere r 132: +0.99 GB, 2.3 s,
   re-measured on the module itself with `tools/experiments/scan_memory.py`,
-  which also checks agreement against the old row-wise count). The whole
-  reconstruction's peak was not re-measured. The weld (~6.1 GB on sphere
-  r 132) is the predicted new peak; a cheaper weld or streaming each
-  block's piece out is the next lever — to be measured, not assumed. The
-  winding-number calls take 53 of 100 s on join_complication at 2³ (octree
+  which also checks agreement against the old row-wise count).
+
+  **After the scan fix** (2026-10-06, HEAD `7f1d263`, h 0.15 mm, decimal
+  GB, each run a fresh process; same output face counts as before). Whole
+  run = `winding.reconstruct` alone, unmodified (`--plain`), the process's
+  peak including loading the input (~0.1–0.2 GB); it excludes `apply`'s
+  second scan and the decimation after it. Phase peaks from the probed
+  copy; the highest phase agrees with the whole run within 1 % in every row.
+
+  | Model, blocks | Whole run | Block field | Marching cubes | Weld (unique / reindex) | Final scan | Time |
+  |---|---|---|---|---|---|---|
+  | join_complication, 2³ | 2.97 | **2.97** | 2.71 | 2.06 / 2.11 | 1.98 | 88 s |
+  | join_complication, 3³ | 3.04 | **3.04** | 2.44 | 2.34 / 2.38 | 2.29 | 159 s |
+  | sphere r 60, 2³ | 4.29 | 1.73 | **4.29** | 1.31 / 1.33 | 1.07 | 67 s |
+  | sphere r 60, 4³ | 1.23 | 0.67 | 1.01 | **1.22** / 1.21 | 0.93 | 68 s |
+  | sphere r 132, 5³ | 5.30 | 2.58 | 4.35 | **5.31** / 5.18 | 3.89 | 530 s |
+  | sphere r 132, 8³ | 5.26 | 2.02 | 2.47 | **5.27** / 5.09 | 3.79 | 566 s |
+
+  The scan is no longer any configuration's peak (sphere r 132: 8.66 →
+  5.30 GB whole run). Where the output dominates, the peak is now the
+  weld's `np.unique(Eo, axis=0)` over the per-vertex edge ids — the same
+  row-wise unique the scan used: on sphere r 132 it rises from 3.37 GB
+  (after the vstack) to 5.31 GB and takes 23 s. An int64 key per edge id,
+  as in the scan, is the measured next lever; it was not tried yet. Input-
+  dominated models still peak in the block field (unchanged), and 2³ on a
+  large output peaks in marching cubes (one block's output). The
+  winding-number calls take ~52 of 92 s on join_complication at 2³ (octree
   rebuilt per call).
+
+  Measurement note: the probed copy first held the vstacked arrays alive
+  through the weld, assuming the caller keeps call arguments referenced.
+  Since Python 3.11 the callee's frame owns them, so `_weld`'s rebinding of
+  `Vo` and `Fo` frees the originals (checked on 3.12; an `*args` wrapper
+  does keep them alive). That overstated the weld by ~0.2–0.9 GB (sphere
+  r 132: 6.15 vs 5.30 GB). Found because the plain peak was below a probed
+  phase; confirmed by sampling RSS from outside the process every 2 ms;
+  fixed in `winding_phases.py`.
 - **Band mask cost** — bucket the samples by block once instead of scanning
   them per block.
 - **Grid spacing** — 0.15 mm matched alpha-wrap's quality on Mirko by eye;

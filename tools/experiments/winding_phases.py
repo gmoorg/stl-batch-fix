@@ -165,10 +165,14 @@ def probed_reconstruct(mesh, h, blocks_per_axis, probe):
     if not pieces_f:
         w._raise_empty(mesh, V, F)
     Vo, Fo, Eo = np.vstack(pieces_v), np.vstack(pieces_f), np.vstack(pieces_e)
-    held = (Vo, Fo, Eo)        # production: the vstacked arguments stay referenced
-    probe('vstack (lists alive)')  # by the caller until _weld returns
+    probe('vstack (lists alive)')
     # _weld's body. The lists stay alive during the weld and the check, as in
-    # production (reconstruct holds them until it returns).
+    # production (reconstruct holds them until it returns). The vstacked
+    # arrays are NOT held by the caller: since Python 3.11 the callee's frame
+    # owns its arguments, so rebinding Vo and Fo below frees the originals,
+    # here as in production (measured 2026-10-06 on Python 3.12: a temporary
+    # argument rebound to a copy is freed; an earlier `held` tuple here kept
+    # them alive and overstated the weld by ~0.2 GB on sphere r 60, 4^3).
     # `_weld`'s own `_` is a separate local; reconstruct's `_` (triangle
     # areas) stays alive until reconstruct returns.
     _unique, first, inv = np.unique(Eo, axis=0, return_index=True, return_inverse=True)
@@ -176,7 +180,7 @@ def probed_reconstruct(mesh, h, blocks_per_axis, probe):
     Vo, Fo = Vo[first], inv.ravel()[Fo]
     Fo = Fo[(Fo[:, 0] != Fo[:, 1]) & (Fo[:, 1] != Fo[:, 2]) & (Fo[:, 0] != Fo[:, 2])]
     geometry = Geometry(Vo, Fo.astype(np.int64, copy=False))
-    del Vo, Fo, Eo, first, inv, _unique, held  # _weld's locals and arguments die when it returns
+    del Vo, Fo, Eo, first, inv, _unique  # _weld's locals and arguments die when it returns
     probe('weld: reindex')
     out = mesh.with_geometry(geometry)
     del geometry

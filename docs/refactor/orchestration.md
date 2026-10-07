@@ -117,6 +117,15 @@ the job.
 | 8 | `processor._judge` | Ordered gates below |
 | 9 | `processor.write` | Atomically write accepted mesh or a full-mesh failure marker |
 
+Gate check on real models (2a/4a; 2026-10-06, `skip_clean = true`,
+`max_faces = 900000`, outputs under `/mnt/sda2/STL/GateSample/out/`): five
+models were skipped whole, four had some clean parts merged unrepaired, and
+every output passed the repair tool Bambu recommends, which found nothing the
+scan missed. The Amidara base (no NM or open edges, 922 winding seams) fails
+the gate and is repaired normally (100.00% volume, 0 seams). Slicing and
+printing were not confirmed; the task was closed by the owner (2026-10-06)
+and `skip_clean` stays off by default.
+
 Reconstruction uses `h=min(diag/800, 0.15)` (alpha-wrap, when listed explicitly,
 uses that as alpha with `offset=min(diag/2000, 0.06)`); `diag` belongs to the
 whole mesh **after initial decimation**, not each part.

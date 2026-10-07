@@ -21,42 +21,13 @@ Also done (2026-10-05): float64 `Geometry.verts`, job memory re-measured
 reported with its signal or exit status, and the model log gets the
 parent's diagnosis ([orchestration.md](orchestration.md) step 5).
 
-1. [ ] **Test the `is_already_clean` gate** (`skip_clean = true`) on real
-   models (owner, 2026-10-05: wanted, on in the owner's config). Amidara
-   base fails it (confirmed 2026-10-06, below). The sample's outputs pass
-   Bambu's recommended repair tool (2026-10-06, below). Confirm that gated
-   output slices and prints. Keep it off by default until
-   then. The NM-only fast path (Reconstruction below) widens the same
-   gate and is tested with it.
-   - [x] Run the gated sample outputs through an online repair/analysis
-     tool and note whether it finds anything the scan cannot see
-     (self-intersections, overlapping or inverted shells). Done (owner,
-     2026-10-06): every file in `out/` below, Amidara included, is clean
-     according to the repair tool Bambu recommends — it found nothing the
-     scan missed. Slicing and printing are still unconfirmed. Sample re-run
-     on HEAD 2026-10-05 (`skip_clean = true`, `max_faces = 900000`),
-     outputs under `/mnt/sda2/STL/GateSample/out/` (sources in `in/`):
-     - whole model skipped: `zoro/NomNom Zoro/Zoro_STL/178mm_split/r_blade.stl`,
-       `MonHun_duo/Hinoa_Minoto_Bikini/Minoto_Bikini_Right_leg.stl`,
-       `Fae/Aine  Noon Fae/Aine__Noon_Fae_-_STL/wingR.stl`,
-       `CA3D/1-6Scale Fantasy Dragon/Fantasy/Dragon_1_Part_5.stl`,
-       `Peach Figure - Scooby-Doo - Velma Dinkley/VELMA_NSFW_PEACHFIGURE/Velma nsfw/Legs_nsfw_v1.stl`
-       (decimated to 900k, still clean);
-     - clean parts merged unrepaired: `Mandy Pinup Figurine/Mandy NSFW Dinamuu3D/Mandy NSFW Version A/MandyNakedA_Arms.stl`
-       (4/14 parts), `nutshell-atelier-belly-dancer-nsfw/3rd-02.stl` (1/2),
-       `Kuton Figurines - Hebe/Unsupported_STL/cloth.stl` (6/7),
-       `CA3D/Cleopatra + NSFW/1-9 Scale Uncut Cleopatra_NSFW/model.stl` (6/7);
-     - control, fully repaired (not gated): `Shadaloo Studios - Madelyne Pryor nsfw/Madelyne_NM_Body.stl`
-       — looks excellent on visual inspection (owner, 2026-10-06);
-     - Amidara base, confirmed failing the gate (2026-10-06, HEAD `bcceb5f`,
-       same settings, child run directly): no NM or open edges but 922
-       winding seams, so both gates said "not clean"; repaired by winding
-       (1,848,928 faces, 42 s) → decimate (315,482, 1 NM edge) → MeshFix
-       (315,070) → PROCESS, 100.00% volume, 0 seams; 1 min 20 s, 2.1 GB
-       peak. Output: `Amidara/Amidara_Blustmorn_1-12_base.stl` (source
-       `/mnt/sda2/Amidara_Blustmorn_1-12_base.stl`). Still to check: it
-       slices and prints.
-2. Everything else: volume guard on open shells
+The `is_already_clean` gate test was closed by the owner (2026-10-06): the
+sample's outputs pass Bambu's recommended repair tool; slicing and printing
+were not confirmed; `skip_clean` stays off by default. Evidence in
+[orchestration.md](orchestration.md) (after the step table); the per-file
+sample list is in git history (`7f1d263`).
+
+1. Everything else: volume guard on open shells
    ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), MeshFix
    time/NM guard ([post-wrap-meshfix-timeout.md](../errors/post-wrap-meshfix-timeout.md),
    "Not yet done"). Idea only, not a requirement (owner, 2026-10-05): when
@@ -80,9 +51,10 @@ outside the repository, startup check and `install.sh` section removed
 - [ ] Winding-number reconstruction (`libs/winding.py`, default part step
   since 2026-10-03) follow-ups, details in [reconstruction](reconstruction.md):
   more broken models (large holes); lower the memory floor — the final
-  `scanner.scan` peak is fixed (2026-10-06, int64 edge keys); the weld is
-  the predicted next peak (measure the whole run first), then a cheaper weld /
-  streaming each block's output; avoid the per-block winding-number octree
+  `scanner.scan` peak is fixed (2026-10-06, int64 edge keys) and the whole
+  run re-measured: on large outputs the weld's row-wise `np.unique` is now
+  the peak (sphere r 132: 5.30 GB, +1.9 GB over its input, 23 s); next an
+  int64 key in the weld, then streaming each block's output; avoid the per-block winding-number octree
   rebuild (`igl.FastWindingNumberBVH`, cached). Post-reconstruction decimation is bounded by no budget (memory and
   time follow ~3·A/h² rebuilt faces; sphere r 132: 29 M faces, 353 s,
   13.9 GB) — admission reserves for it, reducing it needs an owner decision
