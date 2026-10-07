@@ -469,6 +469,52 @@ Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
   range, would. The pilot on sphere r 20 2³ showed a separate 0.03 GB
   bimodality, outside the weld, that neither THP off, ASLR off, a single
   malloc arena nor the weld explained; not pursued.
+
+  **The whole child barely gains from a fixed threshold** (2026-10-07,
+  HEAD `b5f393f`, `tools/experiments/malloc_child.py`; records in
+  `malloc_child_2026-10-07.jsonl`). The owner accepted ~12 s per large run
+  if memory is won, and asked to test 4 MiB beside 128 KiB, since a 128 KiB
+  threshold could cost far more in code that allocates and frees
+  128 KiB–32 MB buffers in a loop (PyMeshLab, MeshFix were unmeasured). The
+  real per-file child, as `batch_repair._spawn_child` spawns it (prepare,
+  then repair loading the handoff, each a fresh process, the decimation
+  cache deleted first), `batch_repair.toml` settings (`max_faces` 900,000,
+  `skip_clean`, budget 10 GB) except the sphere (clean, so run with
+  `skip_clean` off to reach reconstruction); variants interleaved and
+  rotated, 2 rounds, peak = `wait4` `ru_maxrss` (the 2 ms sampler agreed).
+  37 of 38 children valid (one sphere run saw 2 pages swapped out
+  system-wide; its retry was valid). Output geometry (prepared PLY and
+  written STL) identical across every variant and round. Repair child,
+  mean of 2 (each pair within 2 MB and 6 s):
+
+  | Model (path covered) | default | mmap_threshold 128 KiB | 4 MiB |
+  |---|---|---|---|
+  | sphere r 132 seg 56, 5³ (winding, 29.2 M faces decimated) | 15.07 GB, 830 s | 15.07 GB, 841 s | 15.07 GB, 838 s |
+  | Laura `base_x.stl`, 2³ (winding, 6.1 M faces decimated) | 3.52 GB, 511 s | 3.41 GB, 535 s | 3.41 GB, 533 s |
+  | Velma `Legs_sfw.stl` (NM fast path: MeshFix on 900 k faces) | 0.95 GB, 74 s | 0.95 GB, 75 s | 0.95 GB, 74 s |
+
+  Prepare children (Velma: 6.5 M → 900 k faces, PyMeshLab, 1.08 GB, 24 s;
+  Laura 0.55 GB, 8 s) did not change in memory or time. Per step, the extra
+  time is almost all in `winding` (sphere +8–11 s, Laura +22–23 s);
+  PyMeshLab decimation (+0.5–1 s of 361 s / 66 s) and MeshFix (+0.3–0.8 s
+  of 56 s) barely moved, so the feared loop cost did not show, and 4 MiB
+  gave the same memory as 128 KiB at 0.4–3 s less. What it gains: Laura
+  −0.11 GB (−3%) for +4–5% time; the sphere nothing, because its child
+  peaks in post-reconstruction decimation (15.07 GB), not in
+  reconstruction (3.24–3.81 GB). No spread showed in any whole child even
+  without the tunable (both default rounds within 1 MB on all three
+  models), so the 3.62–3.81 GB weld spread is hidden under the decimation
+  peak on the sphere. Not covered: MeshFix of the full part sequence (sphere
+  and Laura skipped it, "condition not met"; Velma's part took the
+  accepted NM fast path, so only `nm_meshfix` ran), alpha-wrap (not
+  default).
+  Decision (owner, 2026-10-07): not set — the tests show the flag is
+  unneeded.
+  In the same records the repair child peaks during post-reconstruction
+  decimation on the sphere (peak 568–689 s; `winding` ends ~480 s) and on
+  Laura (~461–466 s; `winding` ends ~445 s, decimation 66 s), so a
+  reindex change (option b, at most 3.51 → 3.27 GB inside reconstruction)
+  would lower neither child's peak. Owner, 2026-10-07: (b) not done.
 - **Band mask cost** — bucket the samples by block once instead of scanning
   them per block.
 - **Grid spacing** — 0.15 mm matched alpha-wrap's quality on Mirko by eye;

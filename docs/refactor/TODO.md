@@ -59,15 +59,19 @@ outside the repository, startup check and `install.sh` section removed
   varied by 0.01 GB — the new spread follows glibc malloc's policy,
   2026-10-07: with `glibc.malloc.mmap_threshold` fixed at 128 KiB all 4
   runs peak at 3.239 GB, the peak moves out of the weld, ~12 s slower;
-  mechanism not isolated; whether to set it in production is open). The peak on large outputs is still the weld's reindex
-  (3.51 probed; marching cubes 3.27); next streaming each block's output;
+  mechanism not isolated. The whole real child gains little from it, 2026-10-07: sphere 15.07 GB either way (its peak is post-reconstruction decimation), Laura −0.11 GB for +4–5% time, 4 MiB same as 128 KiB; reconstruction.md "The whole child barely gains"; owner decided 2026-10-07 not to set it). Inside reconstruction the peak on large outputs is still the weld's reindex
+  (3.51 probed; marching cubes 3.27), but the whole child peaks later, in
+  post-reconstruction decimation, on both reconstructing models measured
+  (sphere, Laura; malloc_child records), so reworking the reindex in
+  place/in chunks was dropped (owner, 2026-10-07); streaming each block's
+  output likewise only lowers that phase;
   avoid the per-block winding-number octree
   rebuild (`igl.FastWindingNumberBVH`, cached). Post-reconstruction decimation is bounded by no budget (memory and
   time follow ~3·A/h² rebuilt faces; sphere r 132: 29 M faces, 353 s,
   13.9 GB) — admission reserves for it, reducing it needs an owner decision
   (e.g. per-part spacing from area, or decimating blocks before the weld).
-- [ ] NM-only fast path: revisit after the next long run (owner,
-  2026-10-05). Implemented under `skip_clean` (orchestration step 4a): a
+- [ ] NM-only fast path: revisit once a run produces failed models, from
+  their logs (owner, 2026-10-05; postponed until then, 2026-10-07). Implemented under `skip_clean` (orchestration step 4a): a
   part whose only scanned defect is NM edges gets MeshFix alone, accepted
   when clean with component volume in 98–102%, else the part sequence runs
   on the original part. Open:
