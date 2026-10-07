@@ -1,5 +1,41 @@
 # Claude Code instructions
 
+> **Temporary handoff (2026-10-07).** Read this, then delete this note when
+> the next task's first commit lands.
+>
+> - **State:** branch `error-fixes`; `c914a25` (the spread investigation)
+>   and this note are committed, **not pushed**. Option (a) from the
+>   previous handoff is done, Codex-reviewed (PASS). No production code
+>   changed.
+> - **Finding:** the sphere r 132 5³ peak spread (3.62–3.81 GB) follows
+>   glibc malloc's policy. The weld alone is deterministic (24 runs,
+>   2.641 GB) and its inputs hash identically; with
+>   `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072` four interleaved
+>   whole runs all peak at 3.239 GB, peak moved ~22 s before the end (out
+>   of the weld), ~12 s slower. Mechanism not isolated (the tunable also
+>   freezes the trim threshold); weld variation under it is hidden; why
+>   the old code was steady is unmeasured. Details: reconstruction.md "The
+>   spread follows glibc malloc's policy"; TODO.md winding entry.
+> - **Open decisions for the owner, one at a time (none started):**
+>   1. set the tunable for the batch (production change: lower, steady
+>      peak vs ~12 s per large run; would need a decision where to set it —
+>      env of the batch process or its children)?
+>   2. then option (b): reindex the weld in place/in chunks. Judge it by a
+>      probed weld phase (under the tunable the whole-run peak is not the
+>      weld) or against the normal 3.62–3.81 range.
+>   Not wanted now: a C/numba rewrite of the numpy glue (discussed; keep
+>   numpy, chunk where a measured peak warrants it); the STL load weld's
+>   `srt`/`ids` temporaries (~420 MB at 7 M triangles, not the peak).
+> - **Tools:** `tools/experiments/weld_spread.py` (interleaved fresh-child
+>   runs, 2 ms sampler, swap/THP counters, output hashes, `weld-inputs`
+>   diagnostic with mallinfo2) and `weld_alone.py` (`save` the weld inputs
+>   from one run, `run` the weld alone); usage in their docstrings, data in
+>   the `*_2026-10-07.jsonl` beside them. Saved weld inputs lived in the
+>   session scratchpad; regenerate with `weld_alone.py save` (~8 min). A
+>   full sphere r 132 5³ run takes ~7.5 min; never run two at once.
+> - **Codex:** this task's planning and review sessions are finished; run
+>   `tools/reset_codex.sh` before the next task.
+
 Treat the directory containing this file as the project root. Return to it before project commands; do not derive project paths from the shell's inherited working directory. Start with [README.md](README.md) and follow only the compact documentation needed.
 
 Read only task-relevant sections linked from README; do not preload every
