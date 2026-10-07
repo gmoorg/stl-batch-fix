@@ -1,0 +1,25 @@
+{"label": "base", "hwm": 2640568320, "base": 70987776, "after": 1150738432, "t": 2.6, "faces": 29156684}
+{"label": "thpoff", "hwm": 2640715776, "base": 71200768, "after": 1150955520, "t": 4.38, "faces": 29156684}
+{"label": "noaslr", "hwm": 2640883712, "base": 71086080, "after": 1150828544, "t": 2.57, "faces": 29156684}
+{"label": "base", "hwm": 2640945152, "base": 71110656, "after": 1150889984, "t": 2.59, "faces": 29156684}
+{"label": "thpoff", "hwm": 2640547840, "base": 71192576, "after": 1150955520, "t": 4.28, "faces": 29156684}
+{"label": "noaslr", "hwm": 2641076224, "base": 71241728, "after": 1150976000, "t": 2.66, "faces": 29156684}
+{"label": "base", "hwm": 2640658432, "base": 71069696, "after": 1150824448, "t": 2.57, "faces": 29156684}
+{"label": "thpoff", "hwm": 2640699392, "base": 71049216, "after": 1150803968, "t": 4.33, "faces": 29156684}
+{"label": "noaslr", "hwm": 2640793600, "base": 71090176, "after": 1150836736, "t": 2.55, "faces": 29156684}
+{"label": "base", "hwm": 2640826368, "base": 71168000, "after": 1150935040, "t": 2.63, "faces": 29156684}
+{"label": "thpoff", "hwm": 2640908288, "base": 71184384, "after": 1150947328, "t": 4.45, "faces": 29156684}
+{"label": "noaslr", "hwm": 2640687104, "base": 71237632, "after": 1150988288, "t": 2.58, "faces": 29156684}
+{"label": "base", "hwm": 2640744448, "base": 71008256, "after": 1150795776, "t": 2.65, "faces": 29156684}
+{"label": "thpoff", "hwm": 2640814080, "base": 71110656, "after": 1150885888, "t": 4.39, "faces": 29156684}
+{"label": "noaslr", "hwm": 2640887808, "base": 71233536, "after": 1150988288, "t": 2.57, "faces": 29156684}
+{"label": "base", "hwm": 2640822272, "base": 71110656, "after": 1150865408, "t": 2.59, "faces": 29156684}
+{"label": "thpoff", "hwm": 2640781312, "base": 71208960, "after": 1150984192, "t": 4.27, "faces": 29156684}
+{"label": "noaslr", "hwm": 2641063936, "base": 71176192, "after": 1150926848, "t": 2.66, "faces": 29156684}
+{"label": "base", "hwm": 2640609280, "base": 70918144, "after": 1150697472, "t": 2.59, "faces": 29156684}
+{"label": "thpoff", "hwm": 2640691200, "base": 70983680, "after": 1150734336, "t": 4.29, "faces": 29156684}
+{"label": "noaslr", "hwm": 2641002496, "base": 71180288, "after": 1150930944, "t": 2.56, "faces": 29156684}
+{"label": "base", "hwm": 2640707584, "base": 71053312, "after": 1150828544, "t": 2.6, "faces": 29156684}
+{"label": "thpoff", "hwm": 2640875520, "base": 71106560, "after": 1150894080, "t": 4.35, "faces": 29156684}
+{"label": "noaslr", "hwm": 2640896000, "base": 71237632, "after": 1150984192, "t": 2.56, "faces": 29156684}
+{"label": "save", "note": "the save run: weld inputs and output digests (its peak is not comparable)", "weld_inputs": [{"dtype": "float64", "shape": [14653488, 3], "sha256": "b51d9a772e7e0ff851095e46194205a51369929d6c8c5874655141eabb400b11"}, {"dtype": "int64", "shape": [29156684, 3], "sha256": "56672d91df1e5ff7df84c9429eb670cc0a04c46f2fefabc7f2150bb266e4518f"}, {"dtype": "int64", "shape": [14653488], "sha256": "5cf5b0aeca7b63293bca7dfb17ef36c951c66f8446883ecc532cf99849ef7d51"}], "out": {"verts": {"dtype": "float64", "shape": [14578344, 3], "sha256": "ba4d2fa4564f269b0bcfb17d1dbd2034977df338c19ee7c978e0a0bed3448dfa"}, "faces": {"dtype": "int64", "shape": [29156684, 3], "sha256": "3b3ec9d73655de4ce1286ad7bcef072423241ff78e0a465f4601ffa742ad436d"}}}

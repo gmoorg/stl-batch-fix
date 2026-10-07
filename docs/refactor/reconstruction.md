@@ -401,6 +401,74 @@ Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
   (untested guess: where the allocator places the weld's large arrays
   after the many freed block pieces). join_complication still peaks in the
   block field (unchanged).
+
+  **The spread follows glibc malloc's policy** (2026-10-07, HEAD `36b8dd2`,
+  sphere r 132 5³, `tools/experiments/weld_spread.py`: each run a fresh
+  child doing the unmodified `reconstruct` after `winding_phases.prepare`,
+  variants interleaved run by run, VmRSS sampled every 2 ms from outside,
+  swap counters checked — no swap I/O in any run; per-run records in
+  `weld_spread_2026-10-07.jsonl` and `weld_alone_2026-10-07.jsonl`):
+  1. *The weld alone is deterministic.* Its inputs saved from one run
+     (`Vo` 0.35, `Fo` 0.70, keys 0.12 GB; `weld_alone.py save`), then
+     `_weld(np.load(...), ...)` with call temporaries in a fresh process
+     (`weld_alone.py run`), 8 runs each normal, with numpy's huge-page
+     advice off (`NUMPY_MADVISE_HUGEPAGE=0`; THP is `madvise` here and
+     numpy 2.5 advises it) and with ASLR off (`setarch -R`): all 24 peak
+     at 2.6405–2.6411 GB (2.57 above the process's start). So on fixed
+     inputs and a fresh heap neither huge pages nor address layout varies
+     the weld. Not tested: either of them in full runs, where they could
+     interact with the earlier allocation history.
+  2. *Its inputs do not vary.* Three full runs hashed `_weld`'s arguments
+     (dtype, shape, sha256) — the save run and two diagnostic runs:
+     identical; every run's output is identical too.
+  3. *The allocator holds much free memory at the weld.* On entering
+     `_weld` (two diagnostic runs, `mallinfo2` summed over arenas): RSS
+     2.28 / 2.34 GB; mmapped chunks (`hblkhd`) 1.17 GB, consistent with the
+     weld's inputs (1.17 GB) though the count does not identify them; heap
+     free space kept by malloc (`fordblks`) 0.99 / 1.04 GB, 0.02 GB in use.
+     `fordblks` is free space, not resident bytes, but RSS minus the mmapped
+     chunks (~1.1 GB) suggests most of it is resident. The weld alone needs
+     2.57 GB over its start, yet only 0.2–0.5 GB over the 3.3 GB before it
+     in a full run: consistent with it reusing that memory to a degree that
+     differs by run, not shown directly.
+  4. *Fixing malloc's mmap threshold removes the whole-run spread.* By
+     default glibc raises the threshold (up to 32 MB) when it frees an
+     mmapped chunk above it, so later requests below the new threshold can
+     be served from the heap, where freed space is kept; setting
+     `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072` fixes it at
+     128 KiB, and — per glibc's source — also stops the trim threshold's
+     dynamic adjustment, so the intervention changes two policies at once.
+     Whole run, alternating:
+
+     | Round | Normal | mmap_threshold 128 KiB |
+     |---|---|---|
+     | 1 | 3.767 | 3.239 |
+     | 2 | 3.618 | 3.239 |
+     | 3 | 3.812 | 3.239 |
+     | 4 | 3.657 | 3.239 |
+
+     All four fixed-threshold runs peak at 3.239 GB (within 1 MB), below
+     every normal run (3.618–3.812), and their peak moves out of the weld:
+     ~22 s before the end (normal: 3 s, the reindex), so an earlier phase
+     sets it. The run takes ~12 s longer (459–463 vs 447–450 s).
+
+  Conclusion: strong evidence that allocator policy (glibc malloc keeping
+  freed heap memory and reusing it) produces the spread: the weld is
+  deterministic on its own, its inputs do not vary, and one tunable makes
+  four interleaved runs identical. Not established: the specific
+  mechanism (the tunable changes the mmap and trim policies together, and
+  which allocations land in the retained heap was not measured); whether
+  the weld still varies under the tunable (its peak is hidden below an
+  earlier phase; only a probed weld phase would show it); THP or ASLR
+  interacting in full runs; and why the old code (4.07 GB) was steady.
+  Whether to set the tunable for the batch is a production decision (it
+  changes which phase peaks and costs ~12 s here). For judging the
+  reindex change (option b): the whole-run figure under the tunable is
+  stable (3.239 GB, four runs) but would not show (b), as the weld is not
+  its peak; a probed weld phase under the tunable, or the normal runs'
+  range, would. The pilot on sphere r 20 2³ showed a separate 0.03 GB
+  bimodality, outside the weld, that neither THP off, ASLR off, a single
+  malloc arena nor the weld explained; not pursued.
 - **Band mask cost** — bucket the samples by block once instead of scanning
   them per block.
 - **Grid spacing** — 0.15 mm matched alpha-wrap's quality on Mirko by eye;

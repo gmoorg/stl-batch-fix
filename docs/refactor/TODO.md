@@ -56,7 +56,10 @@ outside the repository, startup check and `install.sh` section removed
   one int64 key per vertex, byte-identical output; sphere r 132: 5.31 →
   4.07 GB whole run), then the per-block grid copies and the pieces held
   through the weld (3.50–3.85 GB over 8 runs, median 3.63; the old code
-  varied by 0.01 GB — the new spread is in the weld, cause unmeasured). The peak on large outputs is still the weld's reindex
+  varied by 0.01 GB — the new spread follows glibc malloc's policy,
+  2026-10-07: with `glibc.malloc.mmap_threshold` fixed at 128 KiB all 4
+  runs peak at 3.239 GB, the peak moves out of the weld, ~12 s slower;
+  mechanism not isolated; whether to set it in production is open). The peak on large outputs is still the weld's reindex
   (3.51 probed; marching cubes 3.27); next streaming each block's output;
   avoid the per-block winding-number octree
   rebuild (`igl.FastWindingNumberBVH`, cached). Post-reconstruction decimation is bounded by no budget (memory and

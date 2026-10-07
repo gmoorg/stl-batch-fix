@@ -212,9 +212,10 @@ def load_model(name):
     return mesh_io.load(mesh_io.probe(name, '/nonexistent/out.stl'))
 
 
-def main():
-    name, blocks = sys.argv[1], int(sys.argv[2])
-    plain = '--plain' in sys.argv
+def prepare(name, blocks):
+    """Load the model and print the run header: the work done before
+    `reconstruct` in every run (shared with weld_spread.py, so both start
+    the reconstruction from the same allocator history)."""
     mesh = load_model(name)
     h = winding.grid_spacing(scanner.diagonal(mesh))
     p = winding.plan(mesh, h, 10 ** 13)          # only for the estimate at this block count
@@ -224,6 +225,13 @@ def main():
                                  winding._largest_block(p.shape, blocks))
     print(f"model={name} faces_in={len(mesh.geometry.faces)} h={h:g} shape={p.shape} "
           f"blocks={blocks}^3 estimate={est / 1e9:.2f} GB", flush=True)
+    return mesh, h
+
+
+def main():
+    name, blocks = sys.argv[1], int(sys.argv[2])
+    plain = '--plain' in sys.argv
+    mesh, h = prepare(name, blocks)
     base = status()['VmRSS']
     print(f"rss before reconstruct {base / 1e9:.3f} GB")
     t = time.monotonic()
