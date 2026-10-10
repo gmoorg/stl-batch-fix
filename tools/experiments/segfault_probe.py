@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Experiment: degenerate faces crash PyMeshLab quadric decimation on the
-array path. See docs/errors/decimation-segfault.md.
+array path. See docs/archive/errors/decimation-segfault.md.
 
     PYTHONPATH=. tools/project_python.sh -X faulthandler tools/experiments/segfault_probe.py MODE ...
 

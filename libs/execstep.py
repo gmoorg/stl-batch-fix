@@ -4,7 +4,7 @@ Owns config delivery, step_logger invocation, `StepResult` recording, and
 stop-on-failure — the parts of running a step sequence that are identical
 regardless of which tool or which stage (whole-mesh, split, per-part) is
 being run. See docs/refactor/modules.md's `execstep` entry and
-docs/refactor/TODO.md's "Uniform-step refactor" section for why this exists
+docs/refactor/modules.md's "Contracts" section for why this exists
 as its own module: it must not import `repairer`, `processor`, or any
 concrete pipeline composition — those import THIS module, not the reverse,
 so there is one direction of dependency between "how to run a step" and

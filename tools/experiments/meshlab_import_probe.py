@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Experiment: what PyMeshLab's STL **import** and PLY round trip do with
 duplicate, degenerate and near-duplicate geometry. See
-docs/errors/decimation-memory-path.md ("PLY dialect" and the defect table).
+docs/archive/errors/decimation-memory-path.md ("PLY dialect" and the defect table).
 
     PYTHONPATH=. tools/project_python.sh tools/experiments/meshlab_import_probe.py OUTDIR [FILE]
 

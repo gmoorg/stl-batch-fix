@@ -3,7 +3,7 @@
 PyMeshLab's `meshing_decimation_quadric_edge_collapse` (owner decision
 2026-10-04): fast_simplification destroyed thin features on reconstructed
 output, turned spheres oblong and stalled far above extreme targets;
-evidence in docs/refactor/reconstruction.md, "Decimation after
+evidence in docs/archive/reconstruction.md, "Decimation after
 reconstruction". Parameters: `QUADRIC_PARAMS`."""
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from .mesh_io import Geometry, Mesh, require_geometry
 #: leaving thousands of non-manifold edges that MeshFix could not clear
 #: within the per-file timeout. planarquadric left none off the surface,
 #: 0–1 NM edges, at the same memory, faster, and kept the rod fixture's tip
-#: at least as well (docs/errors/post-wrap-meshfix-timeout.md).
+#: at least as well (docs/archive/errors/post-wrap-meshfix-timeout.md).
 #:
 #: Changing anything here changes `settings_tag`, so cached decimations
 #: made with other settings are not reused.

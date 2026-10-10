@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Experiment: thin-feature accuracy of PyMeshLab quadric decimation with
-`optimalplacement` on (default) and off. See docs/errors/post-wrap-meshfix-timeout.md
-and the method in docs/refactor/reconstruction.md ("Decimation after reconstruction").
+`optimalplacement` on (default) and off. See docs/archive/errors/post-wrap-meshfix-timeout.md
+and the method in docs/archive/reconstruction.md ("Decimation after reconstruction").
 
     PYTHONPATH=. tools/project_python.sh tools/experiments/placement_rod_check.py [VARIANT]
 

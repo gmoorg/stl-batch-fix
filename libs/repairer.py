@@ -42,7 +42,7 @@ WHOLE_MESH_STEPS: tuple[Entry, ...] = ()
 #: Decimation is ONE PyMeshLab pass (owner decision 2026-10-04): the second
 #: `decimate_again` round existed because fast_simplification plateaued far
 #: above extreme targets, and that second round collapsed thin features
-#: (docs/refactor/reconstruction.md, "Decimation after reconstruction").
+#: (docs/archive/reconstruction.md, "Decimation after reconstruction").
 #: The target stays best-effort; MeshFix follows so anything decimation
 #: changes is still checked and repaired.
 DEFAULT_PART_STEPS: tuple[Entry, ...] = (
@@ -177,8 +177,9 @@ def _split_stage(min_shell_faces: int) -> tuple[Entry, ...]:
     `min_shell_faces` changes only the shell entry's floor, never the set or
     order of entries present. Enabling seam splitting later means adding one
     more `collection_entry(...)` line here, in order — not touching a flag
-    (docs/refactor/TODO.md's "Uniform-step refactor" section: "do not enable
-    seam splitting... during this refactor").
+    (uniform-step refactor plan,
+    ../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md:
+    do not add "seam splitting as part of this refactor").
     """
     return (
         collection_entry('split_shells',
@@ -212,7 +213,7 @@ def is_already_clean(mesh: Mesh) -> bool:
 
     Self-intersections are deliberately NOT checked: they do not by
     themselves fail a print (see the spike this function was written for,
-    docs/refactor/TODO.md's "Algorithm questions" section) and alpha-wrap
+    ../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md's "Algorithm questions" section) and alpha-wrap
     exists specifically to make them go away — a mesh whose only defect is
     self-intersection is exactly the case this gate is meant to skip
     repairing, not exclude.

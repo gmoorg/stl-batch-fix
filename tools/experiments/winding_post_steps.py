@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Experiment: pass a winding output that fails `_check` (NM edges) on
 through the default post-reconstruction steps, and report topology and
-volume. See docs/errors/winding-non-manifold.md.
+volume. See docs/archive/errors/winding-non-manifold.md.
 
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/winding_post_steps.py FILE [--meshfix-only]
 

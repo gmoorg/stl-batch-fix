@@ -3,7 +3,7 @@
 saves a PLY) against the array path (mesh_io.load + decimate). The comparison
 that decided against the file path (2026-10-05): same output, but PyMeshLab's
 STL reader holds ~4.5x the mesh's own memory. See
-docs/errors/decimation-memory-path.md.
+docs/archive/errors/decimation-memory-path.md.
 
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/file_decimation_compare.py array FILE OUT.npz [TARGET]
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/file_decimation_compare.py file FILE OUT.ply [TARGET]

@@ -70,7 +70,7 @@ Copies the 900k-face result back as float32/int64. Negligible.
 `MeshSet.load_new_mesh(path)` followed by
 `meshing_decimation_quadric_edge_collapse(targetfacenum=900000)`, one file
 per process, with RSS and high-water mark read from `/proc/self/status`.
-Script: [tools/experiments/meshlab_file_decimate.py](../../tools/experiments/meshlab_file_decimate.py)
+Script: [tools/experiments/meshlab_file_decimate.py](../../../tools/experiments/meshlab_file_decimate.py)
 (usage, including the memory-capped run, in its docstring).
 
 | File | Faces | RSS loaded | Peak after load | Peak overall | Decimate time | Result |
@@ -202,7 +202,7 @@ MeshSet.load_new_mesh(source) → quadric decimation → save_current_mesh(cache
   for 1–4.8M faces.
 - **Exact hand-off.** The cache keeps the decimator's vertex table instead of
   being re-welded from STL triangles. This follows the existing rule in
-  [modules.md](../refactor/modules.md) ("Do not replace indexed PLY exchange
+  [modules.md](../../refactor/modules.md) ("Do not replace indexed PLY exchange
   with lossy STL round trips"). It's also smaller (~17 MB vs ~45 MB at 900k)
   and reloads without the `lexsort` weld.
 
@@ -258,7 +258,7 @@ on the file path (option 2 above).
   in 0.01 s.
 
   Reproduce with
-  [tools/experiments/meshlab_import_probe.py](../../tools/experiments/meshlab_import_probe.py)
+  [tools/experiments/meshlab_import_probe.py](../../../tools/experiments/meshlab_import_probe.py)
   (synthetic defect table, or a real FILE for the save/re-read check).
 
   Measured (2026-10-04): PyMeshLab saves the PLY whether or not decimation
@@ -311,7 +311,7 @@ on the file path (option 2 above).
 ## Measured: file path vs array path (2026-10-05)
 
 Built and compared before deciding
-([tools/experiments/file_decimation_compare.py](../../tools/experiments/file_decimation_compare.py):
+([tools/experiments/file_decimation_compare.py](../../../tools/experiments/file_decimation_compare.py):
 each path in its own process, peak = VmHWM, distances point-to-triangle from
 all vertices, in model units). Both produce the same mesh; the file path is
 slower and needs more memory:
@@ -357,7 +357,7 @@ producers below return float64 (`meshlab.from_mesh`, MeshFix,
 `winding._weld`), the consumers' casts are gone, and `write_ply` always
 writes `double`. Job memory was re-measured afterwards: peaks rose 0–4 %,
 the constants were kept
-([orchestration](../refactor/orchestration.md#job-memory-calibration-2026-10-04)).
+([orchestration](../../refactor/orchestration.md#job-memory-calibration-2026-10-04)).
 The rest of this section is the reasoning as decided.
 
 **Why.** float32 saves nothing when every consumer casts to float64. While

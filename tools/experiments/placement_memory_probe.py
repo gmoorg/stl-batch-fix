@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Experiment: memory peak of post-reconstruction decimation, and of MeshFix
 on its output, with and without vertices thrown off the surface. See
-docs/errors/post-wrap-meshfix-timeout.md.
+docs/archive/errors/post-wrap-meshfix-timeout.md.
 
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/placement_memory_probe.py MODE ...
 

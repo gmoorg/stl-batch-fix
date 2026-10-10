@@ -5,7 +5,7 @@ from the generalized winding number, then extract the surface with marching
 cubes on one global grid processed in blocks. **Implemented as
 [`libs/winding.py`](../../libs/winding.py) and the default part step since
 2026-10-03**, replacing alpha-wrap (which stays available as an explicit
-entry); contract in [modules](modules.md). This page holds the evidence: the
+entry); contract in [modules](../refactor/modules.md). This page holds the evidence: the
 experiment ([`tools/experiments/wnmc_band.py`](../../tools/experiments/wnmc_band.py)),
 the measurements behind the design, and the memory model's calibration.
 
@@ -23,7 +23,7 @@ non-degenerate.
 
 Alpha-wrap's memory and time follow the surface it wraps
 (≈ 1.39 · A / α² output faces, ≈ 1.6–2.0 KB · A / α² peak; see
-[TODO](TODO.md#runner-and-concurrency); re-measured 2026-10-10 for `--alpha`:
+[TODO, 2026-09-26 snapshot](../../../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md#runner-and-concurrency); re-measured 2026-10-10 for `--alpha`:
 output and peak also grow with the part's own face count, orchestration.md
 "Job memory"), so one large model can need many GB.
 It cannot be split: wrapping spatial regions separately produced a hollow
@@ -65,7 +65,7 @@ first, so blocks can be processed independently and still form a solid.
    fit int64 is refused when the grid is set up. (Until 2026-10-05 vertices were merged by
    coordinates rounded to `h · 1e-4`, which partially merged near-node
    clusters into non-manifold edges; see
-   [winding-non-manifold.md](../errors/winding-non-manifold.md).)
+   [winding-non-manifold.md](errors/winding-non-manifold.md).)
 
 Seams need no stitching: a vertex on a shared block face is interpolated from
 the same two grid values in both blocks, equal up to float rounding (measured

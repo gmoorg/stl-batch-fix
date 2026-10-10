@@ -5,7 +5,7 @@
         --rounds N --log FILE [--model NAME=PATH[,clean] ...] [--sphere]
         [--variant NAME[=BYTES] ...]
 
-The 2026-10-07 weld investigation (reconstruction.md, "The spread follows
+The 2026-10-07 weld investigation (docs/archive/reconstruction.md, "The spread follows
 glibc malloc's policy") measured `GLIBC_TUNABLES=glibc.malloc.mmap_threshold`
 on `reconstruct` alone. This runs the whole per-file child the batch spawns
 (`batch_repair._spawn_child`, unchanged argv): a prepare child, then a repair

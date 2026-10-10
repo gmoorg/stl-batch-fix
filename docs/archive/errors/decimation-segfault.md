@@ -98,10 +98,10 @@ crashes:
 | icosphere + isolated + reversed duplicate pair | 81,923 | 40,964 / **81,922** | 5,002 / 10,000 |
 
 Reproduce with
-[tools/experiments/segfault_probe.py](../../tools/experiments/segfault_probe.py)
+[tools/experiments/segfault_probe.py](../../../tools/experiments/segfault_probe.py)
 (modes `count | array | clean | synth CASE | crop`, one process per run) and
 the 16-face real crop
-[tests/probes/segv_min16.stl](../../tests/probes/segv_min16.stl)
+[tests/probes/segv_min16.stl](../../../tests/probes/segv_min16.stl)
 (`array` exits 139, `clean` decimates).
 
 ## Can winding or alpha-wrap produce this defect?

@@ -11,7 +11,7 @@ booleans here.
 
 The boolean ENABLE_SPLIT_SHELLS/ENABLE_SPLIT_SEAMS/ENABLE_ALPHA_WRAP flags
 this module used to hold were removed 2026-09-2x as part of the uniform-step
-refactor (docs/refactor/TODO.md's "Uniform-step refactor" section): a step
+refactor (docs/refactor/modules.md's "Contracts" section): a step
 now runs because it is present in the sequence that composes it, and does
 not run because it is absent — no separate switch anywhere. This continues
 the same reasoning as the ENABLE_WELD/CLEAN_FILTERS/etc. removal on

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Experiment: the initial (whole-source) decimation with PyMeshLab defaults
-against `planarquadric=True`. See docs/errors/post-wrap-meshfix-timeout.md.
+against `planarquadric=True`. See docs/archive/errors/post-wrap-meshfix-timeout.md.
 
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/initial_decimation_compare.py run FILE VARIANT OUT.npz [TARGET]
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/initial_decimation_compare.py compare FILE DEFAULTS.npz PLANAR.npz

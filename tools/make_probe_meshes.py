@@ -18,7 +18,8 @@ to use a real file first: `platform_supported.stl` had 4,526 shells, 22.6% of
 faces with skewed normals, and printed supports — nothing about its repair
 could be attributed to anything.
 
-Findings from the 2026-09-16 survey are in REFACTOR_DECISIONS.md; in short,
+Findings from the 2026-09-16 survey are in
+../stl-batch-fix.old/archive/docs-before-compact-2026-09-19/refactor/repair-study-2026-09-16/; in short,
 four of five defects needed no new capability and `doubles` is the one gap.
 """
 import os

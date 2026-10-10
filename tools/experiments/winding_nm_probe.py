@@ -9,7 +9,7 @@ repair pass actually loaded.
 
 Prints NM/open counts for the raw marching-cubes output (exact merge only)
 and for `_weld`'s output, then each NM edge with its grid position. See
-docs/errors/winding-non-manifold.md. "raw verts merged" is approximate: it
+docs/archive/errors/winding-non-manifold.md. "raw verts merged" is approximate: it
 re-keys float32 output coordinates, which can land in a neighbouring bin.
 NM/open counts are edge incidence only: bow-tie vertices, orientation and
 self-intersections aren't checked.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Experiment: per-shell report for the volume-loss investigation. See
-docs/errors/volume-loss-rejected.md.
+docs/archive/errors/volume-loss-rejected.md.
 
     PYTHONPATH=. tools/project_python.sh tools/experiments/shell_report.py FILE [FILE ...]
 

@@ -37,7 +37,7 @@ Marching cubes produced output with no NM edges on the tested parts, and our
 bow-tie vertices, self-intersections and orientation were not.
 
 Measured with
-[tools/experiments/winding_nm_probe.py](../../tools/experiments/winding_nm_probe.py),
+[tools/experiments/winding_nm_probe.py](../../../tools/experiments/winding_nm_probe.py),
 which uses the batch's grid spacing and 10 GB plan. It captures the
 marching-cubes output before `_weld` and skips `_check`:
 
@@ -71,7 +71,7 @@ same; same error signature).
 
 The broken winding output (with `_check` disabled) passed through the default
 post steps (`decimate` → conditional `meshfix`), using
-[tools/experiments/winding_post_steps.py](../../tools/experiments/winding_post_steps.py)
+[tools/experiments/winding_post_steps.py](../../../tools/experiments/winding_post_steps.py)
 (`--meshfix-only` for the direct row):
 
 | Path | Faces | NM | Open | Volume | Time |
@@ -112,7 +112,7 @@ Implemented 2026-10-05 (see Fix below). Two changes, both wanted:
      when the 1 h `per_file_timeout` killed the job (3,604 s, both cases) ([post-wrap-meshfix-timeout.md](post-wrap-meshfix-timeout.md)).
      Winding's defect is 1–3 edges, but a loosened guard has no upper limit.
    - `_check` is winding's documented success contract (closed, manifold;
-     see the winding entry in [modules.md](../refactor/modules.md)).
+     see the winding entry in [modules.md](../../refactor/modules.md)).
      MeshFix is conditional, and custom `part_steps` replace the default
      sequence, so a later fix isn't guaranteed for every caller. Cover
      direct and custom callers and shape preservation, not only torso_girl's
@@ -142,7 +142,7 @@ edges; the MeshFix timeouts came from thousands made by decimation. A direct
 `processor`'s judge flags any left in a final output (`UNREPAIRED`).
 
 All six failing models
-([tools/experiments/winding_edge_weld_check.py](../../tools/experiments/winding_edge_weld_check.py),
+([tools/experiments/winding_edge_weld_check.py](../../../tools/experiments/winding_edge_weld_check.py),
 batch h and 10 GB plan, one run each, both welds on the same
 marching-cubes output):
 

@@ -105,7 +105,7 @@ def _edge_counts(faces: np.ndarray) -> np.ndarray:
     count is the length of its run of equal keys.  This replaced
     `np.unique(face_edges(faces), axis=0, return_counts=True)`, the row-wise
     unique, which sorts a structured view of the (3m, 2) edge array.  Measured
-    on a 29.2 M-face winding output (sphere r 132; reconstruction.md "Memory
+    on a 29.2 M-face winding output (sphere r 132; docs/archive/reconstruction.md "Memory
     floor", `tools/experiments/scan_memory.py`): the row-wise unique added
     ~197 B and ~3.7 µs per face (+5.74 GB, 107 s) and was the whole
     reconstruction's peak; the keys add ~34 B per face (+0.99 GB, 2.3 s)

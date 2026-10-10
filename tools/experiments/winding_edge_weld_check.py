@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Experiment: the grid-edge weld against the coordinate-rounding weld it
-replaced, on one shell of a real model. See docs/errors/winding-non-manifold.md.
+replaced, on one shell of a real model. See docs/archive/errors/winding-non-manifold.md.
 
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/winding_edge_weld_check.py FILE [PART]
 

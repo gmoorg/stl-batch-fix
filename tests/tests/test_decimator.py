@@ -234,7 +234,7 @@ F = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3], [4, 5, 4]]
 class TestDegenerateFacesDoNotCrash(unittest.TestCase):
     """Faces with a repeated corner index segfaulted PyMeshLab's quadric
     decimation on the array path (seven batch models; evidence in
-    docs/errors/decimation-segfault.md). Every case runs in a child process,
+    docs/archive/errors/decimation-segfault.md). Every case runs in a child process,
     so a regression shows up as a failed test, not a dead runner."""
 
     def child(self, case):
@@ -349,7 +349,7 @@ class TestEarlierCallsDoNotLeakIn(unittest.TestCase):
 class TestShapeIsKept(unittest.TestCase):
     """Outcomes, not internals: the decimated surface stays on the input
     shape. fast_simplification failed both of these (owner decision
-    2026-10-04, docs/refactor/reconstruction.md)."""
+    2026-10-04, docs/archive/reconstruction.md)."""
 
     def test_a_sphere_stays_round(self):
         """fast_simplification made spheres oblong. Every vertex of the

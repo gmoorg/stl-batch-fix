@@ -28,7 +28,7 @@ Per run, one JSON line in FILE:
 - `out`: dtype, shape and sha256 of the output vertices and faces, hashed
   after sampling stopped; `weld_inputs` likewise for diagnostic runs, and
   `mallinfo`: glibc's `mallinfo2()` plus VmRSS/VmHWM on entering `_weld`.
-The 2026-10-07 runs (reconstruction.md, "The spread is glibc malloc's") are
+The 2026-10-07 runs (docs/archive/reconstruction.md, "The spread is glibc malloc's") are
 in weld_spread_2026-10-07.jsonl.
 The 100 ms timeline (t, VmRSS, last AnonHugePages) goes to FILE.<run>.tsv.
 

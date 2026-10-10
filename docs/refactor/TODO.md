@@ -13,7 +13,7 @@ limits and the MeshFix-frequency task below wait on that run's logs.
 ## Priority (owner, 2026-10-05)
 
 Work in this order; details in
-[decimation-memory-path.md](../errors/decimation-memory-path.md). Done (2026-10-05): the
+[decimation-memory-path.md](../archive/errors/decimation-memory-path.md). Done (2026-10-05): the
 narrow PLY dialects; the PLY decimation cache beside the input folder
 (decimate-from-file was measured and not adopted: PyMeshLab's STL reader
 needs more memory than our loader); the chunked STL read with
@@ -33,10 +33,18 @@ were not confirmed; `skip_clean` stays off by default. Evidence in
 [orchestration.md](orchestration.md) (after the step table); the per-file
 sample list is in git history (`7f1d263`).
 
-1. Everything else: volume guard on open shells
-   ([volume-loss-rejected.md](../errors/volume-loss-rejected.md)), MeshFix
-   time/NM guard ([post-wrap-meshfix-timeout.md](../errors/post-wrap-meshfix-timeout.md),
-   "Not yet done"). Idea only, not a requirement (owner, 2026-10-05): when
+1. Everything else: volume guard on open shells — the judge's input volume
+   is meaningless for open shells, and the shells of `arm2`/`fabric3` are
+   pieces of one surface split at unwelded seams
+   ([volume-loss-rejected.md](../archive/errors/volume-loss-rejected.md));
+   MeshFix time/NM guard, so the step fails quickly instead of using up the
+   per-file timeout
+   ([post-wrap-meshfix-timeout.md](../archive/errors/post-wrap-meshfix-timeout.md)).
+   The two Aloy/Laura timeouts behind it are fixed (`planarquadric=True`);
+   still not done from that investigation: MeshFix rerun alone on the
+   damaged decimation to tell a hang from slowness, and whether
+   topology-preserving or smaller-step decimation avoids the NM explosion
+   (both only matter if such damage reappears). Idea only, not a requirement (owner, 2026-10-05): when
    the decimated result has too many NM edges, alpha-wrap it before
    PyMeshFix instead of handing MeshFix the NM edges. The wrap rebuilds the
    surface with many faces, so it needs the post decimation again after it
@@ -55,7 +63,7 @@ outside the repository, startup check and `install.sh` section removed
 ## Reconstruction
 
 - [ ] Winding-number reconstruction (`libs/winding.py`, default part step
-  since 2026-10-03) follow-ups, details in [reconstruction](reconstruction.md):
+  since 2026-10-03) follow-ups, details in [reconstruction](../archive/reconstruction.md):
   more broken models (large holes); lower the memory floor — the final
   `scanner.scan` peak is fixed (2026-10-06, int64 edge keys) and the whole
   run re-measured; the weld's row-wise `np.unique` is fixed too (2026-10-06,
@@ -65,14 +73,19 @@ outside the repository, startup check and `install.sh` section removed
   varied by 0.01 GB — the new spread follows glibc malloc's policy,
   2026-10-07: with `glibc.malloc.mmap_threshold` fixed at 128 KiB all 4
   runs peak at 3.239 GB, the peak moves out of the weld, ~12 s slower;
-  mechanism not isolated. The whole real child gains little from it, 2026-10-07: sphere 15.07 GB either way (its peak is post-reconstruction decimation), Laura −0.11 GB for +4–5% time, 4 MiB same as 128 KiB; reconstruction.md "The whole child barely gains"; owner decided 2026-10-07 not to set it). Inside reconstruction the peak on large outputs is still the weld's reindex
+  mechanism not isolated. The whole real child gains little from it, 2026-10-07: sphere 15.07 GB either way (its peak is post-reconstruction decimation), Laura −0.11 GB for +4–5% time, 4 MiB same as 128 KiB; archived reconstruction notes, "The whole child barely gains"; owner decided 2026-10-07 not to set it). Inside reconstruction the peak on large outputs is still the weld's reindex
   (3.51 probed; marching cubes 3.27), but the whole child peaks later, in
   post-reconstruction decimation, on both reconstructing models measured
   (sphere, Laura; malloc_child records), so reworking the reindex in
   place/in chunks was dropped (owner, 2026-10-07); streaming each block's
   output likewise only lowers that phase;
   avoid the per-block winding-number octree
-  rebuild (`igl.FastWindingNumberBVH`, cached). Post-reconstruction decimation is bounded by no budget (memory and
+  rebuild (`igl.FastWindingNumberBVH`, cached); bucket the band's surface
+  samples by block once instead of scanning all of them per block; for speed
+  on large inputs, compute the band against a decimated copy of the input;
+  whether a 0.06 mm grid is visible after decimation (untested; 65× more
+  faces than the target); GPU only via Taichi (Vulkan) or PyTorch-ROCm
+  (AMD RX 6700 XT, no CUDA). Post-reconstruction decimation is bounded by no budget (memory and
   time follow ~3·A/h² rebuilt faces; sphere r 132: 29 M faces, 353 s,
   13.9 GB) — admission reserves for it, reducing it needs an owner decision
   (e.g. per-part spacing from area, or decimating blocks before the weld).
@@ -190,6 +203,12 @@ that each combine many defects — replacing per-tool unit tests of geometry.
   lost-vertex tolerance, retained-volume threshold); decide
   then whether any belong in `batch_repair.toml` (the shell floor already is:
   `min_shell_faces`).
+- [ ] The automatic memory budget reads `MemAvailable` once, at start
+  (`runconfig.resolve`): memory other programs take later is not seen
+  (found with the Azula OOM, 2026-10-04).
+- [ ] Nothing checks a published model for vertices thrown far off the
+  surface by post-reconstruction decimation (seen before `planarquadric`;
+  [post-wrap-meshfix-timeout.md](../archive/errors/post-wrap-meshfix-timeout.md)).
 - [ ] Job memory calibration has no MeshFix-heavy multi-part model yet
   (orchestration.md "Job memory"); add one when such a model turns up.
 - [ ] Consider moving step ordering into `pipeconfig`, per-step IDs, and explicit

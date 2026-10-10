@@ -89,7 +89,7 @@ def _judge(source: Mesh,
     to decimate the merged, repaired mesh a second time against the whole
     file's `max_faces` budget, which is what introduced non-manifold edges
     on real models (confirmed 2026-09-23; see
-    docs/refactor/TODO.md's "alpha-wrap's second decimation pass
+    ../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md's "alpha-wrap's second decimation pass
     reintroduces non-manifold edges" entry). `repairer.repair` now
     decimates each PART back to its own pre-alpha-wrap size individually,
     and fixes any part that comes out defective, before merge — so by the
@@ -183,7 +183,7 @@ def _decimate_logged(mesh: Mesh, max_faces: int, step_name: str,
     """The initial whole-mesh decimation pass, run through the SAME shared
     executor and the SAME `decimator.make_step` implementation that
     `repairer.repair` uses for each part's post-reconstruction `decimate`
-    entry — one decimator step implementation in every position (docs/refactor/TODO.md's "Uniform-step refactor" section).
+    entry — one decimator step implementation in every position (docs/refactor/modules.md's "Contracts" section).
 
     `evidence` is a fresh local list owned entirely by this call: nothing
     else reads or writes it, and it goes out of scope when this function
@@ -270,7 +270,7 @@ def process(mesh: Mesh, max_faces: int,
     PART is decimated back to its own pre-alpha-wrap size individually,
     inside `repairer.repair` itself (an ordinary entry in
     `repairer.DEFAULT_PART_STEPS`), and fixed there if that decimation left
-    defects — see docs/refactor/TODO.md's "alpha-wrap's second decimation
+    defects — see ../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md's "alpha-wrap's second decimation
     pass reintroduces non-manifold edges" entry for why the old whole-mesh
     second pass was removed.
 

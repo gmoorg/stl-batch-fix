@@ -94,8 +94,8 @@ def tool_call_parts(result):
 
     Each entry in the sequence produces its own `Step.PART` record (the
     uniform-step refactor removed the old force-appended
-    `_decimate_to_target_and_fix` tail — see docs/refactor/TODO.md's
-    "Uniform-step refactor" section), so this filters to the orient step's
+    `_decimate_to_target_and_fix` tail — see docs/refactor/modules.md's
+    "Contracts" section), so this filters to the orient step's
     own record, which is the one every test here keys off ("oriented" in
     its detail).
     """

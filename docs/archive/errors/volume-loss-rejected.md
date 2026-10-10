@@ -96,7 +96,7 @@ already warns about ("Never infer shape preservation from … summed signed
 volumes").
 
 Both tables in this section come from
-[tools/experiments/shell_report.py](../../tools/experiments/shell_report.py)
+[tools/experiments/shell_report.py](../../../tools/experiments/shell_report.py)
 (per-shell volumes, origin shift, boundary coincidence).
 
 ### The shells are pieces of one surface (verified 2026-10-04)

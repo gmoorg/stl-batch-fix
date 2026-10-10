@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Experiment: does post-reconstruction decimation throw vertices off the
-surface? See docs/errors/post-wrap-meshfix-timeout.md.
+surface? See docs/archive/errors/post-wrap-meshfix-timeout.md.
 
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/decimation_sliver_probe.py FILE [--save OUT.npz]
 

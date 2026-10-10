@@ -30,7 +30,7 @@ def to_mesh(geometry: Geometry):
     importer does; unreferenced vertices were measured harmless to decimation.
     Faces with three distinct indices but zero area (coincident vertices) are
     not dropped: whether they crash is untested. Evidence:
-    docs/errors/decimation-segfault.md.
+    docs/archive/errors/decimation-segfault.md.
     """
     faces = geometry.faces[~scanner.degenerate_mask(geometry.faces)]
     return _pymeshlab.Mesh(

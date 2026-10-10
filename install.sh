@@ -105,7 +105,7 @@ fi
 # it replaced: 12.75s -> 2.52s raw (2.06M faces), 5.72s -> 0.92s decimated.
 # At 0.92s shell counting costs less than the edge scan itself (2.58s), so it
 # can be asked on every file. A pure-numpy replacement was tried and was SLOWER on
-# real geometry -- see D20 in REFACTOR_DECISIONS.md before attempting one.
+# real geometry -- see D20 in ../stl-batch-fix.old/archive/docs-before-compact-2026-09-19/refactor/splitting-and-repair/d20.md before attempting one.
 echo "→ scipy"
 if "$PYTHON" -c "import scipy" 2>/dev/null; then
     ver=$("$PYTHON" -c "import scipy; print(scipy.__version__)" 2>/dev/null || echo "unknown")

@@ -80,7 +80,7 @@ anywhere. Collapsing every such edge first (each group of short edges
 merged to one vertex; output clean, NM 0) leaves the spikes as they were.
 
 Re-test after the grid-edge weld, and the causal test
-([tools/experiments/sliver_cause_probe.py](../../tools/experiments/sliver_cause_probe.py)):
+([tools/experiments/sliver_cause_probe.py](../../../tools/experiments/sliver_cause_probe.py)):
 same winding output per model, decimated to the pipeline's target four ways;
 off-surface distance is point-to-triangle to the winding surface.
 
@@ -110,7 +110,7 @@ step, a test, an experiment). Not yet fixed.
 
 Time and memory per variant, each decimation in its own process from the
 same post-fix winding output
-([tools/experiments/placement_memory_probe.py](../../tools/experiments/placement_memory_probe.py)
+([tools/experiments/placement_memory_probe.py](../../../tools/experiments/placement_memory_probe.py)
 `decimate IN.npz VARIANT OUT.npz`; peak = VmHWM):
 
 | Model | Variant | Time | Peak | RSS after | NM | Off > 1·h |
@@ -138,8 +138,8 @@ passes, see the decimator decision). `optimalplacement=False` was measured
 only to identify the cause.
 
 Thin-feature check of `optimalplacement=False` (2026-10-04, the
-[reconstruction.md](../refactor/reconstruction.md) rod method;
-[tools/experiments/placement_rod_check.py](../../tools/experiments/placement_rod_check.py)):
+[reconstruction.md](../reconstruction.md) rod method;
+[tools/experiments/placement_rod_check.py](../../../tools/experiments/placement_rod_check.py)):
 `sphere_with_rod` rebuilt at h = 0.092 (452,648 faces), decimated back to
 840 faces.
 
@@ -171,7 +171,7 @@ ordinary optimal placement, within the 0.184 limit, not a thrown vertex.
 
 Speed and memory of PyMeshLab decimation with the flag on and off
 (2026-10-05,
-[tools/experiments/placement_memory_probe.py](../../tools/experiments/placement_memory_probe.py)):
+[tools/experiments/placement_memory_probe.py](../../../tools/experiments/placement_memory_probe.py)):
 each model rebuilt once with winding, then decimated in a separate process
 per setting from the same output, to the pipeline's target. Peak is the
 process VmHWM (GiB), about 0.15–0.26 GiB of it baseline before decimation.
@@ -200,7 +200,7 @@ drop thin parts, flip faces or self-intersect. Shape checked on the rod
 fixture and Aloy only; Laura only by NM count.
 
 Reproduce with
-[tools/experiments/decimation_sliver_probe.py](../../tools/experiments/decimation_sliver_probe.py)
+[tools/experiments/decimation_sliver_probe.py](../../../tools/experiments/decimation_sliver_probe.py)
 (pass the `stl-decimated/...900000.stl` cache; `--save` keeps the decimated
 arrays for a separate MeshFix run).
 
@@ -226,7 +226,7 @@ Both timed out at 3,604 s in the batch.
 
 Initial pass on sources, defaults vs `planarquadric`, each in its own
 process
-([tools/experiments/initial_decimation_compare.py](../../tools/experiments/initial_decimation_compare.py)).
+([tools/experiments/initial_decimation_compare.py](../../../tools/experiments/initial_decimation_compare.py)).
 Criteria agreed before the run (diag = source diagonal): surface distance
 both ways, p99 within max(1.25 × defaults', 1e-4·diag) and max within
 max(1.25 × defaults', 1e-3·diag); component volume ratio within 0.005 of

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Experiment: rebuild a mesh as a solid with winding-number signed distance +
 marching cubes on one global grid, processed in blocks. A candidate
-replacement for alpha-wrap; see docs/refactor/reconstruction.md.
+replacement for alpha-wrap; see docs/archive/reconstruction.md.
 
     tools/project_python.sh tools/experiments/wnmc_band.py IN.stl OUT.stl H BLOCKS [--check]
 

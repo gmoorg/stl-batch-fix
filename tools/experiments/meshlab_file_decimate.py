@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Experiment: load a mesh file straight into PyMeshLab, decimate it, and
 report memory and time. It measures the planned "decimate from file" path; see
-docs/errors/decimation-memory-path.md.
+docs/archive/errors/decimation-memory-path.md.
 
     tools/project_python.sh -X faulthandler -u tools/experiments/meshlab_file_decimate.py IN [TARGET]
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Experiment: are winding's sliver clusters what makes post-wrap decimation
 throw vertices off the surface, and do PyMeshLab's own options stop it? See
-docs/errors/post-wrap-meshfix-timeout.md.
+docs/archive/errors/post-wrap-meshfix-timeout.md.
 
     PYTHONPATH=. tools/project_python.sh -u tools/experiments/sliver_cause_probe.py FILE
 

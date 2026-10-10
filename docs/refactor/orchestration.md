@@ -1,8 +1,9 @@
 # Current pipeline
 
-Implemented behavior, checked 2026-09-28. The uniform-step refactor
-(`StepConfig`/`ConditionStep`/`execstep`, described in
-[TODO](TODO.md#uniform-step-refactor)) is implemented.
+Implemented behavior, checked 2026-09-28; the batch-execution intro, step
+5a, job memory and the library check were rechecked on 2026-10-10. The
+uniform-step interface (`StepConfig`/`ConditionStep`/`execstep`, see
+[modules](modules.md#contracts)) is implemented.
 
 ## Batch execution
 
@@ -50,7 +51,7 @@ created — then:
      under `<input>.decimated` and inside the startup overlap checks. The PLY keeps the decimator's vertex table, so the repair
      pass gets it without re-welding, with the decimator's float64
      coordinates unrounded. Our loader, not PyMeshLab's STL reader, which holds ~4.5x the
-     mesh's memory (docs/errors/decimation-memory-path.md). The cache is
+     mesh's memory (docs/archive/errors/decimation-memory-path.md). The cache is
      reused by later runs (sources are assumed unmodified) and rebuilt if
      unreadable; it is read back with `mesh_io.read_ply` and
      `jobmemory.repair_bytes` computed on it. It is written whenever the
@@ -112,8 +113,8 @@ the job.
 | 4 | (seam split) | Absent from the default split composition; add a `collection_entry` in `_split_stage` to enable, not a flag |
 | 4a | Part gate (same `skip_clean`, model not clean) | Per retained part: if `is_already_clean`, merge it as split, bypassing 5 (default or custom `part_steps`); verdict logged as `clean_gate` with the part id. NM fast path: if NM edges are the only scanned defect (open 0, degenerate 0, winding seams 0) and there are at most `repairer.NM_FAST_PATH_MAX_PERCENT` NM edges per 100 faces of the part (0.05, provisional; a ratio, so no absolute cap on a very large part), MeshFix alone runs as step `nm_meshfix`; its result is merged instead of running 5 when finite, with no NM/open edges or winding seams left and component volume within `NM_FAST_PATH_VOLUME_BAND` (98–102% of the part's, provisional). Otherwise — including over the limit, unmeasurable input volume, MeshFix failure or any error — 5 runs on the original part; never a failure. Decision logged as `nm_fast_path` with the NM count, part faces, percentage and outcome |
 | 5 | Per-part `DEFAULT_PART_STEPS`, via `execstep.run_sequence` | `(winding, decimate, meshfix)` by default; caller may replace `part_steps` entirely — nothing appended |
-| 5a | `winding.step_winding_reconstruct` | Rebuilds the part as a solid: grid spacing `h = min(whole_model_diag/800, 0.15)` (alpha-wrap's alpha); block count from `StepConfig.reconstruct_memory_budget_bytes` (`batch_repair.toml` `reconstruct_memory_budget_gb`, default 10). A part that rebuilds to nothing (an open sheet such as debris, or a closed part thinner than the grid) is dropped, with `dropped` and the reason in the step detail; the model is merged without it, and the judge's retained-volume check still catches gross loss. Fails the part if no block count fits the estimate, or if the result is not closed/manifold/non-degenerate. Replaced `alphawrap.step_alpha_wrap` (2026-10-03). With `--alpha`, `repairer.part_steps_for('alpha-wrap')` puts `alphawrap.step_alpha_wrap` here instead (alpha/offset from `pipeconfig.alpha_wrap_parameters`, no block budget); 5b and 5c are unchanged. Alpha-wrap goes through a hole wider than alpha and wraps both sides of the surface (a skin ~2 × offset thick): the judge refuses that model as DESTROYED (end-to-end `c_hole_seam_debris`), where winding closes the hole |
-| 5b | `decimator.make_step()` | Reads `faceCount` (target captured after splitting, before wrapping) from `StepConfig`; same implementation as step 1, ONE call (PyMeshLab defaults; the former `decimate_again` round was removed with fast_simplification, 2026-10-04 — see [reconstruction](reconstruction.md#decimation-after-reconstruction-2026-10-04)). Missing the target is **never** a reason to fail the part or the mesh (owner decision, 2026-10-03): the other steps decide whether the model is repaired, and extra faces only make slicing and printing slower. |
+| 5a | `winding.step_winding_reconstruct` | Rebuilds the part as a solid: grid spacing `h = min(whole_model_diag/800, 0.15)` (alpha-wrap's alpha); block count from `StepConfig.reconstruct_memory_budget_bytes` (`batch_repair.toml` `reconstruct_memory_budget_gb`, default 10). A part that rebuilds to nothing (an open sheet such as debris, or a closed part thinner than the grid) is dropped, with `dropped` and the reason in the step detail; the model is merged without it, and the judge's retained-volume check still catches gross loss. Fails the part if no block count fits the estimate, or if the result is empty, non-finite, open or degenerate; non-manifold edges are passed on (`nm=N passed on` in the detail) for 5b/5c to repair (owner decision 2026-10-04). Replaced `alphawrap.step_alpha_wrap` (2026-10-03). With `--alpha`, `repairer.part_steps_for('alpha-wrap')` puts `alphawrap.step_alpha_wrap` here instead (alpha/offset from `pipeconfig.alpha_wrap_parameters`, no block budget); 5b and 5c are unchanged. Alpha-wrap goes through a hole wider than alpha and wraps both sides of the surface (a skin ~2 × offset thick): the judge refuses that model as DESTROYED (end-to-end `c_hole_seam_debris`), where winding closes the hole |
+| 5b | `decimator.make_step()` | Reads `faceCount` (target captured after splitting, before wrapping) from `StepConfig`; same implementation as step 1, ONE call (PyMeshLab defaults; the former `decimate_again` round was removed with fast_simplification, 2026-10-04 — see [reconstruction](../archive/reconstruction.md#decimation-after-reconstruction-2026-10-04)). Missing the target is **never** a reason to fail the part or the mesh (owner decision, 2026-10-03): the other steps decide whether the model is repaired, and extra faces only make slicing and printing slower. |
 | 5c | `execstep.ConditionStep(scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)` | MeshFix only if the decimated part has open or non-manifold edges (decimating any rebuilt surface adds a few); unavailable/failed tool fails the step |
 | 6 | `execstep.run_merge_step` → `splitter.merge` | Concatenate successful parts; no welding or boolean union |
 | 7 | Closing repair checks | Finite coordinates, component volume, lost-vertex measurements; exceptions fail repair |
@@ -256,7 +257,7 @@ Findings:
   Not measured beyond 6.35 M units (the largest cache, Rock_Base_B, is
   13.4 M); not measured on inputs above 900 k faces (no such source left;
   the historical 3.8 M-face join_complication, 3.59 GB in
-  [reconstruction](reconstruction.md), is context, not calibration).
+  [reconstruction](../archive/reconstruction.md), is context, not calibration).
 - The bust and the hollowed frost leg were refused (DESTROYED) under
   alpha-wrap; the bust was published by the default (winding) run on
   2026-10-08. Holes wider than alpha: see step 5a.

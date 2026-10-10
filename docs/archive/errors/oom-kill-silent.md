@@ -40,7 +40,7 @@ without the signal (SIGKILL / -9). Since 2026-10-05 it reports the signal
 1. **Diagnostics (done 2026-10-05):** the parent now reports the child's
    signal or exit status in the job reason and the model log, e.g.
    `crashed (killed by SIGKILL)`; see
-   [orchestration.md](../refactor/orchestration.md) step 5. The owner chose
+   [orchestration.md](../../refactor/orchestration.md) step 5. The owner chose
    the signal only: an OOM kill is still read from the kernel log by hand
    (`journalctl -k`, "Out of memory: Killed process <pid>"). SIGKILL
    alone doesn't mean out of memory: the parent's own timeout and

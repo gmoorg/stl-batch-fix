@@ -5,7 +5,7 @@ field on one global grid — magnitude from the exact distance to the input
 surface, sign from libigl's fast generalized winding number, which stays
 reliable on meshes with holes, flipped faces and overlapping shells — and the
 surface extracted with marching cubes, block by block. See
-docs/refactor/reconstruction.md for the algorithm's evidence and limits and
+docs/archive/reconstruction.md for the algorithm's evidence and limits and
 docs/refactor/modules.md for its contract.
 """
 
@@ -82,7 +82,7 @@ def grid_spacing(whole_model_diag: float) -> float:
 
 # ---------------------------------------------------------------------------
 # Memory model. Constants are calibrated on this implementation (see
-# docs/refactor/reconstruction.md, "Memory model"); they are a sizing
+# docs/archive/reconstruction.md, "Memory model"); they are a sizing
 # estimate fitted to measured runs, not a guaranteed upper bound.
 # ---------------------------------------------------------------------------
 
@@ -261,7 +261,7 @@ def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
 
     The result may contain non-manifold edges: they are passed on for the
     following repair steps rather than failing the part (owner decision
-    2026-10-04, docs/errors/winding-non-manifold.md). A direct caller must
+    2026-10-04, docs/archive/errors/winding-non-manifold.md). A direct caller must
     expect them; `processor`'s judge flags any left in a final output.
 
     Raises ValueError for invalid input and RuntimeError when the result is
@@ -502,7 +502,7 @@ def _weld(Vo: np.ndarray, Fo: np.ndarray, keys: np.ndarray) -> Geometry:
     is ~0 at a grid node, the vertices of all edges meeting there cluster
     within that distance, and a cluster split by a rounding boundary was
     merged partially, pinching the surface into non-manifold edges
-    (docs/errors/winding-non-manifold.md).
+    (docs/archive/errors/winding-non-manifold.md).
 
     One marching-cubes triangle never has two corners on one edge, so no face
     should collapse; the filter is a guard.
@@ -510,7 +510,7 @@ def _weld(Vo: np.ndarray, Fo: np.ndarray, keys: np.ndarray) -> Geometry:
     `keys` holds one int64 edge key per vertex (`_edge_ids`). It replaced
     rows of (axis, x, y, z) and `np.unique(edges, axis=0)`, the row-wise
     unique, which was the whole reconstruction's peak on large outputs
-    (reconstruction.md "Memory floor"). The output is identical: the keys
+    (docs/archive/reconstruction.md "Memory floor"). The output is identical: the keys
     sort in the rows' order, and with `return_index` numpy sorts stably on
     both paths, so the first copy of each edge is the one kept.
     """

@@ -60,7 +60,7 @@ class TestMeshLab(unittest.TestCase):
 
     def test_to_mesh_drops_faces_with_a_repeated_corner(self):
         """They segfault quadric decimation on this path
-        (docs/errors/decimation-segfault.md). Every other face keeps its
+        (docs/archive/errors/decimation-segfault.md). Every other face keeps its
         order, every vertex is kept, and the caller's arrays are untouched."""
         verts = TETRA_VERTS + [[5, 5, 5], [6, 5, 5]]
         faces = TETRA_FACES[:2] + [[4, 5, 4], [0, 0, 1]] + TETRA_FACES[2:] + [[2, 3, 3]]

@@ -269,7 +269,7 @@ class TestSequence(unittest.TestCase):
         # One Step.PART entry per part: `part_steps=` now REPLACES the
         # default per-part sequence entirely (the uniform-step refactor
         # removed the old auto-appended `_decimate_to_target_and_fix` tail —
-        # see docs/refactor/TODO.md's "Uniform-step refactor" section), so a
+        # see docs/refactor/modules.md's "Contracts" section), so a
         # single-entry custom `part_steps` produces exactly one PART record.
         self.assertEqual([s.step for s in result.steps],
                          [Step.SPLIT, Step.PART, Step.MERGE])
@@ -890,7 +890,7 @@ class TestAlphaWrapBinding(unittest.TestCase):
 class TestIsAlreadyClean(unittest.TestCase):
     """`is_already_clean(mesh) -> bool` — the skip-gate spike's own check,
     stateless and independent of `pipeconfig`/any other module state (see
-    docs/refactor/TODO.md's "Algorithm questions" section for the spike this
+    ../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md's "Algorithm questions" section for the spike this
     was written for). This tests the function itself; its opt-in call sites
     in `repair` are covered by `TestCleanGates`.
     """

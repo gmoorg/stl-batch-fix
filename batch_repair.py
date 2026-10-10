@@ -438,7 +438,7 @@ def _prepare_one_file(source_path: str, destination: str, max_faces: int,
     A source over `max_faces` is loaded with `mesh_io.load` (which drops
     triangles with NaN/inf coordinates), decimated from arrays and saved as
     a PLY cache. Our loader, not PyMeshLab's STL reader: that reader holds
-    ~4.5x the mesh's own memory (docs/errors/decimation-memory-path.md). The
+    ~4.5x the mesh's own memory (docs/archive/errors/decimation-memory-path.md). The
     cache is read back before estimating, through the same path a cache hit
     takes, so the estimate is computed on exactly the mesh the repair pass
     will load.
