@@ -110,15 +110,60 @@ class TestBatchRepairCLI(unittest.TestCase):
         self.assertIn('cannot resolve', text)
         prepare.assert_not_called()
 
-    def test_any_argument_is_rejected_before_anything_is_written(self):
+    def test_any_argument_but_alpha_is_rejected_before_anything_is_written(self):
         with mock.patch.object(converter, 'prepare') as prepare:
-            for argv in (['--help'], ['--input', str(self.source)], ['x']):
+            for argv in (['--help'], ['--input', str(self.source)], ['x'],
+                         ['--alpha', '--alpha'], ['--alpha', 'x'], ['--alpha=1'], ['-a']):
                 with self.subTest(argv=argv):
                     code, text = self.invoke(argv=argv)
                     self.assertEqual(code, 2, text)
-                    self.assertIn('takes no arguments', text)
+                    self.assertIn('takes no arguments except --alpha', text)
             prepare.assert_not_called()
         self.assertFalse(self.output.exists())
+
+    def test_alpha_flag_selects_alpha_wrap_and_the_run_says_so(self):
+        for argv, expected in (((), 'Reconstruction: winding'),
+                               (('--alpha',), 'Reconstruction: alpha-wrap')):
+            with self.subTest(argv=argv):
+                code, text = self.invoke(argv=argv)
+                self.assertEqual(code, 0, text)
+                self.assertIn(expected, text)
+                self.assertIn(expected, (self.output / 'batch.log').read_text())
+                (self.output / 'batch.log').unlink()
+
+    def test_main_hands_the_choice_to_the_run(self):
+        seen = []
+        with mock.patch.object(batch_repair, '_run',
+                               side_effect=lambda config, reconstruction: seen.append(
+                                   reconstruction) or 0):
+            self.invoke()
+            self.invoke(argv=['--alpha'])
+        self.assertEqual(seen, ['winding', 'alpha-wrap'])
+
+    def test_cgal_is_required_only_with_alpha(self):
+        def missing():
+            raise ImportError('no CGAL here')
+        libraries = tuple((name, required, missing if name == 'CGAL' else (lambda: None))
+                          for name, required, _ in batch_repair.dependencies.LIBRARIES)
+        self.stack.close()                      # the real check, fake probes
+        with mock.patch.object(batch_repair.dependencies, 'LIBRARIES', libraries):
+            code, text = self.invoke(argv=['--alpha'])
+            self.assertEqual(code, 2, text)
+            self.assertIn('missing required libraries: CGAL', text)
+            self.assertFalse(self.output.exists())
+            code, text = self.invoke()
+            self.assertEqual(code, 0, text)
+
+    def test_the_runner_and_child_load_alpha_wrap_only_on_request(self):
+        """Importing them loads neither `libs.alphawrap` nor CGAL; only
+        `repairer.part_steps_for('alpha-wrap')` does. (The startup check
+        still probes CGAL on every run, as an optional library.)"""
+        probe = ('import sys, batch_repair, batch_repair_child; '
+                 'print(sorted(m for m in sys.modules '
+                 "if m == 'libs.alphawrap' or m.startswith('CGAL')))")
+        out = subprocess.run([sys.executable, '-c', probe], capture_output=True, text=True,
+                             cwd=Path(batch_repair.__file__).parent, check=True).stdout
+        self.assertEqual(out.strip(), '[]')
 
     def test_missing_config_names_the_example(self):
         with mock.patch.object(batch_repair, 'CONFIG_PATH', str(self.root / 'absent.toml')), \
@@ -166,7 +211,7 @@ class TestBatchRepairCLI(unittest.TestCase):
         # with zero dispatched jobs still creates the directory. Nothing
         # published is still true — the directory holds only progress.log.
         self.assertEqual(sorted(p.name for p in self.output.iterdir()),
-                         ['progress.log'])
+                         ['batch.log', 'progress.log'])
 
     def test_conversion_failure_is_a_diagnostic_without_a_marker(self):
         """A source that converts to nothing (no faces) is retried on every
@@ -183,7 +228,7 @@ class TestBatchRepairCLI(unittest.TestCase):
         self.assertEqual([p for p in exported.rglob('*') if p.is_file()]
                          if exported.exists() else [], [])
         self.assertEqual(sorted(p.name for p in self.output.iterdir()),
-                         ['body.log', 'progress.log'])
+                         ['batch.log', 'body.log', 'progress.log'])
         log = (self.output / 'body.log').read_text()
         self.assertEqual(log.count(f'conversion: {self.source / "body.obj"}'), 2)
         self.assertEqual(log.count('conversion failed: ConversionError'), 2)
@@ -438,6 +483,7 @@ class TestCleanGateFlags(unittest.TestCase):
             args.reconstruct_budget_bytes = 10 ** 10
             args.min_shell_faces = 100
             args.mode, args.cache_path, args.load_from = 'repair', None, None
+            args.reconstruction = 'winding'
             with mock.patch.object(processor, 'process', spy):
                 batch_repair_child.run_one_file(args)
         self.assertEqual(captured, [False, True])
@@ -485,6 +531,51 @@ class TestReconstructBudgetPlumbing(unittest.TestCase):
                                       reconstruct_budget_bytes=2_500_000_000).wait()
         argv = captured['argv']
         self.assertEqual(argv[argv.index('--reconstruct-budget-bytes') + 1], '2500000000')
+
+    def test_spawn_child_passes_the_reconstruction_in_both_modes(self):
+        from libs.mesh_io import Kind, Mesh
+        mesh = Mesh(str(self.root / 'a.stl'), str(self.root / 'out' / 'a.stl'), Kind.BINARY_STL, 4, True)
+        captured = []
+        real_popen = subprocess.Popen
+
+        def spy(argv, **kwargs):
+            captured.append(argv)
+            return real_popen([sys.executable, '-c', 'pass'])
+
+        with mock.patch('subprocess.Popen', spy):
+            for mode, cache in (('prepare', '/tmp/c.ply'), ('repair', None)):
+                batch_repair._spawn_child(sys.executable, 'c.py', mesh, 0, '/tmp/r.json',
+                                          mode=mode, cache_path=cache,
+                                          reconstruction='alpha-wrap').wait()
+            batch_repair._spawn_child(sys.executable, 'c.py', mesh, 0, '/tmp/r.json').wait()
+        got = [argv[argv.index('--reconstruction') + 1] for argv in captured]
+        self.assertEqual(got, ['alpha-wrap', 'alpha-wrap', 'winding'])
+
+    def test_child_hands_the_reconstruction_to_both_passes(self):
+        seen = {}
+
+        def fake_prepare(*args, **kwargs):
+            seen['prepare'] = kwargs['reconstruction']
+            return batch_repair.ChildResult(path='a.stl', category='intake_failure',
+                                            indicator=None, stage='intake', reason='x',
+                                            written_path=None)
+
+        def fake_process(*args, **kwargs):
+            seen['repair'] = kwargs['reconstruction']
+            return batch_repair.ChildResult(path='a.stl', category='intake_failure',
+                                            indicator=None, stage='intake', reason='x',
+                                            written_path=None)
+
+        common = ['--one-file', 'a.stl', '--destination', 'b.stl', '--max-faces', '0',
+                  '--result-file', str(self.root / 'r.json'),
+                  '--reconstruction', 'alpha-wrap']
+        with mock.patch.object(batch_repair, '_prepare_one_file', fake_prepare), \
+             mock.patch.object(batch_repair, '_process_one_file', fake_process):
+            batch_repair_child.main(common + ['--mode', 'prepare', '--cache-path', 'c.ply'])
+            batch_repair_child.main(common)
+        self.assertEqual(seen, {'prepare': 'alpha-wrap', 'repair': 'alpha-wrap'})
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            batch_repair_child.main(common[:-1] + ['marching-cubes'])
 
     def test_child_parses_the_budget_and_hands_it_to_processor(self):
         from libs import processor
@@ -619,6 +710,7 @@ class TestMinShellFacesPlumbing(unittest.TestCase):
         args.reconstruct_budget_bytes = 10 ** 10
         args.min_shell_faces = 250
         args.mode, args.cache_path, args.load_from = 'repair', None, None
+        args.reconstruction = 'winding'
         with mock.patch.object(processor, 'process', fake_process):
             batch_repair_child.run_one_file(args)
         self.assertEqual(captured['floor'], 250)

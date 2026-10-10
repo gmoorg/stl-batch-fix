@@ -161,6 +161,22 @@ class TestTheDecision(unittest.TestCase):
                 self.assertIsNotNone(outcome.decimation)
 
 
+class TestReconstructionChoice(unittest.TestCase):
+    """A bad choice stops before any work: nothing is decimated."""
+
+    def test_unknown_reconstruction_raises_before_decimation(self):
+        with mock.patch.object(processor, 'decimate_initial') as decimate:
+            with self.assertRaises(ValueError):
+                process(mesh(), 0, reconstruction='marching-cubes')
+        decimate.assert_not_called()
+
+    def test_custom_steps_cannot_be_combined_with_alpha_wrap(self):
+        with mock.patch.object(processor, 'decimate_initial') as decimate:
+            with self.assertRaises(ValueError):
+                process(mesh(), 0, part_steps=(), reconstruction='alpha-wrap')
+        decimate.assert_not_called()
+
+
 class TestNoFaceCountRejectionGate(unittest.TestCase):
     """Logging spec: a count difference between target and actual post-wrap
     output must never by itself cause `_judge` to reject the mesh. Grepped

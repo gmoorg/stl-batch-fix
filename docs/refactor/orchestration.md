@@ -6,7 +6,10 @@ Implemented behavior, checked 2026-09-28. The uniform-step refactor
 
 ## Batch execution
 
-`batch_repair.py` takes no arguments. It loads `batch_repair.toml` from its own
+`batch_repair.py` takes one optional argument, `--alpha` (alpha-wrap instead
+of winding for every part, 5a; owner 2026-10-10; any other argument stops the
+run). Its first line, on the terminal, in `batch.log` and in progress.log's
+`run_start` record, names the reconstruction. It loads `batch_repair.toml` from its own
 folder (`libs.runconfig`: unknown keys, missing required keys, wrong types and
 out-of-range values are errors; relative paths resolve against that folder),
 resolves automatic values (workers, log path, memory budget), checks the
@@ -109,7 +112,7 @@ the job.
 | 4 | (seam split) | Absent from the default split composition; add a `collection_entry` in `_split_stage` to enable, not a flag |
 | 4a | Part gate (same `skip_clean`, model not clean) | Per retained part: if `is_already_clean`, merge it as split, bypassing 5 (default or custom `part_steps`); verdict logged as `clean_gate` with the part id. NM fast path: if NM edges are the only scanned defect (open 0, degenerate 0, winding seams 0) and there are at most `repairer.NM_FAST_PATH_MAX_PERCENT` NM edges per 100 faces of the part (0.05, provisional; a ratio, so no absolute cap on a very large part), MeshFix alone runs as step `nm_meshfix`; its result is merged instead of running 5 when finite, with no NM/open edges or winding seams left and component volume within `NM_FAST_PATH_VOLUME_BAND` (98–102% of the part's, provisional). Otherwise — including over the limit, unmeasurable input volume, MeshFix failure or any error — 5 runs on the original part; never a failure. Decision logged as `nm_fast_path` with the NM count, part faces, percentage and outcome |
 | 5 | Per-part `DEFAULT_PART_STEPS`, via `execstep.run_sequence` | `(winding, decimate, meshfix)` by default; caller may replace `part_steps` entirely — nothing appended |
-| 5a | `winding.step_winding_reconstruct` | Rebuilds the part as a solid: grid spacing `h = min(whole_model_diag/800, 0.15)` (alpha-wrap's alpha); block count from `StepConfig.reconstruct_memory_budget_bytes` (`batch_repair.toml` `reconstruct_memory_budget_gb`, default 10). A part that rebuilds to nothing (an open sheet such as debris, or a closed part thinner than the grid) is dropped, with `dropped` and the reason in the step detail; the model is merged without it, and the judge's retained-volume check still catches gross loss. Fails the part if no block count fits the estimate, or if the result is not closed/manifold/non-degenerate. Replaced `alphawrap.step_alpha_wrap` (2026-10-03), which remains available as an explicit entry |
+| 5a | `winding.step_winding_reconstruct` | Rebuilds the part as a solid: grid spacing `h = min(whole_model_diag/800, 0.15)` (alpha-wrap's alpha); block count from `StepConfig.reconstruct_memory_budget_bytes` (`batch_repair.toml` `reconstruct_memory_budget_gb`, default 10). A part that rebuilds to nothing (an open sheet such as debris, or a closed part thinner than the grid) is dropped, with `dropped` and the reason in the step detail; the model is merged without it, and the judge's retained-volume check still catches gross loss. Fails the part if no block count fits the estimate, or if the result is not closed/manifold/non-degenerate. Replaced `alphawrap.step_alpha_wrap` (2026-10-03). With `--alpha`, `repairer.part_steps_for('alpha-wrap')` puts `alphawrap.step_alpha_wrap` here instead (alpha/offset from `pipeconfig.alpha_wrap_parameters`, no block budget); 5b and 5c are unchanged. Alpha-wrap goes through a hole wider than alpha and wraps both sides of the surface (a skin ~2 × offset thick): the judge refuses that model as DESTROYED (end-to-end `c_hole_seam_debris`), where winding closes the hole |
 | 5b | `decimator.make_step()` | Reads `faceCount` (target captured after splitting, before wrapping) from `StepConfig`; same implementation as step 1, ONE call (PyMeshLab defaults; the former `decimate_again` round was removed with fast_simplification, 2026-10-04 — see [reconstruction](reconstruction.md#decimation-after-reconstruction-2026-10-04)). Missing the target is **never** a reason to fail the part or the mesh (owner decision, 2026-10-03): the other steps decide whether the model is repaired, and extra faces only make slicing and printing slower. |
 | 5c | `execstep.ConditionStep(scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)` | MeshFix only if the decimated part has open or non-manifold edges (decimating any rebuilt surface adds a few); unavailable/failed tool fails the step |
 | 6 | `execstep.run_merge_step` → `splitter.merge` | Concatenate successful parts; no welding or boolean union |
@@ -209,6 +212,55 @@ differs from the 2026-10-04 table (join repair 1.47 → 1.61 GB) because the
 code changed in between (PLY cache, planarquadric decimation, chunked
 load); compare within this table only.
 
+### Alpha-wrap (`--alpha`, 2026-10-10)
+
+`jobmemory.repair_bytes(..., 'alpha-wrap')`: per part, the wrap step costs
+`ALPHA_BYTES_PER_UNIT` (2,150 B) per unit of A/α² plus
+`ALPHA_BYTES_PER_INPUT_FACE` (500 B) per part face, and outputs
+`1.6·units + 1.2·part faces` faces, which feed the decimation, MeshFix and
+finished-part terms as for winding. No block budget applies.
+
+Method: the real repair child (`--reconstruction alpha-wrap --max-faces 0`),
+one model at a time, `wait4` max RSS (the acceptance figure); VmRSS sampled
+every 0.2 s and matched to step-log times to find the phase. The original
+sources had left `/mnt/sda2/STL/Fixing`, so each model is its 900k PLY
+decimation cache written out as an STL (`Fixing.decimated/…900000.1cd393dc.ply`).
+`c3po 150k` is that cache decimated to 150k (same area, fewer faces);
+`c3po ×0.4` is it scaled to 62 mm, so alpha is below the 0.15 cap. Every
+other model has a diagonal over 120 mm, so alpha = 0.15. Shell floor 100.
+
+| Model (cache) | Parts | Faces | Units A/α² | Wrapped faces | Peak | Estimate | Ratio | Result |
+|---|---|---|---|---|---|---|---|---|
+| sword (`zoro/Roronoa Zoro v2/…/Sword_for_head`) | 1 | 900 k | 0.09 M | 1.03 M | 0.90 GB | 1.36 GB | 1.51 | PROCESS |
+| robocop arm (`Robocop Statue/RIGHT_ARM`) | 1 | 900 k | 0.43 M | 1.46 M | 1.39 GB | 1.87 GB | 1.34 | PROCESS |
+| c3po ×0.4 (alpha 0.077) | 1 | 900 k | 0.72 M | 1.89 M | 1.83 GB | 2.50 GB | 1.36 | PROCESS |
+| c3po 150k | 1 | 150 k | 1.19 M | 1.79 M | 2.35 GB | 3.05 GB | 1.30 | PROCESS |
+| c3po (`Princess_Leia_x20/C3PO_Head`) | 1 | 900 k | 1.19 M | 2.55 M | 2.64 GB | 3.51 GB | 1.33 | PROCESS |
+| frost leg (`…Pre_Supported/FROST_leg_left (hollowed out)`) | 1,061 | 900 k | 1.42 M | 2.90 M | 2.21 GB | 2.88 GB | 1.30 | DESTROYED |
+| bust | 4 | 900 k | 3.68 M | 6.61 M | 4.26 GB | 5.36 GB | 1.26 | DESTROYED |
+| zoro 178 (`zoro/NomNom Zoro/…/178mm_zoro`) | 1 | 900 k | 3.27 M | 5.32 M | 6.17 GB | 7.99 GB | 1.30 | PROCESS |
+| leia lower body (`Princess_Leia_x20/Lower_Body`) | 1 | 900 k | 6.35 M | 9.71 M | 11.58 GB | 14.62 GB | 1.26 | PROCESS |
+
+Findings:
+
+- The peak was in the `alpha_wrap` step on every model; decimation and
+  MeshFix stayed lower.
+- Wrapped faces ≈ 1.38·units + 1.0·part faces (bust +10 %). Area alone is
+  wrong: the sword's 0.09 M units wrapped to 1.03 M faces.
+- Wrap-step peak ≈ 0.41 GB + 1.58–1.70 KB per unit + ~390 B per input face
+  (the c3po pair: 750 k more faces, +0.29 GB). 500 B/face is an empirical
+  allowance, not a measured allocation: it keeps the mostly fixed-cost
+  sword above 1.25×.
+- The per-unit cost rises slowly with size (1.58 KB small, 1.66 zoro, 1.70
+  leia), so the margin is thinnest on the largest wraps (bust, leia 1.26).
+  Not measured beyond 6.35 M units (the largest cache, Rock_Base_B, is
+  13.4 M); not measured on inputs above 900 k faces (no such source left;
+  the historical 3.8 M-face join_complication, 3.59 GB in
+  [reconstruction](reconstruction.md), is context, not calibration).
+- The bust and the hollowed frost leg were refused (DESTROYED) under
+  alpha-wrap; the bust was published by the default (winding) run on
+  2026-10-08. Holes wider than alpha: see step 5a.
+
 ## Limits and observability
 
 - Initial-decimation loss, meaningful small-part loss, and final winding are
@@ -234,8 +286,9 @@ load); compare within this table only.
 - Startup checks every library once (`libs.dependencies.check_all`, from
   `_check_environment`): NumPy, SciPy, libigl, PyMeshLab and PyMeshFix
   required (Blender is retired since 2026-10-06, see modules.md), CGAL
-  optional (alpha-wrap is explicit-use; its flag
-  flips when alpha-wrap is wired back in). One line each: `[debug]` when
+  optional, and required for a `--alpha` run (`also_required`). Every run
+  probes CGAL here (a default run reports it as optional, as before);
+  only a `--alpha` run loads `libs.alphawrap`. One line each: `[debug]` when
   available or an optional one is missing, `[error]` when a required one is,
   and the run stops. Library modules import their packages plainly, so a
   missing required package usually fails earlier, at import. No step

@@ -22,9 +22,9 @@ def importable(*modules: str) -> Callable[[], None]:
     return probe
 
 
-#: (name, required, probe). CGAL is optional because alpha-wrap is
-#: explicit-use only; making it required changes this policy, and putting
-#: alpha-wrap back into the default sequence is a separate pipeline change.
+#: (name, required, probe). CGAL is optional: only alpha-wrap uses it, and a
+#: run uses alpha-wrap only when started with `--alpha`; that run passes
+#: 'CGAL' in `check_all`'s `also_required`.
 LIBRARIES: tuple[tuple[str, bool, Callable[[], None]], ...] = (
     ('NumPy', True, importable('numpy')),
     ('SciPy', True, importable('scipy')),
@@ -57,7 +57,20 @@ def check_library(name: str, required: bool, probe: Callable[[], None],
     return False
 
 
-def check_all(log: Callable[[str], None]) -> list[str]:
-    """Check every library in `LIBRARIES`; return the missing required ones."""
-    return [name for name, required, probe in LIBRARIES
-            if not check_library(name, required, probe, log) and required]
+def check_all(log: Callable[[str], None],
+              also_required: tuple[str, ...] = ()) -> list[str]:
+    """Check every library in `LIBRARIES`; return the missing required ones.
+
+    `also_required` names optional libraries this run needs (e.g. CGAL for
+    alpha-wrap); they are checked and reported as required. A name not in
+    `LIBRARIES` raises ValueError: it would otherwise never be checked.
+    """
+    unknown = set(also_required) - {name for name, _, _ in LIBRARIES}
+    if unknown:
+        raise ValueError(f'unknown libraries: {", ".join(sorted(unknown))}')
+    missing = []
+    for name, required, probe in LIBRARIES:
+        required = required or name in also_required
+        if not check_library(name, required, probe, log) and required:
+            missing.append(name)
+    return missing

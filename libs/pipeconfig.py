@@ -21,6 +21,7 @@ repairer, we do not need the Boolean flags what enable/disable steps."
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -54,3 +55,16 @@ class StepConfig:
     faceCount: int = 0
     whole_model_diag: float | None = None
     reconstruct_memory_budget_bytes: int = 10_000_000_000
+
+
+def alpha_wrap_parameters(whole_model_diag: float) -> tuple[float, float]:
+    """Alpha-wrap's `(alpha, offset)` for a model: `min(diag / 800, 0.15)`
+    and `min(diag / 2000, 0.06)`.
+
+    Here, CGAL-free, so `jobmemory` can size an alpha-wrap job without
+    importing CGAL; `alphawrap.step_alpha_wrap` uses the same recipe.
+    """
+    diagonal = float(whole_model_diag)
+    if not math.isfinite(diagonal) or diagonal <= 0:
+        raise ValueError('whole_diagonal must be finite and positive')
+    return min(diagonal / 800.0, 0.15), min(diagonal / 2000.0, 0.06)

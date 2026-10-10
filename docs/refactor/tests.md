@@ -75,8 +75,15 @@ produce; they protect behaviour, not composition.
 - Libraries are not tested (owner, 2026-10-05): they are checked once when a
   run starts (`libs.dependencies`) and never break during development. No
   test checks availability or a missing library; required libraries are not
-  skip-guarded. CGAL is optional, so `test_alphawrap` and the alpha-wrap
-  tests in `test_repairer` skip without it.
+  skip-guarded. CGAL is optional, so `test_alphawrap`, the alpha-wrap
+  tests in `test_repairer` and `TestEndToEndAlpha` skip without it.
+  `test_batch_repair_cli.test_cgal_is_required_only_with_alpha` tests the
+  run's rule, not the library: with fake probes, `--alpha` stops when CGAL
+  is missing and a default run does not.
+- `--alpha` end to end: `TestEndToEndAlpha` reruns every `test_end_to_end`
+  check with alpha-wrap, except that `c_hole_seam_debris` must be refused
+  (DESTROYED, the source as its marker, run exit 1): alpha-wrap wraps both
+  sides of its hole (owner chose to assert the refusal, 2026-10-10).
 - I/O and runner failures: `test_converter` (companion copy fails, is
   counted once, interrupted copy leaves nothing, each mesh emitted once),
   `test_batch_repair_cli` (config rejected before intake, malformed TOML,

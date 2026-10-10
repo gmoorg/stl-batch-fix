@@ -103,7 +103,7 @@ class TestSourceIdentity(unittest.TestCase):
     def _fake_process(self, mesh, max_faces, part_steps=None, step_logger=None,
                       source_name='', *,
                       skip_clean=False, reconstruct_budget_bytes=None,
-                      min_shell_faces=None):
+                      min_shell_faces=None, reconstruction=None):
         # A trivial stand-in for `processor.process` that still drives the
         # step_logger once, so these tests exercise the real
         # `source_name`/`step_logger` plumbing in `_process_one_file`
@@ -313,6 +313,7 @@ class TestReportingWriteFailure(unittest.TestCase):
             parser.add_argument('--result-file', required=True)
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
+            parser.add_argument('--reconstruction')
             parser.add_argument('--mode', default='repair')
             parser.add_argument('--cache-path')
             parser.add_argument('--load-from')
@@ -426,6 +427,7 @@ class TestSigkillRetention(unittest.TestCase):
             parser.add_argument('--result-file', required=True)
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
+            parser.add_argument('--reconstruction')
             parser.add_argument('--mode', default='repair')
             parser.add_argument('--cache-path')
             parser.add_argument('--load-from')
@@ -560,6 +562,7 @@ class TestRealRunProgressLog(unittest.TestCase):
             parser.add_argument('--result-file', required=True)
             parser.add_argument('--reconstruct-budget-bytes')
             parser.add_argument('--min-shell-faces')
+            parser.add_argument('--reconstruction')
             parser.add_argument('--mode', default='repair')
             parser.add_argument('--cache-path')
             parser.add_argument('--load-from')

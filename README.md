@@ -23,13 +23,14 @@ Current code establishes implemented behavior; TODO records future decisions.
 `install.sh` checks and installs dependencies into the project environment.
 Use `tools/project_python.sh` for every project Python command (including probes).
 It selects `/mnt/sda2/python/.venv/bin/python` and sets the repository directory.
-The batch runner takes no command-line arguments. Every option lives in
-`batch_repair.toml` beside the script (git-ignored). Copy the documented
-example once, edit it, then run:
+Every option lives in `batch_repair.toml` beside the script (git-ignored)
+except one command-line flag, `--alpha`. Copy the documented example once,
+edit it, then run:
 
 ```bash
 cp batch_repair.example.toml batch_repair.toml   # first time only; then edit it
 ./fix.sh                                         # = tools/project_python.sh batch_repair.py
+./fix.sh --alpha                                 # alpha-wrap instead of winding reconstruction
 tools/project_python.sh -m unittest tests.tests.test_processor
 tools/project_python.sh -m unittest discover -s tests/tests -t . -q -p 'test_*.py'
 ```
@@ -44,8 +45,11 @@ every tool's own output, step separators and any crash message.
 Steps append to `<output>/batch.log` by default (`log_file`
 overrides it). Run summary/progress also goes to the terminal.
 Each part is rebuilt as a solid by winding-number reconstruction
-(`libs/winding.py`; alpha-wrap stays available but is no longer the default);
-`reconstruct_memory_budget_gb` (default 10) sizes it per part and worker.
+(`libs/winding.py`); `reconstruct_memory_budget_gb` (default 10) sizes it
+per part and worker. `--alpha` rebuilds every part with CGAL alpha-wrap
+instead (CGAL then required); it wraps both sides of a hole wider than
+alpha, so such a model is refused (DESTROYED) where winding repairs it.
+The run's first line, also in `batch.log`, names the reconstruction used.
 `skip_clean = true` (opt-in; sample outputs passed Bambu's recommended
 repair tool, slicing and printing unconfirmed) skips repair for an
 already-clean decimated model, or otherwise for its individual clean parts;

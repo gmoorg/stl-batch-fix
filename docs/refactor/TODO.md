@@ -4,6 +4,12 @@ Open tasks only. Implemented behavior: [modules](modules.md) and
 [pipeline](orchestration.md). Historical review evidence and test results are
 [archived](../../../stl-batch-fix.old/archive/README.md). Remove completed tasks; update the owning reference.
 
+## Status (owner, 2026-10-10)
+
+The script works: run on a few models from the collection, every result was
+fine. It has not yet been run over the full collection; the NM fast-path
+limits and the MeshFix-frequency task below wait on that run's logs.
+
 ## Priority (owner, 2026-10-05)
 
 Work in this order; details in

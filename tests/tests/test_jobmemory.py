@@ -83,5 +83,59 @@ class TestRepair(unittest.TestCase):
             jobmemory.repair_bytes(Mesh('/m', '/o', Kind.BINARY_STL, 4, True), 100, BUDGET)
 
 
+class TestRepairAlphaWrap(unittest.TestCase):
+    """`reconstruction='alpha-wrap'`: no block plan and no budget; the wrap
+    follows the part's A/alpha² and its own face count."""
+
+    def alpha(self, m, budget=BUDGET, floor=100):
+        return jobmemory.repair_bytes(m, floor, budget, 'alpha-wrap')
+
+    def test_ignores_the_winding_plan_and_its_budget(self):
+        m = mesh_of(sphere())
+        tiny = 1_000_000                               # winding would plan, then fail
+        self.assertEqual(self.alpha(m, budget=tiny), self.alpha(m))
+        self.assertLess(self.alpha(m, budget=tiny), jobmemory.repair_bytes(m, 100, tiny))
+
+    def test_covers_the_wrap_of_a_part(self):
+        """A large-area part: the wrap's own term, from the part's area and
+        faces at the whole model's alpha, is inside the estimate."""
+        v, f = sphere(132.0, seg=56)
+        m = mesh_of((v, f))
+        alpha = 0.15                                   # diag > 120 mm: capped
+        units = 4 * np.pi * 132.0 ** 2 / alpha ** 2
+        wrap = (jobmemory.ALPHA_BYTES_PER_UNIT * units
+                + jobmemory.ALPHA_BYTES_PER_INPUT_FACE * len(f))
+        self.assertGreaterEqual(self.alpha(m), wrap * 0.98)
+
+    def test_grows_with_the_parts_own_faces_at_the_same_area(self):
+        coarse, fine = mesh_of(sphere(seg=20)), mesh_of(sphere(seg=80))
+        self.assertGreater(self.alpha(fine) - self.alpha(coarse),
+                           jobmemory.ALPHA_BYTES_PER_INPUT_FACE
+                           * (fine.triangles - coarse.triangles) * 0.9)
+
+    def test_every_part_uses_the_whole_models_alpha(self):
+        """A small part next to a large one wraps at the large model's
+        alpha: scaling the model up (alpha capped) changes its estimate,
+        a lone small part at its own diagonal would not."""
+        small = sphere(5.0)
+        alone = self.alpha(mesh_of(small))
+        beside_big = self.alpha(mesh_of(small, sphere(60.0, at=(200, 0, 0))))
+        big_only = self.alpha(mesh_of(sphere(60.0, at=(200, 0, 0))))
+        # The small part's wrap at the whole model's (larger) alpha costs
+        # less than at its own small alpha: its share is below `alone`.
+        self.assertLess(beside_big - big_only, alone)
+
+    def test_parts_are_a_maximum_not_a_sum(self):
+        # Same extent (so the same alpha): the middle sphere is the only change.
+        one = self.alpha(mesh_of(sphere(), sphere(at=(60, 0, 0))))
+        three = self.alpha(mesh_of(sphere(), sphere(at=(30, 0, 0)), sphere(at=(60, 0, 0))))
+        self.assertLess(three, 1.5 * one)
+        self.assertGreater(three, one)                 # finished parts stay resident
+
+    def test_an_unknown_reconstruction_raises(self):
+        with self.assertRaises(ValueError):
+            jobmemory.repair_bytes(mesh_of(sphere()), 100, BUDGET, 'marching-cubes')
+
+
 if __name__ == '__main__':
     unittest.main()

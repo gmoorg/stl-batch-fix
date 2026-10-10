@@ -244,7 +244,8 @@ def process(mesh: Mesh, max_faces: int,
             *,
             skip_clean: bool = False,
             reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
-            min_shell_faces: int = splitter.MIN_SHELL_FACES
+            min_shell_faces: int = splitter.MIN_SHELL_FACES,
+            reconstruction: str = repairer.RECONSTRUCTIONS[0]
             ) -> Outcome:
     """Decimate, repair and judge one loaded mesh.  Nothing is written.
 
@@ -288,6 +289,14 @@ def process(mesh: Mesh, max_faces: int,
     decimated mesh, and a gated mesh is still judged here like any other.
     """
     mesh_io.require_geometry(mesh)
+    # Settled before any work: an unknown name raises here, and a caller's
+    # own `part_steps` cannot be combined with a non-default reconstruction
+    # (it would silently override it).
+    if part_steps is None:
+        part_steps = repairer.part_steps_for(reconstruction)
+    elif reconstruction != repairer.RECONSTRUCTIONS[0]:
+        raise ValueError('part_steps and a non-default reconstruction '
+                         f'({reconstruction!r}) cannot be combined')
     failed, decimated = decimate_initial(mesh, max_faces, step_logger, source_name)
     if failed is not None:
         return failed

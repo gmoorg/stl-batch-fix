@@ -23,7 +23,9 @@ non-degenerate.
 
 Alpha-wrap's memory and time follow the surface it wraps
 (≈ 1.39 · A / α² output faces, ≈ 1.6–2.0 KB · A / α² peak; see
-[TODO](TODO.md#runner-and-concurrency)), so one large model can need many GB.
+[TODO](TODO.md#runner-and-concurrency); re-measured 2026-10-10 for `--alpha`:
+output and peak also grow with the part's own face count, orchestration.md
+"Job memory"), so one large model can need many GB.
 It cannot be split: wrapping spatial regions separately produced a hollow
 skin (2 % of the volume), because each region holds only an open patch of the
 surface and "which side is inside" is lost by cutting (experiment recorded in

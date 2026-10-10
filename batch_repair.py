@@ -2,8 +2,9 @@
 """Batch runner: per-file isolation via a worker-thread pool driving isolated
 `batch_repair_child.py` processes.
 
-Takes no command-line arguments. Every option is read from
-`batch_repair.toml` beside this script (documented in
+Takes one optional command-line argument, `--alpha` (alpha-wrap instead
+of winding reconstruction for every part; owner, 2026-10-10). Every other
+option is read from `batch_repair.toml` beside this script (documented in
 `batch_repair.example.toml`; loaded by `libs.runconfig`).
 
 See docs/refactor/orchestration.md for the current pipeline.
@@ -35,7 +36,7 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 from libs import childresult, converter, decimator, dependencies, pipeconfig, textmesh, winding  # noqa: E402
 from libs import meshfix, meshlab, mesh_io, modellog, processor, publication, runconfig, runstate, steplog  # noqa: E402
-from libs import indicators, jobmemory, splitter                          # noqa: E402
+from libs import indicators, jobmemory, repairer, splitter                # noqa: E402
 from libs.childresult import ChildResult                                  # noqa: E402
 from libs.indicators import Indicator                                     # noqa: E402
 from libs.mesh_io import Mesh                                             # noqa: E402
@@ -269,7 +270,8 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                        skip_clean: bool = False,
                        reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
                        min_shell_faces: int = splitter.MIN_SHELL_FACES,
-                       load_path: str | None = None
+                       load_path: str | None = None,
+                       reconstruction: str = repairer.RECONSTRUCTIONS[0]
                        ) -> ChildResult:
     """The exact per-file body the old serial loop ran, now for one file only.
 
@@ -320,7 +322,8 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                                            step_logger=step_logger, source_name=source_name,
                                            skip_clean=skip_clean,
                                            reconstruct_budget_bytes=reconstruct_budget_bytes,
-                                           min_shell_faces=min_shell_faces)
+                                           min_shell_faces=min_shell_faces,
+                                           reconstruction=reconstruction)
                 if outcome.repair is not None:
                     steps += tuple(f'{s.step.name}: {s.detail}' for s in outcome.repair.steps)
                 stage = 'write'
@@ -423,7 +426,8 @@ def _prepare_one_file(source_path: str, destination: str, max_faces: int,
                       step_logger: steplog.StepLogger = steplog.null_logger,
                       *,
                       reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
-                      min_shell_faces: int = splitter.MIN_SHELL_FACES) -> ChildResult:
+                      min_shell_faces: int = splitter.MIN_SHELL_FACES,
+                      reconstruction: str = repairer.RECONSTRUCTIONS[0]) -> ChildResult:
     """The prepare pass for one file: initial decimation, cache, estimate.
 
     Either hands the job to the repair pass (`childresult.PREPARED`, with the
@@ -496,7 +500,8 @@ def _prepare_one_file(source_path: str, destination: str, max_faces: int,
                     reason = f'decimated cache {cache_path} could not be read back'
                     return terminal()
         stage, category = 'process', 'process_failure'
-        estimate = jobmemory.repair_bytes(mesh, min_shell_faces, reconstruct_budget_bytes)
+        estimate = jobmemory.repair_bytes(mesh, min_shell_faces, reconstruct_budget_bytes,
+                                          reconstruction)
     except Exception as exc:                          # noqa: BLE001 — reported, not raised
         reason = f'{type(exc).__name__}: {exc}'
         return terminal()
@@ -589,7 +594,8 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
                   min_shell_faces: int = splitter.MIN_SHELL_FACES,
                   mode: str = 'repair',
                   cache_path: str | None = None,
-                  load_from: str | None = None
+                  load_from: str | None = None,
+                  reconstruction: str = repairer.RECONSTRUCTIONS[0]
                   ) -> subprocess.Popen:
     """Start one child. `output_log`, when given, is an already-open binary
     file (the model log, opened for append by the caller) that receives the
@@ -607,6 +613,7 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
         argv.append('--skip-clean')
     argv += ['--reconstruct-budget-bytes', str(reconstruct_budget_bytes)]
     argv += ['--min-shell-faces', str(min_shell_faces)]
+    argv += ['--reconstruction', reconstruction]
     if mode != 'repair':
         argv += ['--mode', mode]
     if cache_path is not None:
@@ -719,8 +726,12 @@ class _Runner:
     def __init__(self, config: RunConfig, python: str, script: str,
                  baselines: dict[str, frozenset[str]],
                  reporter: "ProgressReporter | None" = None,
-                 run_id: str = '-'):
+                 run_id: str = '-',
+                 reconstruction: str = repairer.RECONSTRUCTIONS[0]):
         self.config = config
+        # The `--alpha` choice: not a `RunConfig` field, because RunConfig
+        # is the toml schema and the owner wants this on the command line.
+        self.reconstruction = reconstruction
         self.run_id = run_id      # stamped into each model log's attempt header
         self.python = python
         self.script = script
@@ -945,7 +956,8 @@ class _Runner:
                                    mode=mode,
                                    cache_path=cache_path,
                                    load_from=(handoff['prepared_path']
-                                              if handoff is not None else None))
+                                              if handoff is not None else None),
+                                   reconstruction=self.reconstruction)
             except Exception as exc:
                 if output_log is not None:
                     output_log.close()
@@ -1100,16 +1112,35 @@ def _dispatch(runner: "_Runner", config: RunConfig) -> bool:
     return False
 
 
-def _run(config: RunConfig) -> int:
+def _reconstruction_message(reconstruction: str) -> str:
+    if reconstruction == 'alpha-wrap':
+        return 'Reconstruction: alpha-wrap (--alpha)'
+    return f'Reconstruction: {reconstruction} (default; --alpha selects alpha-wrap)'
+
+
+def _run(config: RunConfig, reconstruction: str = repairer.RECONSTRUCTIONS[0]) -> int:
+    if reconstruction not in repairer.RECONSTRUCTIONS:
+        raise ValueError(f'unknown reconstruction {reconstruction!r}')
     emitted: list[Mesh] = []
     run_id = str(uuid.uuid4())
+
+    # The first line of every run: which algorithm rebuilds the parts.
+    message = _reconstruction_message(reconstruction)
+    _log_line(message)
 
     # Constructed BEFORE `converter.prepare` runs — i.e. before intake
     # starts — so intake-stage messages and the intake-exception
     # early-return path below can use it too (spec 5d).
     reporter = ProgressReporter(_progress_log_path(config), run_id)
     reporter.write({'kind': 'run_start', 'run_id': run_id,
-                    'output': config.output, 'max_faces': config.max_faces})
+                    'output': config.output, 'max_faces': config.max_faces,
+                    'reconstruction': reconstruction})
+    if config.log_file:
+        try:
+            steplog.append_line(config.log_file, '-', 'info', 'run', '-', None,
+                                f'run {run_id}: {message}')
+        except OSError as exc:
+            _log_line(f'[warning] cannot write {config.log_file}: {exc}')
 
     def collect(mesh: Mesh) -> None:
         emitted.append(mesh)
@@ -1159,7 +1190,7 @@ def _run(config: RunConfig) -> int:
 
     python = sys.executable
     runner = _Runner(config, python, CHILD_SCRIPT, baselines, reporter=reporter,
-                     run_id=run_id)
+                     run_id=run_id, reconstruction=reconstruction)
     runner.total_jobs = len(dispatchable)
     runner.queue.extend(dispatchable)
     _log_line(f'Intake done: {len(dispatchable)} job(s) to process '
@@ -1273,7 +1304,8 @@ def _fail(message: str) -> int:
     return 2
 
 
-def _check_environment(config: RunConfig) -> str | None:
+def _check_environment(config: RunConfig,
+                       reconstruction: str = repairer.RECONSTRUCTIONS[0]) -> str | None:
     """What the filesystem and installed tools must satisfy before `_run`.
 
     Returns a message for the first problem, or None. Runs before any
@@ -1299,16 +1331,22 @@ def _check_environment(config: RunConfig) -> str | None:
 
     # Libraries: one line each (`libs.dependencies`); a missing required
     # package usually failed already when this module imported it.
-    missing = dependencies.check_all(_log_line)
+    missing = dependencies.check_all(
+        _log_line, also_required=('CGAL',) if reconstruction == 'alpha-wrap' else ())
     if missing:
         return 'missing required libraries: ' + ', '.join(missing)
     return None
 
 
+#: The one command-line argument; everything else lives in the toml.
+ALPHA_FLAG = '--alpha'
+
+
 def _main(argv) -> int:
-    if argv:
-        return _fail(f'batch_repair.py takes no arguments (got: {" ".join(argv)}); '
-                     f'set options in {CONFIG_PATH}')
+    if list(argv) not in ([], [ALPHA_FLAG]):
+        return _fail(f'batch_repair.py takes no arguments except {ALPHA_FLAG} '
+                     f'(got: {" ".join(argv)}); set options in {CONFIG_PATH}')
+    reconstruction = 'alpha-wrap' if argv else repairer.RECONSTRUCTIONS[0]
     if not os.path.exists(CONFIG_PATH):
         return _fail(f'config file not found: {CONFIG_PATH}\n'
                      f'Copy {EXAMPLE_CONFIG_PATH} to it and edit the copy.')
@@ -1316,10 +1354,10 @@ def _main(argv) -> int:
         config = runconfig.resolve(runconfig.load(CONFIG_PATH))
     except ConfigError as error:
         return _fail(f'{CONFIG_PATH}: {error}')
-    problem = _check_environment(config)
+    problem = _check_environment(config, reconstruction)
     if problem is not None:
         return _fail(f'{CONFIG_PATH}: {problem}')
-    return _run(config)
+    return _run(config, reconstruction)
 
 
 def main(argv=None):

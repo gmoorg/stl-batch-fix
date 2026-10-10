@@ -52,6 +52,31 @@ DEFAULT_PART_STEPS: tuple[Entry, ...] = (
         scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)),
 )
 
+#: The reconstruction a run can select; the first is the default.
+#: `batch_repair.py --alpha` selects 'alpha-wrap' (owner, 2026-10-10: keep
+#: alpha-wrap usable without making it the default).
+RECONSTRUCTIONS: tuple[str, ...] = ('winding', 'alpha-wrap')
+
+
+def part_steps_for(reconstruction: str) -> tuple[Entry, ...]:
+    """The part sequence for `reconstruction`: `DEFAULT_PART_STEPS`, or the
+    same sequence with alpha-wrap in place of winding (the same decimate and
+    MeshFix entries after it).
+
+    `libs.alphawrap` imports CGAL when loaded, so it is imported only here:
+    a winding run never needs CGAL, and an alpha-wrap run has CGAL checked
+    at startup (`dependencies.check_all`).
+    """
+    if reconstruction == 'winding':
+        return DEFAULT_PART_STEPS
+    if reconstruction == 'alpha-wrap':
+        from . import alphawrap
+        return (mesh_entry('alpha_wrap', alphawrap.step_alpha_wrap),
+                *DEFAULT_PART_STEPS[1:])
+    raise ValueError(f'unknown reconstruction {reconstruction!r}; '
+                     f'expected one of {", ".join(RECONSTRUCTIONS)}')
+
+
 #: NM-only fast path (opt-in with `skip_clean`, part gate only): a part whose
 #: ONLY scanned defect is non-manifold edges goes straight to MeshFix,
 #: skipping winding and the post decimation, and keeps its own surface.

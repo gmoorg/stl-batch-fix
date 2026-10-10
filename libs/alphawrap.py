@@ -116,11 +116,7 @@ def step_alpha_wrap(mesh: Mesh, config: "pipeconfig.StepConfig | None" = None
         whole_diagonal = config.whole_model_diag if config is not None else None
         if whole_diagonal is None:
             raise ValueError('whole_model_diag is required for alpha wrapping')
-        diagonal = float(whole_diagonal)
-        if not math.isfinite(diagonal) or diagonal <= 0:
-            raise ValueError('whole_diagonal must be finite and positive')
-        alpha = min(diagonal / 800.0, 0.15)
-        offset = min(diagonal / 2000.0, 0.06)
+        alpha, offset = pipeconfig.alpha_wrap_parameters(whole_diagonal)
         result = wrap(mesh, alpha, offset)
         return True, result, f'alpha={alpha}, offset={offset}'
     except Exception as exc:

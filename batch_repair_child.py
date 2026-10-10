@@ -63,7 +63,7 @@ if __name__ == '__main__':
     _arm_parent_death(sys.argv[1:])
 
 import batch_repair                                                       # noqa: E402
-from libs import childresult, modellog, splitter, steplog                 # noqa: E402
+from libs import childresult, modellog, repairer, splitter, steplog       # noqa: E402
 
 
 def run_one_file(args) -> int:
@@ -83,14 +83,16 @@ def run_one_file(args) -> int:
         result = batch_repair._prepare_one_file(
             args.one_file, args.destination, args.max_faces, args.cache_path, step_logger,
             reconstruct_budget_bytes=args.reconstruct_budget_bytes,
-            min_shell_faces=args.min_shell_faces)
+            min_shell_faces=args.min_shell_faces,
+            reconstruction=args.reconstruction)
     else:
         result = batch_repair._process_one_file(
             args.one_file, args.destination, args.max_faces, step_logger,
             skip_clean=args.skip_clean,
             reconstruct_budget_bytes=args.reconstruct_budget_bytes,
             min_shell_faces=args.min_shell_faces,
-            load_path=args.load_from)
+            load_path=args.load_from,
+            reconstruction=args.reconstruction)
     childresult.write(args.result_file, result)
     return 0
 
@@ -140,6 +142,8 @@ def main(argv=None) -> int:
                         default=batch_repair.pipeconfig.StepConfig.reconstruct_memory_budget_bytes)
     parser.add_argument('--min-shell-faces', type=_non_negative_int, metavar='N',
                         default=splitter.MIN_SHELL_FACES)
+    parser.add_argument('--reconstruction', choices=repairer.RECONSTRUCTIONS,
+                        default=repairer.RECONSTRUCTIONS[0])
     parser.add_argument('--mode', choices=('prepare', 'repair'), default='repair')
     parser.add_argument('--cache-path', metavar='PATH')
     parser.add_argument('--load-from', metavar='PATH')
