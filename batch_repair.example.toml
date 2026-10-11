@@ -61,6 +61,8 @@ max_faces = 900000
 # repair tool Bambu recommends; slicing and printing were not confirmed.
 # A model that is consistently wound but inside-out, or self-intersecting,
 # passes the check and is not repaired.
+# Ignored, with a warning, by a `--alpha` run: alpha-wrap is used to remove
+# self-intersections, which this check does not see.
 # Default: false
 skip_clean = false
 

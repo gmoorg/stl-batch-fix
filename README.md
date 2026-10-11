@@ -57,6 +57,8 @@ The run's first line, also in `batch.log`, names the reconstruction used.
 repair tool, slicing and printing unconfirmed) skips repair for an
 already-clean decimated model, or otherwise for its individual clean parts;
 a part whose only defect is non-manifold edges tries MeshFix alone first.
+`--alpha` turns `skip_clean` off with a warning: the check does not see
+self-intersections, which are what alpha-wrap is used to remove.
 
 A separate read-only checker predicts base-layer print risks in a Bambu
 Studio 3MF (`tools/project_python.sh check_3mf.py plate.3mf [--png DIR]`);

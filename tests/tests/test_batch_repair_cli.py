@@ -131,6 +131,13 @@ class TestBatchRepairCLI(unittest.TestCase):
                 self.assertIn(expected, (self.output / 'batch.log').read_text())
                 (self.output / 'batch.log').unlink()
 
+    def test_alpha_with_skip_clean_warns_in_the_terminal_and_batch_log(self):
+        code, text = self.invoke(extra={'skip_clean': 'true'}, argv=['--alpha'])
+        self.assertEqual(code, 0, text)
+        self.assertIn('--alpha disables the skip_clean gate', text)
+        self.assertIn('--alpha disables the skip_clean gate',
+                      (self.output / 'batch.log').read_text())
+
     def test_main_hands_the_choice_to_the_run(self):
         seen = []
         with mock.patch.object(batch_repair, '_run',

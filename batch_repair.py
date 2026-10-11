@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 from collections import Counter, deque
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -1118,15 +1118,34 @@ def _reconstruction_message(reconstruction: str) -> str:
     return f'Reconstruction: {reconstruction} (default; --alpha selects alpha-wrap)'
 
 
+def _without_clean_gate_for_alpha(config: RunConfig,
+                                  reconstruction: str) -> tuple[RunConfig, str | None]:
+    """`--alpha` turns `skip_clean` off (owner, 2026-10-11): the run is for
+    removing self-intersections (Bambu's mesh boolean refuses them), and
+    `is_already_clean` does not detect them, so the gate would merge a
+    self-intersecting model or part unwrapped. Returns the config to run
+    and the warning to log, or None when nothing was overridden."""
+    if reconstruction != 'alpha-wrap' or not config.skip_clean:
+        return config, None
+    return (replace(config, skip_clean=False),
+            '[warning] --alpha disables the skip_clean gate (is_already_clean, '
+            'model and part gates, NM fast path): it does not detect '
+            'self-intersections, so every part is alpha-wrapped')
+
+
 def _run(config: RunConfig, reconstruction: str = repairer.RECONSTRUCTIONS[0]) -> int:
     if reconstruction not in repairer.RECONSTRUCTIONS:
         raise ValueError(f'unknown reconstruction {reconstruction!r}')
+    config, gate_warning = _without_clean_gate_for_alpha(config, reconstruction)
     emitted: list[Mesh] = []
     run_id = str(uuid.uuid4())
 
     # The first line of every run: which algorithm rebuilds the parts.
     message = _reconstruction_message(reconstruction)
     _log_line(message)
+    if gate_warning is not None:
+        _log_line(gate_warning)
+        message += f'; {gate_warning}'
 
     # Constructed BEFORE `converter.prepare` runs — i.e. before intake
     # starts — so intake-stage messages and the intake-exception

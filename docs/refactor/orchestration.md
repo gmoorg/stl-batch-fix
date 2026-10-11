@@ -130,6 +130,15 @@ the gate and is repaired normally (100.00% volume, 0 seams). Slicing and
 printing were not confirmed; the task was closed by the owner (2026-10-06)
 and `skip_clean` stays off by default.
 
+`--alpha` forces `skip_clean` off (owner, 2026-10-11;
+`batch_repair._without_clean_gate_for_alpha`, applied at the top of
+`_run`). Alpha-wrap is run to remove self-intersections: they print fine
+but stop Bambu Studio's mesh boolean. `is_already_clean` does not detect
+them, so with the gate on, a self-intersecting model (2a) or part (4a, or
+the NM fast path) would be merged without being wrapped. When the toml
+set `skip_clean = true`, the run logs a `[warning]` naming the disabled
+gate on the terminal and in `batch.log`, right after the reconstruction line.
+
 Reconstruction uses `h=min(diag/800, 0.15)` (alpha-wrap, when listed explicitly,
 uses that as alpha with `offset=min(diag/2000, 0.06)`); `diag` belongs to the
 whole mesh **after initial decimation**, not each part.
