@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import igl as _igl
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -99,6 +101,24 @@ NM_FAST_PATH_MAX_PERCENT = 0.05
 #: not every destructive repair; tighter than the judge's 0.90 because the
 #: winding path remains available as the fallback.
 NM_FAST_PATH_VOLUME_BAND = (0.98, 1.02)
+#: Largest accepted surface deviation, as a fraction of the input part's
+#: diagonal, checked both ways: MeshFix output -> input surface (new
+#: surface, e.g. a cap) and input -> output surface (deleted surface).
+#: The volume band cannot see a filled concavity: Robocop BODY.stl's
+#: MeshFix deleted a square recess's walls and capped it flat, volume
+#: +0.37% (2026-10-12). A maximum, not a percentile: that damage was 52 of
+#: 281,866 output faces. Calibration (`max_deviation`, 14 parts the fast
+#: path accepted, 205k-6.75M faces): largest retained case 2.73e-3
+#: (CHEST_SFW, input -> output); BODY 2.29e-2 / 7.69e-2. Ariel head.stl
+#: (1.3e-2: one ~2 mm piece deleted ~26 mm from its only NM edge, not fin
+#: removal) is rejected on purpose; winding does not keep that piece
+#: either. Rejection only routes the part to its sequence, so err strict.
+#: Cost, both ways: 39.7 s and +1.0 GiB on 6.75M faces (~150 B/face, mostly
+#: the AABB; after MeshFix has returned, below its 700 B/face). Provisional.
+NM_FAST_PATH_MAX_DEVIATION = 5e-3
+#: Faces per batch when sampling a surface for the deviation check: bounds
+#: the temporary corner and centroid arrays on a multi-million-face part.
+DEVIATION_CHUNK_FACES = 1_000_000
 #: Its own step name, so the log and summary show which route ran.
 NM_FAST_PATH_STEPS: tuple[Entry, ...] = (
     mesh_entry('nm_meshfix', meshfix.step_meshfix_repair),
@@ -463,7 +483,9 @@ def _nm_fast_path(part: Mesh, part_id: str, steps: list[StepResult],
                   step_logger: StepLogger, source_name: str) -> tuple[Mesh | None, str]:
     """MeshFix alone on an NM-only part, and whether its result is accepted:
     finite, no NM/open edges or winding seams left, component volume within
-    `NM_FAST_PATH_VOLUME_BAND` of the input's. Returns (mesh or None, reason).
+    `NM_FAST_PATH_VOLUME_BAND` of the input's, and neither surface further than
+    `NM_FAST_PATH_MAX_DEVIATION` of the part's diagonal from the other
+    (`max_deviation`, both ways). Returns (mesh or None, reason).
     Degenerate faces are not checked on the result, though they make a part
     ineligible: eligibility asks "only NM", acceptance follows the
     pipeline's success condition, which ignores them (`Scan.is_clean`).
@@ -491,7 +513,50 @@ def _nm_fast_path(part: Mesh, part_id: str, steps: list[StepResult],
     low, high = NM_FAST_PATH_VOLUME_BAND
     if not (math.isfinite(kept) and low <= kept <= high):
         return None, f'volume {kept * 100:.2f}% outside {low * 100:.0f}-{high * 100:.0f}%'
+    diagonal = scanner.diagonal(part)
+    if not (math.isfinite(diagonal) and diagonal > 0.0):
+        return None, f'part diagonal {diagonal} not measurable'
+    limit = NM_FAST_PATH_MAX_DEVIATION * diagonal
+    for what, query, target, other in (('new', fixed, part, 'input'),
+                                        ('removed', part, fixed, 'result')):
+        moved = max_deviation(query, target)
+        if not (math.isfinite(moved) and moved <= limit):
+            return None, (f'{what} surface {moved / diagonal * 100:.2f}% of diagonal '
+                          f'from the {other}, limit {NM_FAST_PATH_MAX_DEVIATION * 100:.2f}%')
     return fixed, f'kept, volume {kept * 100:.2f}%'
+
+
+def max_deviation(query: Mesh, target: Mesh) -> float:
+    """Largest distance from `query`'s surface to `target`'s surface.
+
+    Sampled at `query`'s face centroids and the vertices its faces use, so it
+    is a sampled maximum: a large face whose samples all lie on `target`
+    while its interior leaves it goes unseen. One AABB over `target` serves
+    every batch. Non-finite input propagates as a non-finite result.
+    """
+    require_geometry(query)
+    require_geometry(target)
+    tv = np.ascontiguousarray(target.geometry.verts, dtype=np.float64)
+    tf = np.ascontiguousarray(target.geometry.faces, dtype=np.int64)
+    tree = _igl.AABB()
+    tree.init(tv, tf)
+    qv = np.asarray(query.geometry.verts, dtype=np.float64)
+    qf = query.geometry.faces
+    worst = 0.0
+    # Lazy: one centroid batch exists at a time.
+    batches = itertools.chain(
+        (qv[np.unique(qf)],),
+        (qv[qf[start:start + DEVIATION_CHUNK_FACES]].mean(axis=1)
+         for start in range(0, len(qf), DEVIATION_CHUNK_FACES)))
+    for points in batches:
+        if not len(points):
+            continue
+        sq, _, _ = tree.squared_distance(tv, tf, np.ascontiguousarray(points))
+        here = float(np.sqrt(sq.max()))
+        if not math.isfinite(here):
+            return here                    # max() would drop a NaN
+        worst = max(worst, here)
+    return worst
 
 
 def _closing_result(mesh: Mesh, before: np.ndarray, steps: list[StepResult],

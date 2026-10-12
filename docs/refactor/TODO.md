@@ -92,11 +92,13 @@ outside the repository, startup check and `install.sh` section removed
 - [ ] NM-only fast path: revisit once a run produces failed models, from
   their logs (owner, 2026-10-05; postponed until then, 2026-10-07). Implemented under `skip_clean` (orchestration step 4a): a
   part whose only scanned defect is NM edges gets MeshFix alone, accepted
-  when clean with component volume in 98–102%, else the part sequence runs
+  when clean with component volume in 98–102% and neither surface more than
+  0.5% of the part diagonal from the other, else the part sequence runs
   on the original part. Open:
   - `NM_FAST_PATH_MAX_PERCENT = 0.05` (NM edges per 100 part faces; owner
-    asked for a percentage, 2026-10-06) and `NM_FAST_PATH_VOLUME_BAND` are
-    provisional; set them from the long run's `nm_fast_path` log lines (NM
+    asked for a percentage, 2026-10-06), `NM_FAST_PATH_VOLUME_BAND` and
+    `NM_FAST_PATH_MAX_DEVIATION = 5e-3` (2026-10-12, from 14 accepted parts
+    and Robocop BODY.stl; see its comment) are provisional; set them from the long run's `nm_fast_path` log lines (NM
     count and percentage, MeshFix step time, volume, kept/fallback). The
     limit is not a time bound: MeshFix runs in-process, and a ratio does
     not cap the NM count on a very large part (`max_faces = 0`). The
