@@ -93,6 +93,11 @@ def marker_suffix(indicator: Indicator) -> str | None:
     return _MARKER_SUFFIX.get(indicator)
 
 
+def marker_suffixes() -> tuple[str, ...]:
+    """Every output marker suffix (`.failed.stl`, …), in precedence order."""
+    return tuple(suffix for suffix, _ in _OUTPUT_MARKERS)
+
+
 def check(source: str, input_folder: str, output_file: str,
           copy_extensions: frozenset[str] | set[str] | None = None) -> Finding:
     """Report the first applicable filesystem finding for `source`.

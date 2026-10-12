@@ -18,6 +18,10 @@
 #
 # Relative paths resolve against THIS file's folder, not the folder you run
 # the script from.
+#
+# fix_files.py (the right-click "STL fix" entries) reads this same file and
+# uses every option except `input`, `output` and `log_file`, which it replaces
+# with a temporary folder beside the selected files.
 
 
 # --- Folders (required) ------------------------------------------------------

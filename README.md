@@ -60,6 +60,22 @@ a part whose only defect is non-manifold edges tries MeshFix alone first.
 `--alpha` turns `skip_clean` off with a warning: the check does not see
 self-intersections, which are what alpha-wrap is used to remove.
 
+To fix individual files where they are, select them in Nemo (Cinnamon's
+file manager), right-click and choose **STL fix** or **STL alpha fix**
+(`--alpha`). Install the two entries once with
+`tools/install_nemo_actions.sh`; the same works from a shell:
+
+```bash
+./fix_files.sh [--alpha] -- "my models/foot.stl" "my models/leg.obj"
+```
+
+Each `foo.stl`/`foo.obj` gets `foo_fixed.stl` beside it, or a marker such as
+`foo_fixed.failed.stl`, replacing earlier results of that file; the model
+log is appended to `foo_fixed.log` and the run logs to `batch.log` and
+`progress.log` in that folder. All other options come from
+`batch_repair.toml`. The work happens in a hidden `.stl-fix-*` folder there,
+which is removed at the end (or by the next run, after a hard kill).
+
 A separate read-only checker predicts base-layer print risks in a Bambu
 Studio 3MF (`tools/project_python.sh check_3mf.py plate.3mf [--png DIR]`);
 `support_3mf.py plate.3mf` writes `plate.supported.3mf` with thin breakaway

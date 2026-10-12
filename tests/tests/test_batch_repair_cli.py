@@ -140,9 +140,9 @@ class TestBatchRepairCLI(unittest.TestCase):
 
     def test_main_hands_the_choice_to_the_run(self):
         seen = []
-        with mock.patch.object(batch_repair, '_run',
+        with mock.patch.object(batch_repair, '_run_detailed',
                                side_effect=lambda config, reconstruction: seen.append(
-                                   reconstruction) or 0):
+                                   reconstruction) or batch_repair.RunOutcome(0)):
             self.invoke()
             self.invoke(argv=['--alpha'])
         self.assertEqual(seen, ['winding', 'alpha-wrap'])
@@ -814,14 +814,14 @@ class TestModelLog(unittest.TestCase):
         config = RunConfig(input=str(self.root), output=str(out), max_faces=0,
                            log_file=str(out / 'batch.log'), workers=1,
                            memory_budget_bytes=10 ** 9)
-        reserved = batch_repair._reserved_logs(config)
+        reserved = batch_repair.reserved_logs(config)
         self.assertEqual(modellog.path_for(str(out / 'progress.stl'), reserved),
                          str(out / 'progress.model.log'))
         self.assertEqual(modellog.path_for(str(out / 'batch.stl'), reserved),
                          str(out / 'batch.model.log'))
         self.assertEqual(modellog.path_for(str(out / 'foot.stl'), reserved),
                          str(out / 'foot.log'))
-        custom = batch_repair._reserved_logs(
+        custom = batch_repair.reserved_logs(
             RunConfig(input=str(self.root), output=str(out), max_faces=0,
                       log_file=str(out / 'logs' / 'steps.log')))
         self.assertEqual(modellog.path_for(str(out / 'logs' / 'steps.stl'), custom),
@@ -829,7 +829,7 @@ class TestModelLog(unittest.TestCase):
         self.assertEqual(modellog.path_for(str(out / 'logs' / 'progress.obj'), custom),
                          str(out / 'logs' / 'progress.model.log'))
         # The fallback name itself reserved by a custom log_file.
-        tricky = batch_repair._reserved_logs(
+        tricky = batch_repair.reserved_logs(
             RunConfig(input=str(self.root), output=str(out), max_faces=0,
                       log_file=str(out / 'progress.model.log')))
         self.assertEqual(modellog.path_for(str(out / 'progress.stl'), tricky),

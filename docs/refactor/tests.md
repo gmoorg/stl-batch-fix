@@ -84,6 +84,16 @@ produce; they protect behaviour, not composition.
   check with alpha-wrap, except that `c_hole_seam_debris` must be refused
   (DESTROYED, the source as its marker, run exit 1): alpha-wrap wraps both
   sides of its hole (owner chose to assert the refusal, 2026-10-10).
+- Selected files beside their sources (`fix_files.py`, 2026-10-11):
+  `test_besidesource` (fast: planned names incl. OBJ/uppercase, every
+  rejected selection, publish replace/stale-marker/failed-move rules, log
+  append never through a symlink, staging removed on success and on an
+  exception, sweep keeps locked/init/foreign/symlinked folders, and the
+  front-end loop with `run` injected: `--alpha` choice, leading-hyphen
+  names, interruption stops later folders); `test_fix_files_smoke` (slow,
+  real pipeline: STL with a space, uppercase OBJ, malformed OBJ →
+  `_fixed.failed.stl` source copy, logs beside, sources unchanged, no
+  staging left, a rerun appends to the logs).
 - I/O and runner failures: `test_converter` (companion copy fails, is
   counted once, interrupted copy leaves nothing, each mesh emitted once),
   `test_batch_repair_cli` (config rejected before intake, malformed TOML,

@@ -50,7 +50,7 @@ def _walk(root: str) -> Iterator[str]:
             yield os.path.join(base, name)
 
 
-def _output_for(source: str, source_root: str, output_root: str) -> str:
+def output_for(source: str, source_root: str, output_root: str) -> str:
     """Where `source` would land in the output tree, same relative path."""
     rel = os.path.relpath(os.path.abspath(source), os.path.abspath(source_root))
     base, ext = os.path.splitext(rel)
@@ -119,7 +119,7 @@ def prepare(source_root: str,
         if ext not in copy_set and ext not in mesh_set:
             summary.ignored += 1
             continue
-        destination = _output_for(source, source_root, output_root)
+        destination = output_for(source, source_root, output_root)
         found = indicators.check(source, source_root, destination,
                                  copy_extensions=copy_set or None)
 

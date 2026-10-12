@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 from collections import Counter, deque
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -376,7 +376,7 @@ def decimated_path(input_root: str, source: str, max_faces: int) -> str:
     (`a.stl.900000.T.ply/`); writing that cache then fails, and the job
     fails with the reason rather than reading the wrong geometry.
 
-    The relative path is lexical, as in `converter._output_for`: a source
+    The relative path is lexical, as in `converter.output_for`: a source
     that is a symlink keeps its own name in the input tree. Resolving it
     would key `/in/link.stl -> /outside/m.stl` as `../outside/m.stl` and
     put the cache beside the target, outside the cache root and its
@@ -906,7 +906,7 @@ class _Runner:
         self.run_state.complete_once(token, self._report, result)
 
     def _model_log_path(self, mesh: Mesh) -> str:
-        return modellog.path_for(mesh.destination, _reserved_logs(self.config))
+        return modellog.path_for(mesh.destination, reserved_logs(self.config))
 
     def _start_model_log(self, path: str, mesh: Mesh):
         """Write this attempt's header to the model log at `path` and return
@@ -1043,7 +1043,7 @@ def _emit_indicator(indicator) -> Indicator | None:
     return Indicator[indicator]
 
 
-def _reserved_logs(config: RunConfig) -> tuple[str, ...]:
+def reserved_logs(config: RunConfig) -> tuple[str, ...]:
     """The run's own log files, which no model log may share."""
     reserved = [_progress_log_path(config), os.path.join(config.output, 'batch.log'),
                 os.path.join(config.output, 'progress.log')]
@@ -1133,7 +1133,25 @@ def _without_clean_gate_for_alpha(config: RunConfig,
             'self-intersections, so every part is alpha-wrapped')
 
 
+@dataclass(frozen=True)
+class RunOutcome:
+    """How one run ended, for a caller that drives several runs
+    (`fix_files.py`): `status` is the process exit status `_main` returns;
+    `interrupted` is True when Ctrl+C stopped intake or dispatch (the run
+    itself consumes the KeyboardInterrupt, so the status alone cannot tell
+    an interruption from an ordinary failure); `unresolved` counts jobs
+    whose child could not be confirmed dead within the bounded cleanup."""
+    status: int
+    interrupted: bool = False
+    unresolved: int = 0
+
+
 def _run(config: RunConfig, reconstruction: str = repairer.RECONSTRUCTIONS[0]) -> int:
+    return _run_detailed(config, reconstruction).status
+
+
+def _run_detailed(config: RunConfig,
+                  reconstruction: str = repairer.RECONSTRUCTIONS[0]) -> RunOutcome:
     if reconstruction not in repairer.RECONSTRUCTIONS:
         raise ValueError(f'unknown reconstruction {reconstruction!r}')
     config, gate_warning = _without_clean_gate_for_alpha(config, reconstruction)
@@ -1172,7 +1190,7 @@ def _run(config: RunConfig, reconstruction: str = repairer.RECONSTRUCTIONS[0]) -
             config.input, config.output, collect,
             copy_extensions={'.png', '.jpg', '.jpeg', '.gif', '.txt', ".pdf", ".tif", ".tiff", ".url", ".webp"},
             convert=functools.partial(_convert_logged, run_id=run_id,
-                                      reserved=_reserved_logs(config)),
+                                      reserved=reserved_logs(config)),
             mesh_extensions=converter.MESH_EXTENSIONS,
         )
     except KeyboardInterrupt:
@@ -1185,14 +1203,14 @@ def _run(config: RunConfig, reconstruction: str = repairer.RECONSTRUCTIONS[0]) -
         reporter.write({'kind': 'progress', 'message': message})
         reporter.finalize({'kind': 'final', 'incomplete': True,
                            'intake_interrupted': True})
-        return 1
+        return RunOutcome(1, interrupted=True)
     except Exception as error:
         message = f'Run incomplete: intake raised {type(error).__name__}: {error}'
         _log_line(message)
         reporter.write({'kind': 'progress', 'message': message})
         reporter.finalize({'kind': 'final', 'intake_exception': f'{type(error).__name__}: {error}',
                            'incomplete': True})
-        return 1
+        return RunOutcome(1)
 
     dispatchable, rejected = _preflight(emitted)
     dispatchable.sort(key=lambda m: (m.triangles is None, m.triangles or 0))
@@ -1315,7 +1333,8 @@ def _run(config: RunConfig, reconstruction: str = repairer.RECONSTRUCTIONS[0]) -
         'left_in_queue': left_in_queue,
         'prepared_not_repaired': prepared_only,
     })
-    return int(incomplete or bool(diagnostics) or summary.copy_failed > 0)
+    return RunOutcome(int(incomplete or bool(diagnostics) or summary.copy_failed > 0),
+                      interrupted=interrupted, unresolved=len(unresolved))
 
 
 def _fail(message: str) -> int:
@@ -1370,13 +1389,30 @@ def _main(argv) -> int:
         return _fail(f'config file not found: {CONFIG_PATH}\n'
                      f'Copy {EXAMPLE_CONFIG_PATH} to it and edit the copy.')
     try:
-        config = runconfig.resolve(runconfig.load(CONFIG_PATH))
+        config = runconfig.load(CONFIG_PATH)
     except ConfigError as error:
         return _fail(f'{CONFIG_PATH}: {error}')
+    return run(config, reconstruction).status
+
+
+def run(config: RunConfig, reconstruction: str = repairer.RECONSTRUCTIONS[0],
+        *, label: str = CONFIG_PATH) -> RunOutcome:
+    """Resolve, check and run a loaded (unresolved) `config`.
+
+    The one entry point besides the command line: `fix_files.py` loads the
+    same `CONFIG_PATH`, replaces only `input`, `output` and `log_file`, and
+    calls this, so resolution happens after its overrides exactly as for a
+    folder run. A resolution or environment problem is printed prefixed by
+    `label` and returns `_fail`'s status 2, as on the command line.
+    """
+    try:
+        config = runconfig.resolve(config)
+    except ConfigError as error:
+        return RunOutcome(_fail(f'{label}: {error}'))
     problem = _check_environment(config, reconstruction)
     if problem is not None:
-        return _fail(f'{CONFIG_PATH}: {problem}')
-    return _run(config, reconstruction)
+        return RunOutcome(_fail(f'{label}: {problem}'))
+    return _run_detailed(config, reconstruction)
 
 
 def main(argv=None):

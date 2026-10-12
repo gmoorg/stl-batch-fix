@@ -102,6 +102,16 @@ no descendants. Intake conversion runs in the runner itself, so it dies with it.
 those of a timeout kill (pending marker, temp files); the next run redoes
 the job.
 
+Selected files (`fix_files.py`, 2026-10-11) run this same batch, unchanged,
+once per source folder on a staging folder inside it (`libs.besidesource`);
+results then move back beside the sources as `<stem>_fixed…`. The runner is
+the front end's own process, so after an interruption its children are
+cancelled with the bounded wait above; the front end then publishes what
+finished, removes the staging folder and exits without starting another
+folder. A child whose kill stayed unconfirmed dies with the process
+(`exit_with_parent`); anything it writes first lands inside the removed
+staging folder and is swept by the next run there.
+
 ## One mesh
 
 | Order | Invocation | Condition / parameters |
