@@ -135,6 +135,16 @@ The first rib output (`/mnt/sda2/ank.supported.3mf`, 2026-10-04) is not yet
 confirmed by a test print: Bambu loading, ribs in the sliced preview and
 removal are all unverified.
 
+- [ ] Test-print the grid (`--layout grid`, 2026-10-12) on alter.3mf: does
+  Bambu load it, do the walls slice as single lines, does the sliced gap stay
+  one layer, do Bambu's trees stay out of it, does it come off the model and
+  the plate in one piece, and do the shin undersides still loop between
+  walls? Then: a dense "skin" over the wall tops (owner chose mesh first),
+  a support blocker if trees interfere, pitch/gap tuning.
+- [ ] Grid base necks: a base piece that reaches another only through a
+  narrow slot (≥ one 0.1 mm cell after clearance) counts as joined, so no
+  full-width strip is added there; decide whether to require a minimum neck.
+
 - [ ] Triangular ribs for easier removal: taper each rib's cross-section to
   a narrow edge at the model instead of a full-width rectangular wall, so it
   touches along a thinner line. In the 0.1–0.44 mm band a rib is only 1–2
@@ -149,7 +159,9 @@ removal are all unverified.
   ribs become tall enough to stand on a shared connecting base, so they come
   off as one piece instead of single-line ribs each fused to the plate where
   they may stay stuck. Needs a lift height (and how it interacts with Bambu
-  dropping objects to the bed) and the base's shape.
+  dropping objects to the bed) and the base's shape. The grid layout already
+  joins its walls on one base for undersides with room (≥ base + wall + gap);
+  this item remains for the near-plate band, which it cannot reach.
 - [ ] Look online for existing tools that already do this (generated or
   custom breakaway supports for FDM, near-plate undersides, 3MF
   post-processing) before extending ours.

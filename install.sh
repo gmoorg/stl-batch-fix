@@ -118,6 +118,21 @@ else
     }
 fi
 
+# ── manifold3d (optional) ─────────────────────────────────────────────────────
+# Only `support_3mf.py --layout grid` uses it (union of the support grid); the
+# repair batch does not.
+echo "→ manifold3d (support grid, optional)"
+if "$PYTHON" -c "import manifold3d" 2>/dev/null; then
+    ok "manifold3d already installed"
+else
+    warn "manifold3d not found — installing (optional)..."
+    if "$PYTHON" -m pip install manifold3d && "$PYTHON" -c "import manifold3d" 2>/dev/null; then
+        ok "manifold3d installed"
+    else
+        warn "manifold3d not available — only support_3mf.py --layout grid is affected"
+    fi
+fi
+
 # ── numpy (required by pymeshfix) ─────────────────────────────────────────────
 echo "→ numpy"
 if "$PYTHON" -c "import numpy" 2>/dev/null; then

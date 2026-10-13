@@ -96,6 +96,26 @@ def resolve_settings(project: bambu3mf.Project, instance: bambu3mf.Instance,
              'support_on_build_plate_only': plate_only}, notes)
 
 
+def object_number(project: bambu3mf.Project, instance: bambu3mf.Instance, key: str,
+                  default: float) -> Value:
+    """One numeric setting, object override over project over `default`.
+
+    For settings only one generator uses (kept out of USED_KEYS, so other
+    tools' skip rules do not change).  An unparsable, negative or non-finite
+    value raises ValueError: geometry must not be built from a guess.
+    """
+    value, source = default, 'default'
+    for name, table in (('project', project.settings), ('object', instance.overrides)):
+        if key in table:
+            try:
+                value, source = _number(table[key]), name
+            except ValueError:
+                raise ValueError(f'{key}={table[key]!r} ({name}) not understood') from None
+            if value < 0:
+                raise ValueError(f'{key}={table[key]!r} ({name}) is negative')
+    return Value(value, source)
+
+
 def thresholds_for(settings: dict[str, Value], cli, **fixed) -> basecheck.Thresholds:
     """basecheck thresholds from resolved settings plus any CLI-given extras.
 

@@ -24,7 +24,9 @@ def importable(*modules: str) -> Callable[[], None]:
 
 #: (name, required, probe). CGAL is optional: only alpha-wrap uses it, and a
 #: run uses alpha-wrap only when started with `--alpha`; that run passes
-#: 'CGAL' in `check_all`'s `also_required`.
+#: 'CGAL' in `check_all`'s `also_required`. manifold3d is optional for the
+#: batch: only `support_3mf.py --layout grid` uses it, and checks it itself
+#: at start (`check_one`).
 LIBRARIES: tuple[tuple[str, bool, Callable[[], None]], ...] = (
     ('NumPy', True, importable('numpy')),
     ('SciPy', True, importable('scipy')),
@@ -33,6 +35,7 @@ LIBRARIES: tuple[tuple[str, bool, Callable[[], None]], ...] = (
     ('PyMeshFix', True, importable('pymeshfix')),
     ('CGAL', False, importable('CGAL.CGAL_Alpha_wrap_3', 'CGAL.CGAL_Kernel',
                                'CGAL.CGAL_Polyhedron_3')),
+    ('manifold3d', False, importable('manifold3d')),
 )
 
 
@@ -55,6 +58,14 @@ def check_library(name: str, required: bool, probe: Callable[[], None],
     else:
         log(f'[debug] {name} (optional) unavailable: {problem}')
     return False
+
+
+def check_one(name: str, log: Callable[[str], None]) -> bool:
+    """Check one library from `LIBRARIES` as required; return whether available."""
+    for known, _, probe in LIBRARIES:
+        if known == name:
+            return check_library(name, True, probe, log)
+    raise ValueError(f'unknown library: {name}')
 
 
 def check_all(log: Callable[[str], None],
