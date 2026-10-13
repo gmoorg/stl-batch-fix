@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import itertools
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import igl as _igl
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -41,7 +44,7 @@ WHOLE_MESH_STEPS: tuple[Entry, ...] = ()
 #: Decimation is ONE PyMeshLab pass (owner decision 2026-10-04): the second
 #: `decimate_again` round existed because fast_simplification plateaued far
 #: above extreme targets, and that second round collapsed thin features
-#: (docs/refactor/reconstruction.md, "Decimation after reconstruction").
+#: (docs/archive/reconstruction.md, "Decimation after reconstruction").
 #: The target stays best-effort; MeshFix follows so anything decimation
 #: changes is still checked and repaired.
 DEFAULT_PART_STEPS: tuple[Entry, ...] = (
@@ -51,8 +54,78 @@ DEFAULT_PART_STEPS: tuple[Entry, ...] = (
         scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)),
 )
 
-#: Allow float re-rounding when counting retained vertices. This absolute
-#: threshold is a known scale risk; see
+#: The reconstruction a run can select; the first is the default.
+#: `batch_repair.py --alpha` selects 'alpha-wrap' (owner, 2026-10-10: keep
+#: alpha-wrap usable without making it the default).
+RECONSTRUCTIONS: tuple[str, ...] = ('winding', 'alpha-wrap')
+
+
+def part_steps_for(reconstruction: str) -> tuple[Entry, ...]:
+    """The part sequence for `reconstruction`: `DEFAULT_PART_STEPS`, or the
+    same sequence with alpha-wrap in place of winding (the same decimate and
+    MeshFix entries after it).
+
+    `libs.alphawrap` imports CGAL when loaded, so it is imported only here:
+    a winding run never needs CGAL, and an alpha-wrap run has CGAL checked
+    at startup (`dependencies.check_all`).
+    """
+    if reconstruction == 'winding':
+        return DEFAULT_PART_STEPS
+    if reconstruction == 'alpha-wrap':
+        from . import alphawrap
+        return (mesh_entry('alpha_wrap', alphawrap.step_alpha_wrap),
+                *DEFAULT_PART_STEPS[1:])
+    raise ValueError(f'unknown reconstruction {reconstruction!r}; '
+                     f'expected one of {", ".join(RECONSTRUCTIONS)}')
+
+
+#: NM-only fast path (opt-in with `skip_clean`, part gate only): a part whose
+#: ONLY scanned defect is non-manifold edges goes straight to MeshFix,
+#: skipping winding and the post decimation, and keeps its own surface.
+#: Owner, 2026-10-05: NM only first; both values are provisional and are
+#: revisited after the next long run (open edges may join then).
+#: Limit: NM edges per 100 faces of the part (an edge-to-face ratio, not
+#: the share of edges that are NM), so it scales with the part. It is a
+#: heuristic, not a time bound — MeshFix runs in-process and cannot be
+#: interrupted, and a percentage does not cap the absolute NM count on a
+#: very large part (`max_faces = 0`, or a direct caller). Evidence: a normal
+#: decimation leaves 5-45 NM edges on 0.9-2M faces (~0.001-0.005%), which
+#: MeshFix clears in seconds; the Aloy (534 on 900k, 0.059%) and Laura
+#: (6,968, 0.77%) MeshFix timeouts were damaged post-reconstruction
+#: decimations, so they bound nothing here. 0.05% keeps roughly the
+#: earlier 500-edge allowance at a 900k-face part.
+NM_FAST_PATH_MAX_PERCENT = 0.05
+#: Accepted range of component volume out/in. Worst fixture loss was −1.05%
+#: (20 fins on a 760-face sphere, far denser NM than a real part); 200 fins
+#: on a 12,640-face sphere lost 0.05%. Catches a substantial volume change,
+#: not every destructive repair; tighter than the judge's 0.90 because the
+#: winding path remains available as the fallback.
+NM_FAST_PATH_VOLUME_BAND = (0.98, 1.02)
+#: Largest accepted surface deviation, as a fraction of the input part's
+#: diagonal, checked both ways: MeshFix output -> input surface (new
+#: surface, e.g. a cap) and input -> output surface (deleted surface).
+#: The volume band cannot see a filled concavity: Robocop BODY.stl's
+#: MeshFix deleted a square recess's walls and capped it flat, volume
+#: +0.37% (2026-10-12). A maximum, not a percentile: that damage was 52 of
+#: 281,866 output faces. Calibration (`max_deviation`, 14 parts the fast
+#: path accepted, 205k-6.75M faces): largest retained case 2.73e-3
+#: (CHEST_SFW, input -> output); BODY 2.29e-2 / 7.69e-2. Ariel head.stl
+#: (1.3e-2: one ~2 mm piece deleted ~26 mm from its only NM edge, not fin
+#: removal) is rejected on purpose; winding does not keep that piece
+#: either. Rejection only routes the part to its sequence, so err strict.
+#: Cost, both ways: 39.7 s and +1.0 GiB on 6.75M faces (~150 B/face, mostly
+#: the AABB; after MeshFix has returned, below its 700 B/face). Provisional.
+NM_FAST_PATH_MAX_DEVIATION = 5e-3
+#: Faces per batch when sampling a surface for the deviation check: bounds
+#: the temporary corner and centroid arrays on a multi-million-face part.
+DEVIATION_CHUNK_FACES = 1_000_000
+#: Its own step name, so the log and summary show which route ran.
+NM_FAST_PATH_STEPS: tuple[Entry, ...] = (
+    mesh_entry('nm_meshfix', meshfix.step_meshfix_repair),
+)
+
+#: How far an input vertex may move and still count as retained. This
+#: absolute threshold is a known scale risk; see
 #: ../stl-batch-fix.old/archive/docs-refactor-2026-09-22/open-issues.md.
 LOST_VERTEX_TOLERANCE = 1e-4
 
@@ -103,8 +176,8 @@ def _count_lost(before: np.ndarray, after: np.ndarray,
                 tolerance: float = LOST_VERTEX_TOLERANCE) -> int:
     """Input vertices with no output vertex within `tolerance`.
 
-    Nearest-neighbour rather than set difference, because a repair that moves
-    nothing still re-rounds everything — see `LOST_VERTEX_TOLERANCE`.
+    Nearest-neighbour rather than set difference, so a vertex a repair moves
+    by less than `LOST_VERTEX_TOLERANCE` still counts as kept.
 
     A repair that *moves* a vertex slightly is counted as keeping it, which is
     the intended reading: the question this answers is "did something get
@@ -112,8 +185,7 @@ def _count_lost(before: np.ndarray, after: np.ndarray,
     """
     if len(after) == 0:
         return len(before)
-    distance, _ = cKDTree(after.astype(np.float64)).query(
-        before.astype(np.float64))
+    distance, _ = cKDTree(after).query(before)
     return int((distance > tolerance).sum())
 
 
@@ -125,8 +197,9 @@ def _split_stage(min_shell_faces: int) -> tuple[Entry, ...]:
     `min_shell_faces` changes only the shell entry's floor, never the set or
     order of entries present. Enabling seam splitting later means adding one
     more `collection_entry(...)` line here, in order — not touching a flag
-    (docs/refactor/TODO.md's "Uniform-step refactor" section: "do not enable
-    seam splitting... during this refactor").
+    (uniform-step refactor plan,
+    ../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md:
+    do not add "seam splitting as part of this refactor").
     """
     return (
         collection_entry('split_shells',
@@ -160,16 +233,35 @@ def is_already_clean(mesh: Mesh) -> bool:
 
     Self-intersections are deliberately NOT checked: they do not by
     themselves fail a print (see the spike this function was written for,
-    docs/refactor/TODO.md's "Algorithm questions" section) and alpha-wrap
+    ../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md's "Algorithm questions" section) and alpha-wrap
     exists specifically to make them go away — a mesh whose only defect is
     self-intersection is exactly the case this gate is meant to skip
     repairing, not exclude.
     """
+    return _is_clean(*_gate_scan(mesh))
+
+
+def _gate_scan(mesh: Mesh) -> tuple[scanner.Scan, int | None]:
+    """The gates' one scan, plus the winding-seam count when it can matter:
+    `None` when open edges already rule out both a clean mesh and the
+    NM-only fast path, so that walk is skipped."""
     scan = scanner.scan(mesh)
-    if not scan.is_clean:
-        return False
-    seam_edges, _ = scanner.winding_seams(mesh)
-    return seam_edges == 0
+    if scan.open_edges:
+        return scan, None
+    return scan, scanner.winding_seams(mesh)[0]
+
+
+def _is_clean(scan: scanner.Scan, seams: int | None) -> bool:
+    """`is_already_clean` on a `_gate_scan` result."""
+    return scan.is_clean and seams == 0
+
+
+def _nm_only(scan: scanner.Scan, seams: int | None) -> bool:
+    """NM edges are the only defect the scan sees. `seams == 0` is a filter,
+    not proof: winding across the NM edges themselves is invisible here, and
+    is checked on the result instead."""
+    return (scan.non_manifold > 0 and scan.open_edges == 0
+            and scan.degenerate == 0 and seams == 0)
 
 
 def repair(mesh: Mesh,
@@ -177,7 +269,6 @@ def repair(mesh: Mesh,
            part_steps: tuple[tuple[str, Callable[..., tuple[bool, Mesh, str]]], ...] | None = None,
            step_logger: StepLogger = steplog.null_logger,
            source_name: str = '',
-           nested_process_group: bool = False,
            *,
            skip_clean: bool = False,
            reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
@@ -209,12 +300,6 @@ def repair(mesh: Mesh,
     through. `source_name` identifies which file's steps these are, for a
     caller sharing one log across several files/processes.
 
-    `nested_process_group` is a caller-known fact (matching `min_shell_faces`'s
-    own style — supplied by the caller, not measured per mesh), threaded into
-    every part's own `StepConfig` so `blender.step_blender_repair`, if it
-    appears in `part_steps`, knows whether to give its Blender invocation its
-    own process session. See `pipeconfig.StepConfig.nested_process_group`.
-
     `skip_clean` turns on the `is_already_clean` gate, off by default because
     the gate is not yet validated on real models (docs/refactor/TODO.md). It
     checks twice. First the whole mesh after `WHOLE_MESH_STEPS`: if clean,
@@ -224,7 +309,11 @@ def repair(mesh: Mesh,
     sequence whether it is the default or a caller's own `part_steps`. Each
     verdict is logged as a 'clean_gate' info line. A consistently wound but
     globally inverted or self-intersecting mesh passes the gate — see
-    `is_already_clean`.
+    `is_already_clean`. A part whose only scanned defect is NM edges takes
+    the NM fast path first (`NM_FAST_PATH_STEPS`, MeshFix alone), also ahead
+    of a custom `part_steps`, even an empty one; its result is merged only
+    when accepted (see `_nm_fast_path`), otherwise the part sequence runs on
+    the original part. Each decision is logged as an 'nm_fast_path' line.
     """
     require_geometry(mesh)
 
@@ -270,7 +359,7 @@ def repair(mesh: Mesh,
         # preparation skips split, part steps and merge entirely. It still
         # gets the same closing measurements as a repaired mesh, so the
         # caller's judge sees real numbers, not an assumed success.
-        if skip_clean and _gate_says_clean(mesh, step_logger, source_name, '-'):
+        if skip_clean and _gate_says_clean(mesh, step_logger, source_name, '-')[0]:
             return _closing_result(mesh, before, steps, faces_in, volume_in,
                                    1, started, step_logger, source_name)
 
@@ -302,15 +391,18 @@ def repair(mesh: Mesh,
             target_faces = len(part.geometry.faces)
             part_config = pipeconfig.StepConfig(
                 faceCount=target_faces, whole_model_diag=whole_model_diag,
-                nested_process_group=nested_process_group,
                 reconstruct_memory_budget_bytes=reconstruct_budget_bytes)
             part_id = f'{index + 1}/{len(parts)}'
 
             # Part gate (same `skip_clean` switch): a part that is already clean is merged
-            # as split, bypassing the part sequence — default or custom.
-            if skip_clean and _gate_says_clean(part, step_logger, source_name, part_id):
-                repaired.append(part)
-                continue
+            # as split, bypassing the part sequence — default or custom. A part whose
+            # only scanned defect is NM edges first tries MeshFix alone (NM fast path);
+            # if that result is not accepted, the sequence runs on the original part.
+            if skip_clean:
+                gated = _part_gate(part, part_id, steps, step_logger, source_name)
+                if gated is not None:
+                    repaired.append(gated)
+                    continue
 
             outcome = execstep.run_sequence(
                 resolved_part_entries, part, part_config, steps,
@@ -350,12 +442,121 @@ def repair(mesh: Mesh,
 
 
 def _gate_says_clean(mesh: Mesh, step_logger: StepLogger, source_name: str,
-                     part: str) -> bool:
-    """Run `is_already_clean` and log its verdict at this call site."""
+                     part: str) -> tuple[bool, scanner.Scan, int | None]:
+    """The `is_already_clean` verdict, logged at this call site, with the
+    scan and seam count it was made from (the part gate reuses them)."""
     with steplog.timed_info(step_logger, source_name, 'clean_gate', part=part) as report:
-        clean = is_already_clean(mesh)
+        scan, seams = _gate_scan(mesh)
+        clean = _is_clean(scan, seams)
         report('clean: steps skipped' if clean else 'not clean')
-    return clean
+    return clean, scan, seams
+
+
+def _part_gate(part: Mesh, part_id: str, steps: list[StepResult],
+               step_logger: StepLogger, source_name: str) -> Mesh | None:
+    """The mesh to merge for this part without its sequence — the part itself
+    when clean, MeshFix's accepted result when NM-only — or None to run the
+    sequence. Logs the 'clean_gate' verdict like the model gate does."""
+    clean, scan, seams = _gate_says_clean(part, step_logger, source_name, part_id)
+    if clean:
+        return part
+    if not _nm_only(scan, seams):
+        return None
+    with steplog.timed_info(step_logger, source_name, 'nm_fast_path', part=part_id) as report:
+        nm = (f'NM {scan.non_manifold} in {scan.faces} faces '
+              f'({scan.non_manifold * 100 / scan.faces:.3f}%)')
+        # Cross-multiplied: no division in the comparison; at the limit is tried.
+        if scan.non_manifold * 100 > NM_FAST_PATH_MAX_PERCENT * scan.faces:
+            report(f'{nm} over limit {NM_FAST_PATH_MAX_PERCENT:.3f}%: not tried')
+            return None
+        # Anything that goes wrong on this optional route falls back to the
+        # part sequence; it never fails the part.
+        try:
+            fixed, why = _nm_fast_path(part, part_id, steps, step_logger, source_name)
+        except Exception as exc:
+            fixed, why = None, f'{type(exc).__name__}: {exc}'
+        report(f'{nm}: {why}' if fixed is not None else f'{nm}: fallback: {why}')
+    return fixed
+
+
+def _nm_fast_path(part: Mesh, part_id: str, steps: list[StepResult],
+                  step_logger: StepLogger, source_name: str) -> tuple[Mesh | None, str]:
+    """MeshFix alone on an NM-only part, and whether its result is accepted:
+    finite, no NM/open edges or winding seams left, component volume within
+    `NM_FAST_PATH_VOLUME_BAND` of the input's, and neither surface further than
+    `NM_FAST_PATH_MAX_DEVIATION` of the part's diagonal from the other
+    (`max_deviation`, both ways). Returns (mesh or None, reason).
+    Degenerate faces are not checked on the result, though they make a part
+    ineligible: eligibility asks "only NM", acceptance follows the
+    pipeline's success condition, which ignores them (`Scan.is_clean`).
+    """
+    volume_in = scanner.component_volume(part)
+    if not (math.isfinite(volume_in) and volume_in > 0.0):
+        return None, f'input volume {volume_in} not measurable'
+    outcome = execstep.run_sequence(
+        NM_FAST_PATH_STEPS, part, None, steps, step_logger=step_logger,
+        source_name=source_name, step=Step.PART, part=part_id)
+    if outcome.record_error is not None:
+        raise outcome.record_error
+    if not outcome.ok:
+        return None, outcome.detail
+    fixed = outcome.mesh
+    if not np.isfinite(fixed.geometry.verts).all():
+        return None, 'NaN or infinite coordinates'
+    scan = scanner.scan(fixed)
+    if scan.non_manifold or scan.open_edges:
+        return None, f'nm={scan.non_manifold}, open={scan.open_edges} left'
+    seams, _ = scanner.winding_seams(fixed)
+    if seams:
+        return None, f'{seams} winding seam edge(s) left'
+    kept = scanner.component_volume(fixed) / volume_in
+    low, high = NM_FAST_PATH_VOLUME_BAND
+    if not (math.isfinite(kept) and low <= kept <= high):
+        return None, f'volume {kept * 100:.2f}% outside {low * 100:.0f}-{high * 100:.0f}%'
+    diagonal = scanner.diagonal(part)
+    if not (math.isfinite(diagonal) and diagonal > 0.0):
+        return None, f'part diagonal {diagonal} not measurable'
+    limit = NM_FAST_PATH_MAX_DEVIATION * diagonal
+    for what, query, target, other in (('new', fixed, part, 'input'),
+                                        ('removed', part, fixed, 'result')):
+        moved = max_deviation(query, target)
+        if not (math.isfinite(moved) and moved <= limit):
+            return None, (f'{what} surface {moved / diagonal * 100:.2f}% of diagonal '
+                          f'from the {other}, limit {NM_FAST_PATH_MAX_DEVIATION * 100:.2f}%')
+    return fixed, f'kept, volume {kept * 100:.2f}%'
+
+
+def max_deviation(query: Mesh, target: Mesh) -> float:
+    """Largest distance from `query`'s surface to `target`'s surface.
+
+    Sampled at `query`'s face centroids and the vertices its faces use, so it
+    is a sampled maximum: a large face whose samples all lie on `target`
+    while its interior leaves it goes unseen. One AABB over `target` serves
+    every batch. Non-finite input propagates as a non-finite result.
+    """
+    require_geometry(query)
+    require_geometry(target)
+    tv = np.ascontiguousarray(target.geometry.verts, dtype=np.float64)
+    tf = np.ascontiguousarray(target.geometry.faces, dtype=np.int64)
+    tree = _igl.AABB()
+    tree.init(tv, tf)
+    qv = np.asarray(query.geometry.verts, dtype=np.float64)
+    qf = query.geometry.faces
+    worst = 0.0
+    # Lazy: one centroid batch exists at a time.
+    batches = itertools.chain(
+        (qv[np.unique(qf)],),
+        (qv[qf[start:start + DEVIATION_CHUNK_FACES]].mean(axis=1)
+         for start in range(0, len(qf), DEVIATION_CHUNK_FACES)))
+    for points in batches:
+        if not len(points):
+            continue
+        sq, _, _ = tree.squared_distance(tv, tf, np.ascontiguousarray(points))
+        here = float(np.sqrt(sq.max()))
+        if not math.isfinite(here):
+            return here                    # max() would drop a NaN
+        worst = max(worst, here)
+    return worst
 
 
 def _closing_result(mesh: Mesh, before: np.ndarray, steps: list[StepResult],
@@ -367,8 +568,8 @@ def _closing_result(mesh: Mesh, before: np.ndarray, steps: list[StepResult],
     skipped repair is measured exactly like a performed one. Raises on
     unmeasurable geometry; `repair` turns that into a failed `Result`.
     """
-    # A tool can hand back geometry that is not measurable — PyMeshFix,
-    # PyMeshLab and Blender all return arrays this module did not build.
+    # A tool can hand back geometry that is not measurable — PyMeshFix and
+    # PyMeshLab both return arrays this module did not build.
     # Checked before the closing measurements rather than after, because
     # `_count_lost` feeds those arrays to cKDTree, which raises on
     # non-finite input; that raise used to happen below this block and so

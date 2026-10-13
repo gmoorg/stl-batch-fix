@@ -33,7 +33,10 @@ import sys
 import unittest
 from unittest import mock
 
-from libs import blender, execstep, mesh_io, meshfix, meshlab, repairer, scanner, welder
+import numpy as np
+
+from libs import execstep, mesh_io, meshfix, meshlab, repairer, scanner, welder
+from tests.tests import defect_spheres as ds
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEST_ROOT = os.path.dirname(HERE)
@@ -72,28 +75,27 @@ MULTI_SHELL = {
     'shell_inverted': CONTROL_VOLUME * 1.125,
 }
 
-#: This file explicitly configures the historical sequence (orient, Blender,
-#: PyMeshFix), so it needs all of PyMeshLab, PyMeshFix, and Blender — unlike
-#: `test_repairer.py`'s narrower `needs_tools`, which most of its tests
-#: don't need since they mock the tool-level steps directly.
-HAVE_TOOLS = (meshlab.is_available() and meshfix.is_available()
-              and blender.is_available())
 
 
 def load(name):
     path = os.path.join(PROBES, f'sphere_{name}.stl')
+    if name == 'degenerate':
+        # Its whole defect is what `mesh_io.load` now drops at the STL
+        # entrance; bypass it to keep testing the repair of degenerate faces
+        # that arrive another way (a PLY, a repair step).
+        return ds.load_keeping_degenerates(path, '/tmp/unused_destination.stl')
     return mesh_io.load(mesh_io.probe(path, '/tmp/unused_destination.stl'))
 
 
 def tool_call_parts(result):
     """The named per-part `Step.PART` entries for this suite's explicitly
-    configured sequence (orient, Blender, PyMeshFix — installed in
+    configured sequence (orient, PyMeshFix — installed in
     `ProbeCase.setUp` via `repairer.DEFAULT_PART_STEPS`).
 
     Each entry in the sequence produces its own `Step.PART` record (the
     uniform-step refactor removed the old force-appended
-    `_decimate_to_target_and_fix` tail — see docs/refactor/TODO.md's
-    "Uniform-step refactor" section), so this filters to the orient step's
+    `_decimate_to_target_and_fix` tail — see docs/refactor/modules.md's
+    "Contracts" section), so this filters to the orient step's
     own record, which is the one every test here keys off ("oriented" in
     its detail).
     """
@@ -101,7 +103,6 @@ def tool_call_parts(result):
            if s.step is repairer.Step.PART and 'oriented' in s.detail]
 
 
-@unittest.skipUnless(HAVE_TOOLS, "pymeshlab and pymeshfix are both needed")
 class ProbeCase(unittest.TestCase):
     """Base: ensures the fixtures exist before anything runs."""
 
@@ -120,7 +121,6 @@ class ProbeCase(unittest.TestCase):
                  execstep.mesh_entry('clean_duplicate_faces', meshlab.step_clean_duplicate_faces),
                  execstep.mesh_entry('clean_unreferenced', meshlab.step_clean_unreferenced))
         parts = (execstep.mesh_entry('step_orient', meshlab.step_orient),
-                 execstep.mesh_entry('step_blender_repair', blender.step_blender_repair),
                  execstep.mesh_entry('step_meshfix_repair', meshfix.step_meshfix_repair))
         # `PART_MESH_STEPS` was renamed `DEFAULT_PART_STEPS` in the
         # uniform-step refactor (docs/refactor/TODO.md).
@@ -346,8 +346,8 @@ class TestTheSplitPath(ProbeCase):
     def test_merge_puts_the_parts_back(self):
         """`merge` concatenates; the face count must be the sum of the parts.
 
-        This suite's configured per-part sequence is (orient, Blender,
-        PyMeshFix) — see `ProbeCase.setUp` — so MERGE consumes the LAST
+        This suite's configured per-part sequence is (orient, PyMeshFix)
+        — see `ProbeCase.setUp` — so MERGE consumes the LAST
         entry's output (PyMeshFix's), one `Step.PART` record per part.
         """
         result = repairer.repair(load('two_shells'))
@@ -456,7 +456,7 @@ class TestToleranceScaling(unittest.TestCase):
         verts, faces = sphere(r=radius)
         verts, faces = build_tjunction(verts.copy(), faces.copy())
         return Mesh('/generated', '/out.stl', Kind.BINARY_STL, len(faces),
-                    True, None, Geometry(verts, faces))
+                    True, None, Geometry(verts.astype(np.float64), faces))
 
     def test_a_tjunction_is_found_at_every_scale(self):
         """One junction, one sphere, six sizes. **Fixed 2026-09-17.**

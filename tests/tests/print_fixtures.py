@@ -106,6 +106,14 @@ def write_3mf(path, objects, items, *, settings=None, bambu=True, unit='millimet
             resources.append(f'<object id="{object_id}" type="model"><components>{comps}</components></object>')
         build = ''.join(f'<item objectid="{oid}" transform="{transform_text(m)}" printable="{1 if pr else 0}"/>'
                         for oid, m, pr in items)
+        if bambu:
+            rels = ''.join(f'<Relationship Target="/3D/Objects/object_{oid}.model" Id="rel-{oid}" '
+                           'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>'
+                           for oid in objects)
+            archive.writestr('3D/_rels/3dmodel.model.rels',
+                             '<?xml version="1.0"?><Relationships xmlns='
+                             '"http://schemas.openxmlformats.org/package/2006/relationships">'
+                             f'{rels}</Relationships>')
         archive.writestr('3D/3dmodel.model',
                          f'<?xml version="1.0"?><model unit="{unit}" xmlns="{CORE_NS}" xmlns:p="{PROD_NS}">'
                          f'<resources>{"".join(resources)}</resources><build>{build}</build></model>')

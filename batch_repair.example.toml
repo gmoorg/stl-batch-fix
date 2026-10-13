@@ -18,6 +18,10 @@
 #
 # Relative paths resolve against THIS file's folder, not the folder you run
 # the script from.
+#
+# fix_files.py (the right-click "STL fix" entries) reads this same file and
+# uses every option except `input`, `output` and `log_file`, which it replaces
+# with a temporary folder beside the selected files.
 
 
 # --- Folders (required) ------------------------------------------------------
@@ -50,11 +54,19 @@ max_faces = 900000
 # Skip repair for geometry that is already clean: no non-manifold edges, no
 # open edges and consistent winding (repairer.is_already_clean).
 #   * A clean model (checked after the initial decimation) skips split,
-#     alpha-wrap, part steps and merge; it is still judged and written.
+#     reconstruction, part steps and merge; it is still judged and written.
 #   * Otherwise each clean split part is merged as is, and only the defective
 #     parts are repaired.
-# NOT YET VALIDATED on real models. A model that is consistently wound but
-# inside-out, or self-intersecting, passes the check and is not repaired.
+#   * A part whose only defect is non-manifold edges (at most 0.05 per 100
+#     faces of the part) is first given to MeshFix alone, keeping its own
+#     surface; if the result is not clean or its volume moved by more than
+#     2%, the part is repaired as usual.
+# Checked on a sample of real models (2026-10-06): every output passed the
+# repair tool Bambu recommends; slicing and printing were not confirmed.
+# A model that is consistently wound but inside-out, or self-intersecting,
+# passes the check and is not repaired.
+# Ignored, with a warning, by a `--alpha` run: alpha-wrap is used to remove
+# self-intersections, which this check does not see.
 # Default: false
 skip_clean = false
 
@@ -104,16 +116,17 @@ workers = 0
 # Default: 3600.0
 per_file_timeout = 3600.0
 
-# Seconds to wait for a killed child (and anything it started, e.g. Blender)
-# to be confirmed gone. Must be a finite positive number.
+# Seconds to wait for a killed child (and anything it started) to be
+# confirmed gone. Must be a finite positive number.
 # Default: 10.0
 reap_deadline = 10.0
 
 # Memory admission: a file is started only while the estimated memory of all
 # running files fits the budget. Large models therefore run fewer at a time.
 # Every file goes through two passes: first all files are PREPARED (initial
-# decimation, saved under <input>/stl-decimated/ with the face target in the
-# name and reused by later runs; then every part is planned), then all are
+# decimation, saved as a PLY under <input>.decimated/, beside the input folder,
+# with the face target in the name and reused by later runs; then every part
+# is planned), then all are
 # REPAIRED. Each pass reserves its own estimate; the repair estimate is
 # computed from the prepared model's real parts and surface area. Estimates
 # are fitted to measured runs, not hard limits. A file whose estimate exceeds

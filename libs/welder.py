@@ -286,7 +286,7 @@ def find(mesh: Mesh) -> tuple[TJunction, ...]:
     answer always means there is real work to do.
     """
     require_geometry(mesh)
-    verts = mesh.geometry.verts.astype(np.float64)
+    verts = mesh.geometry.verts
     faces = [list(t) for t in mesh.geometry.faces.tolist()]
     return tuple(_find_in(verts, faces).values())
 
@@ -307,7 +307,7 @@ def repair(mesh: Mesh, max_rounds: int = MAX_ROUNDS) -> Result:
     scattered junctions, the second finding nothing.
     """
     require_geometry(mesh)
-    verts = mesh.geometry.verts.astype(np.float64)
+    verts = mesh.geometry.verts
     faces = [list(t) for t in mesh.geometry.faces.tolist()]
     splits = 0
     rounds = 0

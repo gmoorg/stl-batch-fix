@@ -15,7 +15,10 @@ Implementation: `libs/` and `batch_repair.py`. The pre-refactor script
 
 Do not read all references at startup. Historical designs, completed handoffs,
 and investigation narratives are excluded from the normal reading path.
-Use [the archive index](../stl-batch-fix.old/archive/README.md) (kept outside the repository) only for evidence a task actually needs.
+Use the archives only for evidence a task actually needs:
+[docs/archive](docs/archive/README.md) (investigations behind current
+decisions) and [the older archive](../stl-batch-fix.old/archive/README.md)
+(outside the repository).
 Current code establishes implemented behavior; TODO records future decisions.
 
 ## Run and verify
@@ -23,13 +26,14 @@ Current code establishes implemented behavior; TODO records future decisions.
 `install.sh` checks and installs dependencies into the project environment.
 Use `tools/project_python.sh` for every project Python command (including probes).
 It selects `/mnt/sda2/python/.venv/bin/python` and sets the repository directory.
-The batch runner takes no command-line arguments. Every option lives in
-`batch_repair.toml` beside the script (git-ignored). Copy the documented
-example once, edit it, then run:
+Every option lives in `batch_repair.toml` beside the script (git-ignored)
+except one command-line flag, `--alpha`. Copy the documented example once,
+edit it, then run:
 
 ```bash
 cp batch_repair.example.toml batch_repair.toml   # first time only; then edit it
 ./fix.sh                                         # = tools/project_python.sh batch_repair.py
+./fix.sh --alpha                                 # alpha-wrap instead of winding reconstruction
 tools/project_python.sh -m unittest tests.tests.test_processor
 tools/project_python.sh -m unittest discover -s tests/tests -t . -q -p 'test_*.py'
 ```
@@ -44,14 +48,39 @@ every tool's own output, step separators and any crash message.
 Steps append to `<output>/batch.log` by default (`log_file`
 overrides it). Run summary/progress also goes to the terminal.
 Each part is rebuilt as a solid by winding-number reconstruction
-(`libs/winding.py`; alpha-wrap stays available but is no longer the default);
-`reconstruct_memory_budget_gb` (default 10) sizes it per part and worker.
-`skip_clean = true` (opt-in, not yet validated) skips repair for an
-already-clean decimated model, or otherwise for its individual clean parts.
+(`libs/winding.py`); `reconstruct_memory_budget_gb` (default 10) sizes it
+per part and worker. `--alpha` rebuilds every part with CGAL alpha-wrap
+instead (CGAL then required); it wraps both sides of a hole wider than
+alpha, so such a model is refused (DESTROYED) where winding repairs it.
+The run's first line, also in `batch.log`, names the reconstruction used.
+`skip_clean = true` (opt-in; sample outputs passed Bambu's recommended
+repair tool, slicing and printing unconfirmed) skips repair for an
+already-clean decimated model, or otherwise for its individual clean parts;
+a part whose only defect is non-manifold edges tries MeshFix alone first.
+`--alpha` turns `skip_clean` off with a warning: the check does not see
+self-intersections, which are what alpha-wrap is used to remove.
+
+To fix individual files where they are, select them in Nemo (Cinnamon's
+file manager), right-click and choose **STL fix** or **STL alpha fix**
+(`--alpha`). Install the two entries once with
+`tools/install_nemo_actions.sh`; the same works from a shell:
+
+```bash
+./fix_files.sh [--alpha] -- "my models/foot.stl" "my models/leg.obj"
+```
+
+Each `foo.stl`/`foo.obj` gets `foo_fixed.stl` beside it, or a marker such as
+`foo_fixed.failed.stl`, replacing earlier results of that file; the model
+log is appended to `foo_fixed.log` and the run logs to `batch.log` and
+`progress.log` in that folder. All other options come from
+`batch_repair.toml`. The work happens in a hidden `.stl-fix-*` folder there,
+which is removed at the end (or by the next run, after a hard kill).
 
 A separate read-only checker predicts base-layer print risks in a Bambu
 Studio 3MF (`tools/project_python.sh check_3mf.py plate.3mf [--png DIR]`);
-see [modules](docs/refactor/modules.md#print-risk-check-separate-from-repair).
+`support_3mf.py plate.3mf` writes `plate.supported.3mf` with thin breakaway
+ribs under undersides the slicer cannot support; see
+[modules](docs/refactor/modules.md#print-risk-check-separate-from-repair).
 
 The batch runner exists and has real smoke coverage. Open review items and
 structural changes remain in TODO. A passing topology scan does not prove

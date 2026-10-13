@@ -5,9 +5,10 @@ from __future__ import annotations
 import contextlib
 import math
 import os
+import re
 import struct
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 import numpy as np
@@ -20,6 +21,19 @@ HEADER_BYTES = 84
 
 #: How much of the file `kind()` reads to tell ASCII from binary.
 _SNIFF_BYTES = 256
+
+#: An ASCII facet's first keywords, any whitespace between them (owner,
+#: 2026-10-06) — the `textmesh` parser accepts the same.
+_FACET_NORMAL = re.compile(rb'facet\s+normal')
+
+#: Triangles `load` reads per chunk: a 51 KB buffer (owner, 2026-10-05).
+#: The chunks replace one whole-file read, an allocation of 50 B/triangle
+#: that only held bytes on their way to the coordinate array.
+CHUNK_TRIANGLES = 1024
+
+#: One binary STL triangle record, little-endian and unaligned (50 bytes).
+_RECORD = np.dtype([('normal', '<f4', 3), ('corners', '<f4', 9), ('attribute', '<u2')])
+assert _RECORD.itemsize == BYTES_PER_TRIANGLE
 
 
 class Kind(Enum):
@@ -41,10 +55,34 @@ class Geometry:
     real models).  Recovering that sharing is what `load` does, and it is a
     precondition of edge-based algorithms rather than an optimisation: quadric
     edge collapse works on edges, so it must know which faces meet where.
+
+    Vertices are float64 and faces int64, checked on construction (owner,
+    2026-10-04): every library we call takes float64 vertices (PyMeshLab,
+    libigl, pymeshfix) and libigl takes int64 faces, so a mesh is handed to
+    each without a converted copy and its results come back unrounded. STL is
+    float32 only at the edges: `load` welds on the float32 bits and converts
+    the welded table once; `write` rounds once.
     """
 
-    verts: np.ndarray                 # (n_verts, 3) float32
+    verts: np.ndarray                 # (n_verts, 3) float64
     faces: np.ndarray                 # (n_faces, 3) int64, indices into verts
+
+    def __post_init__(self):
+        # A dtype check only, no copy: a producer that forgets the dtype fails
+        # here instead of putting the per-library casts back.
+        if self.verts.dtype != np.float64:
+            raise TypeError(f"Geometry.verts must be float64, not {self.verts.dtype}")
+        if self.faces.dtype != np.int64:
+            raise TypeError(f"Geometry.faces must be int64, not {self.faces.dtype}")
+
+
+@dataclass(frozen=True)
+class LoadDrops:
+    """Triangles `load` removed from a binary STL, by reason. Informational:
+    the holes they leave are found by the scanner like any other."""
+
+    nonfinite: int                    # a NaN or infinite coordinate
+    degenerate: int                   # finite, two corners equal (after -0.0 -> 0.0)
 
 
 @dataclass(frozen=True)
@@ -63,6 +101,14 @@ class Mesh:
     is_valid    False when the file cannot be read as what it claims to be
     problem     why, when is_valid is False; None otherwise
     geometry    the welded mesh, once `load` has been called; None before that
+    load_drops  what `load` removed reading this mesh's STL (`LoadDrops`);
+                None when no STL load produced it (a probe, a PLY read).
+                Kept by `with_geometry`/`with_destination`; read once, for
+                the job's step note
+    malformed   True when intake conversion found the source's content
+                malformed (`textmesh.Malformed`): the batch run writes its
+                FAILED marker (owner, 2026-10-06). Only an invalid mesh can
+                be malformed; construction raises otherwise
 
     Frozen, and every operation returns a new one.  `load` does not fill in
     geometry on the mesh you hand it — it gives you back a second mesh that has
@@ -78,6 +124,12 @@ class Mesh:
     is_valid: bool
     problem: str | None = None
     geometry: Geometry | None = None
+    load_drops: LoadDrops | None = None
+    malformed: bool = False
+
+    def __post_init__(self):
+        if self.malformed and self.is_valid:
+            raise ValueError(f"{self.path}: a malformed mesh cannot be valid")
 
     @property
     def needs_conversion(self) -> bool:
@@ -98,8 +150,7 @@ class Mesh:
         is taken from the faces rather than carried over, because the whole
         point of those steps is that it changed.
         """
-        return Mesh(self.path, self.destination, self.kind,
-                    len(geometry.faces), self.is_valid, self.problem, geometry)
+        return replace(self, triangles=len(geometry.faces), geometry=geometry)
 
 
     def with_destination(self, destination: str) -> Mesh:
@@ -111,8 +162,7 @@ class Mesh:
         needs its own destination or their markers collide.  This is how a
         part gets one.
         """
-        return Mesh(self.path, destination, self.kind, self.triangles,
-                    self.is_valid, self.problem, self.geometry)
+        return replace(self, destination=destination)
 
 
 def require_geometry(mesh: Mesh) -> None:
@@ -147,7 +197,7 @@ def kind(path: str) -> Kind:
         return Kind.UNKNOWN
 
     looks_ascii = (head.lstrip()[:5].lower() == b'solid'
-                   and b'facet normal' in head.lower())
+                   and _FACET_NORMAL.search(head.lower()) is not None)
     if not looks_ascii:
         return Kind.BINARY_STL
     if len(head) >= HEADER_BYTES:
@@ -221,7 +271,7 @@ def probe(path: str, destination: str) -> Mesh:
         if empty:
             return Mesh(path, destination, file_kind, None, False,
                         "OBJ file is empty")
-        # No count without parsing; Blender validates at import.
+        # No count without parsing; `textmesh` validates while converting.
         return Mesh(path, destination, file_kind, None, True)
 
     if file_kind is Kind.ASCII_STL:
@@ -236,11 +286,55 @@ def probe(path: str, destination: str) -> Mesh:
     return Mesh(path, destination, file_kind, count, True)
 
 
-def load(mesh: Mesh) -> Mesh:
+def _read_fully(f, view: memoryview) -> int:
+    """Fill `view` from `f`; the bytes read, fewer only at end of file.
+    `readinto` may return less than asked before the end, so loop."""
+    got = 0
+    while got < len(view):
+        n = f.readinto(view[got:])
+        if not n:
+            break
+        got += n
+    return got
+
+
+def filter_triangles(corners: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """One chunk's kept triangles from its (n, 9) float32 corner view:
+    contiguous, -0.0 folded to 0.0. Also returns how many were dropped for a
+    NaN/inf coordinate and how many (finite) for coincident corners.
+
+    The one drop rule for STL triangles: `load` applies it to binary STL and
+    `textmesh` to the text formats it converts."""
+    # One contiguous copy that also folds -0.0 to 0.0: adding 0.0 leaves
+    # every other value, NaN and infinity included, untouched. The fold comes
+    # before the coincidence test because -0.0 and 0.0 differ in bits.
+    tri = corners + np.float32(0.0)
+    finite = np.isfinite(tri).all(axis=1)
+    # Equal bits == equal values here (no NaN survives `finite`), and equal
+    # corners are exactly what the weld would turn into a repeated index.
+    c = tri.view(np.uint32).reshape(-1, 3, 3)
+    coincident = ((c[:, 0] == c[:, 1]).all(axis=1) | (c[:, 1] == c[:, 2]).all(axis=1)
+                  | (c[:, 0] == c[:, 2]).all(axis=1))
+    nonfinite = len(tri) - int(finite.sum())
+    degenerate = int((finite & coincident).sum())
+    if nonfinite + degenerate == 0:
+        return tri, 0, 0
+    return tri[finite & ~coincident], nonfinite, degenerate
+
+
+def load(mesh: Mesh, *, chunk_triangles: int = CHUNK_TRIANGLES) -> Mesh:
     """Weld `mesh` into memory and return a **new** Mesh carrying it.
 
     Only binary STL can be loaded; anything else must be converted first, and
     asking is a programming error rather than a data problem, so it raises.
+
+    The file is read `chunk_triangles` records at a time into one reused
+    buffer and filtered as it arrives, so only the kept coordinates
+    (36 B/triangle) accumulate; the file's bytes are never held whole. That
+    whole-file read was an allocation with no purpose (owner, 2026-10-05),
+    though not the load's peak: the weld's sort over all corners is, and
+    chunking leaves it as it was. `chunk_triangles` is a parameter so tests
+    can force chunk boundaries on small fixtures.
 
     The sort is done on the raw coordinate *bits* viewed as three uint32
     columns rather than on float rows.  Identical float32 values have identical
@@ -251,6 +345,21 @@ def load(mesh: Mesh) -> Mesh:
     Negative zero is normalised first: -0.0 and 0.0 compare equal as floats but
     have different bits, so without this a shared vertex would split in two and
     leave a crack that quadric edge collapse cannot close.
+
+    Two kinds of triangle are dropped, not the file (owner, 2026-10-05:
+    garbage in, garbage out), and counted in the result's `load_drops`:
+    - a NaN or infinite coordinate: such a vertex has no position to
+      recover; dropping its triangles leaves a hole the repair rebuilds;
+    - coincident corners (two corners with equal bits after the -0.0 fold):
+      exactly the triangles the weld would turn into a repeated index
+      (`[a, a, b]`), which segfaults PyMeshLab's array path. Zero area, so
+      no hole. `meshlab.to_mesh` still drops those faces for meshes that
+      arrive other ways. Zero-area triangles with three distinct corners
+      are kept.
+    A triangle with both counts as non-finite. The returned `triangles` is
+    the kept count; kept triangles keep their order and winding. A file with
+    no kept triangle is invalid, with `load_drops` saying why. Stored normals
+    are not checked.
     """
     if mesh.kind is not Kind.BINARY_STL:
         raise ValueError(
@@ -262,49 +371,56 @@ def load(mesh: Mesh) -> Mesh:
         return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
                     problem)
 
+    def invalid(reason: str, drops: LoadDrops | None = None) -> Mesh:
+        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
+                    reason, None, drops)
+
+    # Drop bad triangles here, where the coordinates first become numbers.
+    # Nothing downstream copes with NaN: a NaN mesh scans as open=0, nm=0
+    # and produces a NaN volume, every comparison that guards the pipeline
+    # is `<` (False against NaN), and `cKDTree` raises from outside the
+    # repair sequence's own error handling.
+    coords = np.empty((count, 9), dtype=np.float32)
+    kept = nonfinite = degenerate = 0
+    try:
+        with open(mesh.path, 'rb') as f:
+            f.seek(HEADER_BYTES)
+            buffer = bytearray(min(count, chunk_triangles) * BYTES_PER_TRIANGLE)
+            done = 0
+            while done < count:
+                n = min(chunk_triangles, count - done)
+                got = _read_fully(f, memoryview(buffer)[:n * BYTES_PER_TRIANGLE])
+                if got < n * BYTES_PER_TRIANGLE:
+                    return invalid(
+                        f"short read: expected {count * BYTES_PER_TRIANGLE:,} "
+                        f"bytes, got {done * BYTES_PER_TRIANGLE + got:,}")
+                good, bad_nonfinite, bad_degenerate = filter_triangles(
+                    np.frombuffer(buffer, dtype=_RECORD, count=n)['corners'])
+                coords[kept:kept + len(good)] = good
+                kept += len(good)
+                nonfinite += bad_nonfinite
+                degenerate += bad_degenerate
+                done += n
+            del buffer, good
+    except OSError as exc:
+        return invalid(f"{type(exc).__name__}: {exc}")
+    drops = LoadDrops(nonfinite, degenerate)
+    if kept == 0:
+        return invalid("no finite triangles: every triangle has a NaN or "
+                       "infinite coordinate" if nonfinite == count else
+                       "no non-degenerate triangles: every finite triangle "
+                       "has two coincident corners", drops)
+    if kept < count:
+        # Release the unused tail in place (realloc), not by copying the kept
+        # rows: one dropped triangle would otherwise copy the whole array.
+        # No view of `coords` exists here (the chunk arrays are gone), which
+        # is what `refcheck` would verify.
+        coords.resize((kept, 9), refcheck=False)
+
     # Each intermediate is released the moment it is no longer needed.  On a
     # 7M-triangle mesh holding them all to the end peaks at 1000 MB against
     # 667 MB when freed eagerly — and that mesh was OOM-killed at 2.5 GB once
     # the decimator's own structures were added on top.
-    try:
-        with open(mesh.path, 'rb') as f:
-            f.seek(HEADER_BYTES)
-            raw = np.frombuffer(f.read(count * BYTES_PER_TRIANGLE),
-                                dtype=np.uint8)
-    except OSError as exc:
-        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
-                    f"{type(exc).__name__}: {exc}")
-    if len(raw) < count * BYTES_PER_TRIANGLE:
-        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
-                    f"short read: expected {count * BYTES_PER_TRIANGLE:,} "
-                    f"bytes, got {len(raw):,}")
-    raw = raw.reshape(count, BYTES_PER_TRIANGLE)
-
-    # Bytes 12:48 of each record are the three vertices (9 float32).
-    #
-    # `.copy()`, not `ascontiguousarray`: the buffer from `frombuffer` is
-    # read-only, and when the slice is already contiguous — which it is for a
-    # single-triangle mesh — `ascontiguousarray` returns that read-only view
-    # unchanged, and the -0.0 fold below then fails on it.  A mesh small enough
-    # to hit that is a degenerate-face test case, not a model, so the bug would
-    # have surfaced only on the strangest input.
-    coords = raw[:, 12:48].copy().reshape(-1, 12)
-    del raw
-    fview = coords.view(np.float32).reshape(-1, 3)
-    # Refuse NaN and infinity here, where the coordinates first become numbers.
-    # Nothing downstream can catch them: a NaN mesh scans as open=0, nm=0 and
-    # produces a NaN volume, and every comparison that guards the pipeline is
-    # `<` — which is False against NaN, so each one reports that all is well.
-    # The same input also reaches `cKDTree`, which raises from outside the
-    # repair sequence's own error handling.  There is no repair for a vertex
-    # that is not a position, so this is input validation, not a judgement.
-    if not np.isfinite(fview).all():
-        return Mesh(mesh.path, mesh.destination, mesh.kind, None, False,
-                    "not finite: the file contains NaN or infinite coordinates")
-    # Fold -0.0 to 0.0 in place; adding 0.0 leaves every other value untouched.
-    np.add(fview, np.float32(0.0), out=fview)
-    del fview
-
     bits = coords.view(np.uint32).reshape(-1, 3)
     order = np.lexsort((bits[:, 2], bits[:, 1], bits[:, 0]))
     srt = bits[order]
@@ -315,10 +431,13 @@ def load(mesh: Mesh) -> Mesh:
     inv = np.empty(len(srt), dtype=np.int64)
     inv[order] = ids
     del order, ids
-    verts = srt[new].view(np.float32).reshape(-1, 3).copy()
+    # Welded on the float32 bits, then converted once: float64 holds every
+    # float32 exactly, so `write` gives back the file's coordinates bit for bit.
+    verts = srt[new].view(np.float32).reshape(-1, 3).astype(np.float64)
     del srt, new, bits, coords
 
-    return mesh.with_geometry(Geometry(verts, inv.reshape(count, 3)))
+    return replace(mesh.with_geometry(Geometry(verts, inv.reshape(kept, 3))),
+                   load_drops=drops)
 
 
 @contextlib.contextmanager
@@ -361,18 +480,14 @@ def staged_write(path: str):
         raise
 
 
-def write(mesh: Mesh) -> None:
-    """Write loaded geometry as binary STL to `mesh.destination`.
+def stl_records(tv: np.ndarray) -> np.ndarray:
+    """Binary STL records, (n, 50) uint8, for float32 corners `tv` (n, 3, 3).
 
-    There is no path override: output and marker names must agree. Face normals
-    are computed from winding; degenerate faces receive zero normals.
+    Normals come from the winding; degenerate faces get zero normals. The
+    caller makes sure the corners are finite (`write` checks, `textmesh`
+    filters).
     """
-    require_geometry(mesh)
-    path = mesh.destination
-
-    verts, faces = mesh.geometry.verts, mesh.geometry.faces
-    n = len(faces)
-    tv = verts[faces].astype(np.float32)               # (n, 3, 3)
+    n = len(tv)
     nrm = np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0])
     ln = np.linalg.norm(nrm, axis=1)
     # Degenerate faces have no normal to speak of; leave those zeroed rather
@@ -383,7 +498,29 @@ def write(mesh: Mesh) -> None:
 
     buf = np.zeros((n, BYTES_PER_TRIANGLE), dtype=np.uint8)
     buf[:, 0:12] = nrm.astype(np.float32).view(np.uint8)
-    buf[:, 12:48] = tv.reshape(n, 9).view(np.uint8)
+    buf[:, 12:48] = np.ascontiguousarray(tv).reshape(n, 9).view(np.uint8)
+    return buf
+
+
+def write(mesh: Mesh) -> None:
+    """Write loaded geometry as binary STL to `mesh.destination`.
+
+    There is no path override: output and marker names must agree. Face normals
+    are computed from winding; degenerate faces receive zero normals.
+
+    A coordinate finite in float64 but beyond float32's range would become
+    infinite here, so it raises ValueError before anything is written.
+    """
+    require_geometry(mesh)
+    path = mesh.destination
+
+    verts, faces = mesh.geometry.verts, mesh.geometry.faces
+    n = len(faces)
+    with np.errstate(over='ignore'):
+        tv = verts[faces].astype(np.float32)           # (n, 3, 3); the one rounding
+    if not np.isfinite(tv).all():
+        raise ValueError(f"{path}: vertex coordinates are not finite in float32")
+    buf = stl_records(tv)
 
     with staged_write(path) as staged:
         with open(staged, 'wb') as f:
@@ -394,42 +531,51 @@ def write(mesh: Mesh) -> None:
             os.fsync(f.fileno())
 
 
-#: The PLY header this module writes, and the only dialect `read_ply` accepts.
+#: The PLY layouts this module writes and the only two `read_ply` accepts.
 #:
-#: Deliberately bare: `x, y, z` as float32 and a face list of uint32, nothing
-#: else.  No normals — `write` derives STL's from the winding, so they carry no
-#: information (measured: Blender's old normal vote reported "agree: 801,
-#: disagree: 0") — and no colour, UVs or custom properties.
+#: Deliberately bare: `x, y, z` and a triangle list, nothing else. No normals —
+#: `write` derives STL's from the winding, so they carry no information
+#: (measured with the retired Blender repair: its normal vote reported
+#: "agree: 801, disagree: 0") —
+#: and no colour, UVs or custom properties.
 #:
-#: **This is not a general PLY reader and must not become one.**  It reads back
-#: what Blender's `wm.ply_export` writes at this one boundary, and that is a
-#: two-party agreement, not a format.  Supporting arbitrary dialects — ASCII,
-#: big-endian, double precision, per-vertex colour, variable property order —
-#: is the parsing burden the original PLY discussion explicitly ruled out of
-#: scope.  A file that does not match raises.
+#:   float32  `property float` x, y, z (extra float properties tolerated)
+#:            and `list uchar uint` faces — what Blender's `wm.ply_export`
+#:            wrote back. Blender is retired (2026-10-06): nothing produces
+#:            this layout now; kept as a narrow, tested reader.
+#:   float64  exactly `property double` x, y, z, faces `list uchar int` or
+#:            `list uchar uint` — what PyMeshLab's `save_current_mesh` writes
+#:            with every extra turned off (VCG holds coordinates as float64),
+#:            and `write_ply` writes.
+#:
+#: **This is not a general PLY reader and must not become one** (owner,
+#: 2026-10-05: narrow is enough). Two fixed agreements, not a format: ASCII,
+#: big-endian, other scalar types, colour or variable property order raise.
 _PLY_MAGIC = b'ply\n'
-_PLY_HEADER_END = b'end_header\n'
+_PLY_HEADER_END = b'\nend_header\n'
+_PLY_FACE_RECORD = 13                       # uchar count + three 4-byte indices
 
 
 def write_ply(mesh: Mesh, path: str) -> None:
-    """Write a narrow binary little-endian PLY for Blender scratch work.
+    """Write a narrow binary little-endian PLY.
 
-    Unlike deliverable STL, PLY preserves the welded vertex table across the
-    subprocess boundary. `path` is explicit because this is a temporary file,
-    not `mesh.destination`.
+    Unlike deliverable STL, PLY preserves the welded vertex table across a
+    boundary (the decimation cache). Coordinates are
+    written as `double`, `Geometry`'s float64, never cast down. `path` is
+    explicit because this is a temporary file, not `mesh.destination`.
     """
     require_geometry(mesh)
 
-    verts = np.ascontiguousarray(mesh.geometry.verts, dtype=np.float32)
+    verts = np.ascontiguousarray(mesh.geometry.verts, dtype='<f8')
     faces = np.ascontiguousarray(mesh.geometry.faces, dtype=np.uint32)
 
     header = (
         "ply\n"
         "format binary_little_endian 1.0\n"
         f"element vertex {len(verts)}\n"
-        "property float x\n"
-        "property float y\n"
-        "property float z\n"
+        "property double x\n"
+        "property double y\n"
+        "property double z\n"
         f"element face {len(faces)}\n"
         "property list uchar uint vertex_indices\n"
         "end_header\n"
@@ -449,77 +595,123 @@ def write_ply(mesh: Mesh, path: str) -> None:
         f.write(records.tobytes())
 
 
-def read_ply(path: str, mesh: Mesh) -> Mesh:
-    """Read Blender's binary PLY and attach its geometry to `mesh`.
+@dataclass(frozen=True)
+class _PlyLayout:
+    """What `_ply_layout` read from a header: where the body starts and how
+    to read it."""
+    body: int                # offset of the first body byte
+    n_verts: int
+    n_faces: int
+    coord: str               # '<f4' or '<f8'
+    width: int               # vertex properties per vertex
+    index: str               # '<u4' or '<i4'
 
-    The vertex table is preserved, so no welding is needed. Reject other PLY
-    dialects instead of guessing inside a repair round trip.
+
+def _ply_layout(data: bytes, path: str) -> _PlyLayout:
+    """Parse and check a PLY header against the two accepted layouts (see
+    the module note above `write_ply`); raise ValueError on anything else."""
+    if not data.startswith(_PLY_MAGIC):
+        raise ValueError(f"{path} is not a PLY file")
+    # `end_header` must be a whole line: a comment may contain the words.
+    stop = data.find(_PLY_HEADER_END)
+    if stop < 0:
+        raise ValueError(f"{path} has no PLY header terminator")
+    body = stop + len(_PLY_HEADER_END)
+    lines = data[len(_PLY_MAGIC):stop].decode('ascii', 'replace').split('\n')
+
+    seen_format = False
+    elements: list[tuple[str, int, list[list[str]]]] = []
+    for line in lines:
+        words = line.split()
+        if not words or words[0] in ('comment', 'obj_info'):
+            continue
+        if words[0] == 'format':
+            if seen_format or elements:
+                raise ValueError(f"{path}: misplaced or repeated PLY format line")
+            if words[1:] != ['binary_little_endian', '1.0']:
+                raise ValueError(
+                    f"{path} is not binary little-endian PLY — this reader "
+                    f"handles only the two layouts write_ply documents")
+            seen_format = True
+        elif words[0] == 'element':
+            if not seen_format:
+                raise ValueError(f"{path}: PLY element before the format line")
+            if len(words) != 3 or not words[2].isdigit():
+                raise ValueError(f"{path}: bad PLY element line {line!r}")
+            elements.append((words[1], int(words[2]), []))
+        elif words[0] == 'property':
+            if not elements:
+                raise ValueError(f"{path}: PLY property before any element")
+            elements[-1][2].append(words[1:])
+        else:
+            raise ValueError(f"{path}: unexpected PLY header line {line!r}")
+    if [name for name, _, _ in elements] != ['vertex', 'face']:
+        raise ValueError(
+            f"{path} must declare exactly a vertex then a face element, "
+            f"not {[name for name, _, _ in elements]}")
+    (_, n_verts, vprops), (_, n_faces, fprops) = elements
+
+    if vprops and all(len(p) == 2 and p[0] == 'float' for p in vprops) \
+            and [p[1] for p in vprops[:3]] == ['x', 'y', 'z']:
+        coord, index_types = '<f4', ('uint',)
+    elif vprops == [['double', 'x'], ['double', 'y'], ['double', 'z']]:
+        coord, index_types = '<f8', ('uint', 'int')
+    else:
+        raise ValueError(
+            f"{path} vertex properties {vprops} match neither accepted "
+            f"layout (float x, y, z [+ float extras], or double x, y, z)")
+    face = fprops[0] if len(fprops) == 1 else []
+    if len(face) != 4 or face[:2] != ['list', 'uchar'] or face[2] not in index_types \
+            or face[3] != 'vertex_indices':
+        raise ValueError(f"{path} face properties {fprops} are not accepted "
+                         f"with {'double' if coord == '<f8' else 'float'} vertices")
+    width = len(vprops)
+    expected = body + n_verts * width * int(coord[-1]) + n_faces * _PLY_FACE_RECORD
+    if len(data) != expected:
+        raise ValueError(f"{path} is {len(data):,} bytes; its header declares "
+                         f"{expected:,} (truncated or trailing data)")
+    return _PlyLayout(body, n_verts, n_faces, coord, width,
+                      '<u4' if face[2] == 'uint' else '<i4')
+
+
+def read_ply(path: str, mesh: Mesh) -> Mesh:
+    """Read a PLY in one of the two accepted layouts and attach its geometry
+    to `mesh`.
+
+    The vertex table is preserved, so no welding is needed. Anything outside
+    the two layouts raises ValueError instead of being guessed at. Double
+    coordinates are kept exactly; float coordinates are widened to float64,
+    `Geometry`'s type.
     """
     with open(path, 'rb') as f:
         data = f.read()
+    layout = _ply_layout(data, path)
 
-    if not data.startswith(_PLY_MAGIC):
-        raise ValueError(f"{path} is not a PLY file")
-    end = data.find(_PLY_HEADER_END)
-    if end < 0:
-        raise ValueError(f"{path} has no PLY header terminator")
-    end += len(_PLY_HEADER_END)
-    header = data[:end].decode('ascii', 'replace').splitlines()
+    block = np.frombuffer(data, dtype=layout.coord, count=layout.n_verts * layout.width,
+                          offset=layout.body)
+    coords = block.reshape(layout.n_verts, layout.width)[:, :3]
+    # `load` guards the file entrance; this is the other one. A NaN arriving
+    # in a PLY reaches `repairer._count_lost`, whose cKDTree raises from
+    # outside the repair sequence's own error handling, so the failure escapes
+    # as a crash instead of a failed result.
+    if not np.isfinite(coords).all():
+        raise ValueError(f"{path} contains NaN or infinite vertex coordinates")
+    verts = np.ascontiguousarray(coords, dtype=np.float64)
 
-    if 'format binary_little_endian 1.0' not in header:
-        raise ValueError(
-            f"{path} is not binary little-endian PLY — this reader handles "
-            f"only what write_ply and Blender's exporter produce")
-
-    n_verts = n_faces = None
-    element = None
-    vertex_properties = []
-    for line in header:
-        if line.startswith('element vertex '):
-            element, n_verts = 'vertex', int(line.split()[-1])
-        elif line.startswith('element face '):
-            element, n_faces = 'face', int(line.split()[-1])
-        elif line.startswith('property ') and element == 'vertex':
-            vertex_properties.append(line.split()[-1])
-    if n_verts is None or n_faces is None:
-        raise ValueError(f"{path} declares no vertex or face element")
-
-    # Blender writes x, y, z first and may append nx/ny/nz or colour depending
-    # on export flags.  Extra float properties are tolerated and dropped; a
-    # non-float property in the vertex block would change the stride, so it is
-    # rejected rather than silently misread.
-    if vertex_properties[:3] != ['x', 'y', 'z']:
-        raise ValueError(
-            f"{path} vertex properties start with {vertex_properties[:3]}, "
-            f"expected ['x', 'y', 'z']")
-    if any(line.startswith('property ') and not line.startswith('property float')
-           for line in header
-           if ' vertex_indices' not in line and line != 'property list uchar uint vertex_indices'):
-        raise ValueError(f"{path} has a non-float vertex property")
-
-    width = len(vertex_properties)
-    block = np.frombuffer(data, dtype='<f4', count=n_verts * width, offset=end)
-    verts = np.ascontiguousarray(block.reshape(n_verts, width)[:, :3])
-    if not np.isfinite(verts).all():
-        # `load` guards the file entrance; this is the other one.  A NaN
-        # arriving from Blender reaches `repairer._count_lost`, whose cKDTree
-        # raises from outside the repair sequence's own error handling, so the
-        # failure escapes as a crash instead of a failed result.  Raising here
-        # matches this reader's contract: malformed input is a ValueError.
-        raise ValueError(
-            f"{path} contains NaN or infinite vertex coordinates")
-
-    offset = end + n_verts * width * 4
-    records = np.frombuffer(data, dtype=[('n', 'u1'), ('v', '<u4', 3)],
-                            count=n_faces, offset=offset)
-    if n_faces and not np.all(records['n'] == 3):
+    offset = layout.body + layout.n_verts * layout.width * int(layout.coord[-1])
+    records = np.frombuffer(data, dtype=[('n', 'u1'), ('v', layout.index, 3)],
+                            count=layout.n_faces, offset=offset)
+    if layout.n_faces and not np.all(records['n'] == 3):
         raise ValueError(
             f"{path} contains a non-triangular face — this boundary carries "
-            f"triangles only, and Blender triangulates before export")
+            f"triangles only")
+    faces = records['v'].astype(np.int64)
+    if layout.n_faces and (faces.min() < 0 or faces.max() >= layout.n_verts):
+        raise ValueError(f"{path} has face indices outside its {layout.n_verts} vertices")
 
-    return mesh.with_geometry(Geometry(
-        verts.astype(np.float32),
-        np.ascontiguousarray(records['v'], dtype=np.int64)))
+    # A PLY is a new input: whatever an STL load once dropped is not its history.
+    return replace(mesh.with_geometry(Geometry(verts, np.ascontiguousarray(faces))),
+                   load_drops=None)
 
 
 def bounds(path: str) -> tuple[tuple[float, float, float],

@@ -11,7 +11,7 @@ booleans here.
 
 The boolean ENABLE_SPLIT_SHELLS/ENABLE_SPLIT_SEAMS/ENABLE_ALPHA_WRAP flags
 this module used to hold were removed 2026-09-2x as part of the uniform-step
-refactor (docs/refactor/TODO.md's "Uniform-step refactor" section): a step
+refactor (docs/refactor/modules.md's "Contracts" section): a step
 now runs because it is present in the sequence that composes it, and does
 not run because it is absent — no separate switch anywhere. This continues
 the same reasoning as the ENABLE_WELD/CLEAN_FILTERS/etc. removal on
@@ -21,6 +21,7 @@ repairer, we do not need the Boolean flags what enable/disable steps."
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -30,9 +31,10 @@ class StepConfig:
 
     Every mesh step has the signature `(mesh, config: StepConfig | None =
     None) -> (ok, mesh, detail)`. Most steps ignore `config` entirely;
-    decimation reads `faceCount`, alpha wrap reads `whole_model_diag`. Kept
-    to exactly these two fields "for now" (docs/refactor/TODO.md) — add a
-    field here only when a step actually needs it, not speculatively.
+    decimation reads `faceCount`, alpha wrap and winding reconstruction read
+    `whole_model_diag`, winding reconstruction reads
+    `reconstruct_memory_budget_bytes`. Add a field here only when a step
+    actually needs it, not speculatively.
 
     faceCount         target face count for a decimation step; 0 means "no
                       target for this call" (matches `decimator.decimate`'s
@@ -41,19 +43,6 @@ class StepConfig:
                       per `repair()` call after initial decimation and
                       before splitting, then carried unchanged into every
                       part's own `StepConfig` — see `repairer._repair_sequence`.
-    nested_process_group  read by `blender.step_blender_repair` to decide
-                      whether the Blender invocation it launches should get
-                      its own process session. `False` (the default) means
-                      "not nested — safe, this Blender invocation should own
-                      its own process group", matching `blender.Runner`'s own
-                      safe-by-default. `True` means this step is known to run
-                      nested inside another, enclosing `proctree`-managed
-                      process group (e.g. a batch worker), so the Blender it
-                      launches must NOT get its own session — otherwise the
-                      enclosing worker's own group-kill would no longer reach
-                      it. Threaded in from `repairer.repair`/`processor.process`,
-                      ultimately from `batch_repair.py`'s explicit
-                      `--managed-child` marker.
     reconstruct_memory_budget_bytes  per-part memory sizing target for
                       `winding.step_winding_reconstruct`, which picks the
                       fewest grid blocks whose ESTIMATED peak fits it
@@ -65,5 +54,17 @@ class StepConfig:
 
     faceCount: int = 0
     whole_model_diag: float | None = None
-    nested_process_group: bool = False
     reconstruct_memory_budget_bytes: int = 10_000_000_000
+
+
+def alpha_wrap_parameters(whole_model_diag: float) -> tuple[float, float]:
+    """Alpha-wrap's `(alpha, offset)` for a model: `min(diag / 800, 0.15)`
+    and `min(diag / 2000, 0.06)`.
+
+    Here, CGAL-free, so `jobmemory` can size an alpha-wrap job without
+    importing CGAL; `alphawrap.step_alpha_wrap` uses the same recipe.
+    """
+    diagonal = float(whole_model_diag)
+    if not math.isfinite(diagonal) or diagonal <= 0:
+        raise ValueError('whole_diagonal must be finite and positive')
+    return min(diagonal / 800.0, 0.15), min(diagonal / 2000.0, 0.06)

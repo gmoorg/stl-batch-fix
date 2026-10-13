@@ -1,0 +1,531 @@
+# Winding-number reconstruction
+
+Rebuild each part as a solid from a signed-distance field whose sign comes
+from the generalized winding number, then extract the surface with marching
+cubes on one global grid processed in blocks. **Implemented as
+[`libs/winding.py`](../../libs/winding.py) and the default part step since
+2026-10-03**, replacing alpha-wrap (which stays available as an explicit
+entry); contract in [modules](../refactor/modules.md). This page holds the evidence: the
+experiment ([`tools/experiments/wnmc_band.py`](../../tools/experiments/wnmc_band.py)),
+the measurements behind the design, and the memory model's calibration.
+
+Differences from the experiment, in the module: exact distances from one
+`igl.AABB` built per call and reused by every block (the experiment's
+`igl.signed_distance` rebuilt it per block and under-reported distances by
+up to ~0.03 mm); the band is marked from deterministic surface samples
+(rows ≤ h/2 apart across each triangle's height, points ≤ h/2 along its
+longest edge) instead of random ones, so coverage is guaranteed; the far-field
+lattice step is `K = 3` (the experiment's 4 exceeded the band margin); block
+count comes from a memory budget; the output is checked closed, manifold and
+non-degenerate.
+
+## Why
+
+Alpha-wrap's memory and time follow the surface it wraps
+(≈ 1.39 · A / α² output faces, ≈ 1.6–2.0 KB · A / α² peak; see
+[TODO, 2026-09-26 snapshot](../../../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md#runner-and-concurrency); re-measured 2026-10-10 for `--alpha`:
+output and peak also grow with the part's own face count, orchestration.md
+"Job memory"), so one large model can need many GB.
+It cannot be split: wrapping spatial regions separately produced a hollow
+skin (2 % of the volume), because each region holds only an open patch of the
+surface and "which side is inside" is lost by cutting (experiment recorded in
+the same TODO item). This method decides inside/outside from the WHOLE model
+first, so blocks can be processed independently and still form a solid.
+
+## Algorithm
+
+1. **Grid.** Spacing `h` (mm) over the model's bounding box padded by `2h`.
+   Split into `B × B × B` blocks along grid indices; neighbouring blocks
+   share their boundary layer of grid points.
+2. **Surface samples.** Every vertex plus area-proportional random points
+   (≥ 4 per `h²`), converted to their nearest grid index — no surface patch is
+   farther than about `h/2` from a marked cell.
+3. **Band.** Per block: mark the sample cells (from samples within the block
+   grown by `BAND`), dilate by `BAND = 5` cells.
+4. **Field in the band.** Exact signed distance to the original surface,
+   sign from the fast winding number (`igl.signed_distance` with
+   `SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER`). Inside is negative.
+5. **Field elsewhere.** Only the sign matters: winding number on a coarse
+   lattice (every `K = 3`-rd grid point), threshold 0.5; each far point takes
+   the sign of its nearest lattice point, value `±(BAND + 1) · h`. A far point
+   is more than 3.43 cells from the surface and its lattice point at most
+   `K/2 · √3 ≈ 2.6` cells away, so both are on the same side (`winding.K`;
+   K = 4 would allow 3.46 cells, outside that margin).
+6. **Surface.** `igl.marching_cubes` at level 0 per block (grid points
+   ordered x-fastest).
+7. **Weld.** Concatenate blocks and merge vertices that lie on the same grid
+   edge. Marching cubes reports each vertex's edge (`E2V`: the edge's two
+   corner indices); offset by the block's origin, that gives a global edge
+   id, so seam copies merge exactly and vertices on different edges never
+   merge, however close. The id is one int64 key per vertex,
+   `((axis·NX + x)·NY + y)·NZ + z` for the edge's axis and lower corner on
+   the global grid; it orders edges exactly as the former (axis, x, y, z)
+   rows did, so the weld's output did not change (2026-10-06, see "Memory
+   floor"). A grid whose largest key, 3·P − 1 for P grid points, would not
+   fit int64 is refused when the grid is set up. (Until 2026-10-05 vertices were merged by
+   coordinates rounded to `h · 1e-4`, which partially merged near-node
+   clusters into non-manifold edges; see
+   [winding-non-manifold.md](errors/winding-non-manifold.md).)
+
+Seams need no stitching: a vertex on a shared block face is interpolated from
+the same two grid values in both blocks, equal up to float rounding (measured
+≤ 4e-15), and lies on the same grid edge. Marching cubes reads only cells the
+surface crosses, whose corners lie in the band, so the far-field shortcut
+cannot change the output.
+
+## Verified
+
+- Thin-band output is **triangle-for-triangle identical** to computing the
+  exact signed distance at every grid point, on Mirko at 0.5 mm and 0.15 mm.
+- 1 block and 27 blocks give identical output (sphere; Mirko 0.5 mm).
+- Output is closed: 0 open, 0 non-manifold edges in every run.
+- Owner's visual review of Mirko at 0.15 mm (2026-10-03): no visible quality
+  loss against the original.
+- Decimating that output to the original 300,002 faces (one pass reached
+  the target) left 4 non-manifold edges; MeshFix cleaned them (−82 faces,
+  5 s). The pipeline's conditional post-decimation MeshFix covers this.
+  Decimation adds a few such edges to any repaired surface — the owner saw
+  the same with the online repair tool Bambu suggests.
+
+## Measurements
+
+Model `Mirko_BodySFW.stl`: 300,002 faces, already clean, area 23,721 mm²,
+diagonal 155.5 mm, volume 137,077 mm³. Machine: 12 threads, 32 GB; libigl
+uses all threads. Times are reconstruction only unless noted.
+
+| Run | Grid points | Blocks | Time | Peak | Faces out | Original → new (rms / max) |
+|---|---|---|---|---|---|---|
+| Sphere r=20, full field, 0.5 mm | 0.6 M | 1 / 27 | 0.9 / 1.1 s | 140 / 87 MB | 60,152 | 0.012 / 0.018 mm |
+| Mirko, full field, 0.5 mm | 5.0 M | 1 | 12 s | 770 MB | 278,384 | 0.041 / 1.09 mm |
+| Mirko, full field, 0.5 mm | 5.0 M | 27 | 25 s | 275 MB | 278,384 | same |
+| Mirko, full field, 0.15 mm | 171 M | 27 | 324 s incl. checks | 1,617 MB incl. checks | 3,110,482 | 0.010 / 0.41 mm |
+| Mirko, thin band, 0.15 mm | 171 M | 27 | **66 s** | 1,872 MB | 3,110,482 | identical |
+| Mirko, thin band, 0.06 mm | 2.6 G | 216 | 807 s | 7,512 MB | 19,467,152 | not measured |
+| Alpha-wrap, α 0.15 / offset 0.06 | — | — | 175 s | 1,963 MB | 1,460,894 | — |
+
+Volume kept: 99.98 % at 0.5 mm, 99.998 % at 0.15 mm. The 0.5 mm max error is
+detail finer than the grid.
+
+Cost of one million queries against Mirko: exact signed distance 6.6 s,
+unsigned distance alone 7.4 s, winding number alone 1.3 s (sign agreement
+100 %). That ratio is why only the band gets distances.
+
+Per-phase time, thin band:
+
+| Phase | 0.15 mm (27 blocks) | 0.06 mm (216 blocks) | Note |
+|---|---|---|---|
+| exact distance | 29 s | 169 s | the real geometric work; ~6× for 2.5× finer |
+| band mask | 9 s | 250 s | every block scans all surface samples (26 M at 0.06) |
+| far-point lattice | 9 s | 149 s | per-point arithmetic over all far points |
+| winding number | 5 s | 47 s | |
+| grid coordinates | 3 s | 49 s | |
+| marching cubes | 3 s | 42 s | |
+| other | ~8 s | ~101 s | |
+
+An earlier version found far-point lattice indices with `np.unique` over all
+far points: 195 of 255 s at 0.15 mm. Building each block's lattice directly
+removed that with byte-identical output.
+
+## Detailed, broken model: `join_complication.stl` (2026-10-03)
+
+Several models joined into one STL by the owner: 3,799,673 faces, many small
+details, 435 open / 28 non-manifold edges / 7 winding seams, area 18,383 mm²,
+diagonal 123.7 mm, volume 27,406 mm³. Both methods at the alpha-wrap
+settings this model gets (α 0.15, offset 0.06; grid `h` 0.15 mm, 27 blocks),
+then the pipeline's post-steps: decimate to 900,000 (the config default),
+decimate again if above, MeshFix if defects.
+
+| | Winding number + MC | Alpha-wrap |
+|---|---|---|
+| Reconstruction time / peak | 290 s / 3,470 MB | 160 s / 3,585 MB |
+| Faces out, defects | 1,991,844, clean | 1,019,524, clean |
+| After decimation to 900k | 30 NM, 337 self-intersecting triangles | clean |
+| MeshFix | −23,226 faces (2.6 %), 16 s → 876,774, clean | not needed |
+| Volume | 27,416 (+0.04 %) | 28,471 (+3.9 %: offset × area) |
+| Outer-skin vertices > 0.15 mm from final | 4.8 % (3.4 % before decimation) | 10.1 % |
+
+**Owner's visual review:** the winding-number result looks slightly but
+noticeably better; no visible damage in either.
+
+Notes:
+
+- New surface → original: rms 0.003, max 0.066 mm — nothing invented.
+- "Outer skin" = original vertices with winding number < 0.75. The vertices
+  both methods leave behind look like thin layers of faces (owner, viewing
+  the exported point clouds): internal sheets of the joined, open shells, not
+  visible detail. Only 69 of 1.84 M were kept by alpha-wrap but not by this
+  method — it does not lose thin parts alpha-wrap keeps.
+- Distance queries against a 3.8 M-face input dominate the time (199 of
+  290 s), which makes this method slower than alpha-wrap here.
+- Marching-cubes triangles decimate less cleanly than alpha-wrap's; MeshFix
+  repairs it. Remeshing before decimation is untested.
+- Alpha-wrap peaked at 3.6 GB against 1.5 GB predicted from area alone: the
+  formula in TODO predicts output faces well (1.1 M vs 1.02 M) but needs a
+  term for the input's own size.
+
+## Block count (join_complication, 0.15 mm, 2026-10-03)
+
+Same model and settings as above; only the block count changes. Post =
+decimate to 900k, decimate again, MeshFix (separate process).
+
+| Blocks | Reconstruction | Recon peak | Post | Post peak | NM after decimation | MeshFix removed | Final faces |
+|---|---|---|---|---|---|---|---|
+| 1 | **55.5 s** | 10,654 MB | 25.3 s | 1,311 MB | 39 | 23,312 | 876,688 |
+| 8 | 127.5 s | 4,004 MB | 24.1 s | 1,286 MB | 34 | 23,260 | 876,740 |
+| 27 | 290 s | 3,470 MB | — | — | 30 | 23,226 | 876,774 |
+| 729 | 3,831 s (64 min) | 3,553 MB | 21.7 s | 1,301 MB | 30 | 23,228 | 876,772 |
+
+- Reconstruction output: 1,991,844 faces for every block count.
+- Time grows with block count because each block rebuilds the libraries'
+  search structures over the whole 3.8 M-face input (distance 26.7 s at 1
+  block, 1,994 s at 729; winding 2.7 s → 1,562 s), mostly single-threaded
+  (~3.5 of 12 threads busy at 729).
+- Memory falls from 10.7 GB (1 block) to ~3.5 GB and then stays: the output
+  held until the final weld and the surface samples set the floor.
+- Final face counts differ by up to 84 faces: block count changes triangle
+  order, and decimation depends on order. Visual difference not yet checked.
+- The post timings of 1 and 8 blocks ran while the 729-block run was using
+  ~3.5 threads, so they are slightly inflated.
+
+## Module memory model (calibration, 2026-10-03)
+
+`estimate_bytes = BASE + 800·faces_in + 10·samples_bound + 600·A/h² + 65·block_points`
+(+ a small padded-mask term). Fitted by least squares to the runs below
+(~100 MB + 710·faces + ~0·samples + 510·A/h² + 55·points), then each constant
+raised ~20 %. Peak is the reconstruction process's own maximum RSS. An
+empirical sizing estimate on these inputs, not a proven bound.
+
+| Model | Blocks | Faces in | A/h² | Block points | Time | Peak | Estimate |
+|---|---|---|---|---|---|---|---|
+| sphere r=20, h 0.5 | 1 | 5,120 | 20 k | 0.6 M | 0.5 s | 126 MB | 359 MB |
+| cube 100 mm (12 triangles), h 0.15 | 27 | 12 | 2.67 M | 11.4 M | 56.5 s | 1,986 MB | 2,854 MB |
+| Mirko, h 0.15 | 1 | 300,002 | 1.05 M | 171 M | 48.1 s | 9,996 MB | 12,456 MB |
+| Mirko, h 0.15 | 8 | | | 21.6 M | 48.0 s | 1,631 MB | 2,718 MB |
+| Mirko, h 0.15 | 27 | | | 6.4 M | 53.2 s | 1,141 MB | 1,731 MB |
+| join_complication, h 0.15 | 1 | 3,799,673 | 0.82 M | 107 M | 50.8 s | 7,773 MB | 11,097 MB |
+| join_complication, h 0.15 | 8 | | | 13.6 M | 79.0 s | 3,141 MB | 4,999 MB |
+| join_complication, h 0.15 | 27 | | | 4.0 M | 148.3 s | 3,215 MB | 4,380 MB |
+
+Re-check after adding part orientation (`bfs_orient` + `orient_outward`) and
+the half-cell grid offset (2026-10-03): Mirko 1 block 55.1 s / 10,051 MB
+(estimate 13,067); join_complication 1 block 63.7 s / 7,910 MB (11,486),
+8 blocks 96.1 s / 3,242 MB (5,049). Orientation adds ~7–17 s on these inputs;
+every estimate still exceeds the measured peak (≥ 1.30×).
+
+Block count barely changes time on a 300 k-face input (the distance tree is
+built once) but still does on a 3.8 M-face one: the mesh winding-number
+octree is rebuilt per block (~2–3 s each there). A 100 mm cube in ONE block
+(300 M grid points) was stopped at 12 GB and rising — the planner would
+estimate ~24 GB and split it.
+
+## Decimation after reconstruction (2026-10-04)
+
+Found by the end-to-end test (`c_multishell_rod`): post-reconstruction
+decimation with `fast_simplification` destroyed a thin attached rod
+(radius 0.75, sphere r 10, h 0.092) that reconstruction had kept exactly.
+
+Rod part, 840 input faces, rebuilt to 453,220 (tip 0.000, max 0.017):
+
+| Decimation | Faces | Rod tip | p99 | max |
+|---|---|---|---|---|
+| fast_simplification round 1 (any target 840–50,000) | 73,552 | 0.029 | 0.673 | 0.772 |
+| fast_simplification round 2, target 20,000 / 50,000 | 19,998 / 50,000 | 7.833 / 7.972 | 5.45 / 5.57 | 7.87 / 8.01 |
+| fast_simplification `lossless` (target ignored) | 385,142 | 0.000 | 0.004 | 0.017 |
+| PyMeshLab quadric, defaults, target 840 | 840 | 0.002 | 0.035 | 0.109 |
+| PyMeshLab quadric, original vertices kept, target 840 | 840 | 0.004 | 0.055 | 0.174 |
+
+Rebuilt sphere r 10 (442,056 faces): fast_simplification ×2 stalled at
+17,314 faces and went oblong (extent ratio 1.014, max 0.191); PyMeshLab
+defaults reached 760 faces exactly, round (1.000), max 0.089.
+
+Why fast_simplification fails here: every collapse moves the merged vertex
+to the quadric optimum (25.6 % of round-1 vertices were new positions), and
+collapse cost is area-weighted, so a thin low-area feature looks cheap and
+goes first; it plateaus far above extreme targets (500×), and a fresh second
+round restarts the quadrics and collapses the rod. `agg` only changes the
+pace (and its threshold is absolute, so unit-dependent); `preserve_border`
+does nothing on closed meshes; no mode keeps original vertices. Snapping
+vertices back to originals was rejected (folds triangles).
+
+`lossless` removes only zero-error collapses: 0 faces on the composite,
+0 of 300,002 on Mirko, 50 of 3,799,673 on join_complication, 15 % of the
+rebuilt rod — useless as a decimator.
+
+The whole 3-part composite through reconstruction + PyMeshLab (defaults,
+single pass, target = part's face count): 2,360 faces, every part within
+limits by ≥ 5× (max 0.045 / 0.015 / 0.088 vs 0.49 / 0.34 / 0.49), rod tip
+0.002, volume −0.12 %, no MeshFix needed. The same input decimated directly
+(no split, no rebuild) to 1,180 / 590 faces kept all 3 shells and the rod.
+
+Original (pre-reconstruction) models — both decimators accurate:
+
+| Model, target | fast_simplification max (orig→out / out→orig), defects | PyMeshLab max, defects |
+|---|---|---|
+| Mirko (clean, 300 k), 100 k | 0.0145 / 0.0133, clean | 0.0237 / 0.0259, clean |
+| Mirko, 30 k | 0.0430 / 0.0440, clean | 0.0739 / 0.0555, 2 NM |
+| join_complication (3.8 M; open 435, NM 28), 900 k | 0.0137 / 0.0129, open 200 NM 94 | 0.0093 / 0.0087, open 234 NM 26 |
+| join_complication, 300 k | 0.0490 / 0.0304, open 129 NM 101 | 0.0652 / 0.0280, open 148 NM 39 |
+
+Owner reviewed the outputs (rod/sphere at < 1,000 faces, Mirko, join
+complication): PyMeshLab defaults "look good"; Mirko results identical.
+
+**Decision (owner, 2026-10-04): switch both pre- and post-decimation to
+PyMeshLab `meshing_decimation_quadric_edge_collapse` with defaults; the
+post-reconstruction decimation is a single run (no `decimate_again`).**
+Implemented 2026-10-04 (`libs/decimator.py`); outcome tests in
+`test_decimator.TestShapeIsKept` (round sphere, rebuilt rod tip) and the
+`decimation_lost_appendage` regression guard.
+
+## Open
+
+- **Block size** — chosen per part from `reconstruct_memory_budget_gb`
+  (default 10). The per-block winding-number octree rebuild still makes many
+  blocks slow on very large inputs.
+- **Memory floor.** In the module, memory falls with blocks (Mirko 10.0 →
+  1.1 GB) down to a floor. Where that floor sits was measured per phase on
+  2026-10-06 (`tools/experiments/winding_phases.py`: a probed copy of
+  `reconstruct`, VmHWM reset per phase, each run in a fresh process; an
+  unmodified run gave the same peak within 1 %). Peak per phase, GB (phase
+  peaks overlap; they are not additive costs):
+
+  | Model, blocks | Whole run | Block field | Marching cubes | Weld | Final scan |
+  |---|---|---|---|---|---|
+  | join_complication (3.8 M in, 2.0 M out), 2³ | 2.97 | **2.99** | 2.70 | 2.15 | 2.33 |
+  | join_complication, 3³ | 3.01 | **3.05** | 2.44 | 2.39 | 2.57 |
+  | sphere r 60 (5,120 in, 6.0 M out), 2³ | 4.29 | 1.72 | **4.29** | 1.57 | 2.08 |
+  | sphere r 60, 4³ | 1.90 | 0.67 | 1.01 | 1.41 | **1.91** |
+  | sphere r 132 (5,120 in, 29.2 M out), 5³ | 8.66 | 2.58 | 4.42 | 6.14 | **8.67** |
+  | sphere r 132, 8³ | 8.54 | 2.02 | 2.47 | 6.07 | **8.54** |
+
+  (Pre-fix table, kept as the evidence for the scan fix below. Its weld
+  column is overstated: the probed copy then held the vstacked weld inputs
+  alive, which production does not — see the next table.)
+
+  An input-dominated model peaks in the block field; a large output peaked
+  in `_check`'s `scanner.scan`, which runs on the whole result with the
+  block lists still alive. The scan's row-wise `np.unique(axis=0)` added
+  ~197 B and ~3.7 µs per face (29.2 M faces: +5.74 GB, 107 s; winding
+  calls it twice). **Fixed 2026-10-06:** `scanner.scan` now counts one
+  int64 key per edge (low·n + high, n = largest face index + 1), sorted in
+  place: identical counts, +34 B per face (sphere r 132: +0.99 GB, 2.3 s,
+  re-measured on the module itself with `tools/experiments/scan_memory.py`,
+  which also checks agreement against the old row-wise count).
+
+  **After the scan fix** (2026-10-06, HEAD `7f1d263`, h 0.15 mm, decimal
+  GB, each run a fresh process; same output face counts as before). Whole
+  run = `winding.reconstruct` alone, unmodified (`--plain`), the process's
+  peak including loading the input (~0.1–0.2 GB); it excludes `apply`'s
+  second scan and the decimation after it. Phase peaks from the probed
+  copy; the highest phase agrees with the whole run within 1 % in every row.
+
+  | Model, blocks | Whole run | Block field | Marching cubes | Weld (unique / reindex) | Final scan | Time |
+  |---|---|---|---|---|---|---|
+  | join_complication, 2³ | 2.97 | **2.97** | 2.71 | 2.06 / 2.11 | 1.98 | 88 s |
+  | join_complication, 3³ | 3.04 | **3.04** | 2.44 | 2.34 / 2.38 | 2.29 | 159 s |
+  | sphere r 60, 2³ | 4.29 | 1.73 | **4.29** | 1.31 / 1.33 | 1.07 | 67 s |
+  | sphere r 60, 4³ | 1.23 | 0.67 | 1.01 | **1.22** / 1.21 | 0.93 | 68 s |
+  | sphere r 132, 5³ | 5.30 | 2.58 | 4.35 | **5.31** / 5.18 | 3.89 | 530 s |
+  | sphere r 132, 8³ | 5.26 | 2.02 | 2.47 | **5.27** / 5.09 | 3.79 | 566 s |
+
+  The scan is no longer any configuration's peak (sphere r 132: 8.66 →
+  5.30 GB whole run). Where the output dominates, the peak is now the
+  weld's `np.unique(Eo, axis=0)` over the per-vertex edge ids — the same
+  row-wise unique the scan used: on sphere r 132 it rises from 3.37 GB
+  (after the vstack) to 5.31 GB and takes 23 s. An int64 key per edge id,
+  as in the scan, was the measured next lever; done the same day (below,
+  "After the weld keys"). Input-
+  dominated models still peak in the block field (unchanged), and 2³ on a
+  large output peaks in marching cubes (one block's output). The
+  winding-number calls take ~52 of 92 s on join_complication at 2³ (octree
+  rebuilt per call).
+
+  Measurement note: the probed copy first held the vstacked arrays alive
+  through the weld, assuming the caller keeps call arguments referenced.
+  Since Python 3.11 the callee's frame owns them, so `_weld`'s rebinding of
+  `Vo` and `Fo` frees the originals (checked on 3.12; an `*args` wrapper
+  does keep them alive). That overstated the weld by ~0.2–0.9 GB (sphere
+  r 132: 6.15 vs 5.30 GB). Found because the plain peak was below a probed
+  phase; confirmed by sampling RSS from outside the process every 2 ms;
+  fixed in `winding_phases.py`.
+
+  **After the weld keys** (2026-10-06, working tree on HEAD `b7d4d05`,
+  same method; 238 GiB swap is now installed, so every run also checked
+  `/proc/vmstat` `pswpin`/`pswpout` before and after: unchanged, no swap I/O,
+  so VmHWM is the whole peak). `_edge_ids` now returns one int64 key per
+  vertex instead of a 4-column row and `_weld` takes a 1-D `np.unique`.
+  Old = HEAD in a separate worktree, new = the change, each `--plain` in a
+  fresh process; both models' outputs saved and compared: **byte-identical**
+  vertices and faces (dtype, shape, bytes).
+
+  | Model, blocks | Whole run old → new | Time old → new |
+  |---|---|---|
+  | sphere r 132, 5³ | 5.31 → **4.07** | 531 → 506 s |
+  | join_complication, 2³ | 2.98 → 2.94 | 86 → 86 s |
+
+  Probed copy, sphere r 132 5³ (new): block field 2.21, marching cubes
+  3.98, join 2.63, weld unique **3.49** (was 5.31; 1.0 s, was 23 s), weld
+  reindex **4.07**, final scan 3.50. The peak is now the reindex
+  (`Vo[first]`, `inv[Fo]` while the joined arrays are still alive), with one
+  block's marching cubes 2 % below it; the time gain is an observation, the
+  rest of the run is unchanged. join_complication peaks in the block field,
+  which the change does not touch.
+
+  **After the block grid and piece lifetimes** (2026-10-06, working tree on
+  HEAD `6f75e63`, same method and swap check). Two allocations removed,
+  output byte-identical on both models:
+  - Each block's grid coordinates (`_block_points`): the former
+    `np.column_stack([g.ravel('F') for g in np.meshgrid(...)])` peaked at
+    twice its result (one 354³ block: +2.13 GB for a 1.06 GB array,
+    measured alone); filling one (N, 3) array through Fortran-order column
+    views peaks at the result (+1.06 GB). `igl.marching_cubes` itself adds
+    only ~0.16 GB over its inputs on such a block (no copy of the grid).
+  - The per-block pieces (`_take`): `reconstruct` held the vertex, face and
+    edge-key lists until it returned, through the weld and the final scan
+    (~24 B per vertex + 24 B per face + 8 B per vertex). Each list is now
+    emptied as soon as it is joined, the joins are call temporaries that
+    `_weld` owns, and the input, distance tree, surface keys and the last
+    block's output are dropped before the weld.
+
+  | Model, blocks | Whole run old → new | Time old → new |
+  |---|---|---|
+  | sphere r 132, 5³ | 4.07–4.08 (5 runs) → **3.50–3.85** (8 runs, median 3.63) | ~500 → 440–445 s |
+  | join_complication, 2³ | 2.98 → 2.94 | 84 → 83 s |
+
+  Probed copy, sphere r 132 5³, old → new: marching cubes 3.98 → 3.27,
+  join 2.63 → 2.54, weld unique 3.49 → 2.58, weld reindex 4.07 → **3.51**,
+  final scan 3.50 → 2.92. The peak is still the weld's reindex. Six of
+  the eight new whole runs were sampled from outside every 2 ms: each peaks
+  3.6 s before the end (the reindex; 3.50–3.81 GB) and stays at
+  3.26–3.32 GB before the weld. The spread between runs (0.35 GB) is new
+  and lies entirely in the weld: a rerun on 2026-10-07 alternated old and
+  new three times each — old 4.066, 4.067, 4.067 GB (peak in the weld,
+  3.98–3.99 before it), new 3.81, 3.61, 3.70. Its cause was not measured
+  (untested guess: where the allocator places the weld's large arrays
+  after the many freed block pieces). join_complication still peaks in the
+  block field (unchanged).
+
+  **The spread follows glibc malloc's policy** (2026-10-07, HEAD `36b8dd2`,
+  sphere r 132 5³, `tools/experiments/weld_spread.py`: each run a fresh
+  child doing the unmodified `reconstruct` after `winding_phases.prepare`,
+  variants interleaved run by run, VmRSS sampled every 2 ms from outside,
+  swap counters checked — no swap I/O in any run; per-run records in
+  `weld_spread_2026-10-07.jsonl` and `weld_alone_2026-10-07.jsonl`):
+  1. *The weld alone is deterministic.* Its inputs saved from one run
+     (`Vo` 0.35, `Fo` 0.70, keys 0.12 GB; `weld_alone.py save`), then
+     `_weld(np.load(...), ...)` with call temporaries in a fresh process
+     (`weld_alone.py run`), 8 runs each normal, with numpy's huge-page
+     advice off (`NUMPY_MADVISE_HUGEPAGE=0`; THP is `madvise` here and
+     numpy 2.5 advises it) and with ASLR off (`setarch -R`): all 24 peak
+     at 2.6405–2.6411 GB (2.57 above the process's start). So on fixed
+     inputs and a fresh heap neither huge pages nor address layout varies
+     the weld. Not tested: either of them in full runs, where they could
+     interact with the earlier allocation history.
+  2. *Its inputs do not vary.* Three full runs hashed `_weld`'s arguments
+     (dtype, shape, sha256) — the save run and two diagnostic runs:
+     identical; every run's output is identical too.
+  3. *The allocator holds much free memory at the weld.* On entering
+     `_weld` (two diagnostic runs, `mallinfo2` summed over arenas): RSS
+     2.28 / 2.34 GB; mmapped chunks (`hblkhd`) 1.17 GB, consistent with the
+     weld's inputs (1.17 GB) though the count does not identify them; heap
+     free space kept by malloc (`fordblks`) 0.99 / 1.04 GB, 0.02 GB in use.
+     `fordblks` is free space, not resident bytes, but RSS minus the mmapped
+     chunks (~1.1 GB) suggests most of it is resident. The weld alone needs
+     2.57 GB over its start, yet only 0.2–0.5 GB over the 3.3 GB before it
+     in a full run: consistent with it reusing that memory to a degree that
+     differs by run, not shown directly.
+  4. *Fixing malloc's mmap threshold removes the whole-run spread.* By
+     default glibc raises the threshold (up to 32 MB) when it frees an
+     mmapped chunk above it, so later requests below the new threshold can
+     be served from the heap, where freed space is kept; setting
+     `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072` fixes it at
+     128 KiB, and — per glibc's source — also stops the trim threshold's
+     dynamic adjustment, so the intervention changes two policies at once.
+     Whole run, alternating:
+
+     | Round | Normal | mmap_threshold 128 KiB |
+     |---|---|---|
+     | 1 | 3.767 | 3.239 |
+     | 2 | 3.618 | 3.239 |
+     | 3 | 3.812 | 3.239 |
+     | 4 | 3.657 | 3.239 |
+
+     All four fixed-threshold runs peak at 3.239 GB (within 1 MB), below
+     every normal run (3.618–3.812), and their peak moves out of the weld:
+     ~22 s before the end (normal: 3 s, the reindex), so an earlier phase
+     sets it. The run takes ~12 s longer (459–463 vs 447–450 s).
+
+  Conclusion: strong evidence that allocator policy (glibc malloc keeping
+  freed heap memory and reusing it) produces the spread: the weld is
+  deterministic on its own, its inputs do not vary, and one tunable makes
+  four interleaved runs identical. Not established: the specific
+  mechanism (the tunable changes the mmap and trim policies together, and
+  which allocations land in the retained heap was not measured); whether
+  the weld still varies under the tunable (its peak is hidden below an
+  earlier phase; only a probed weld phase would show it); THP or ASLR
+  interacting in full runs; and why the old code (4.07 GB) was steady.
+  Whether to set the tunable for the batch is a production decision (it
+  changes which phase peaks and costs ~12 s here). For judging the
+  reindex change (option b): the whole-run figure under the tunable is
+  stable (3.239 GB, four runs) but would not show (b), as the weld is not
+  its peak; a probed weld phase under the tunable, or the normal runs'
+  range, would. The pilot on sphere r 20 2³ showed a separate 0.03 GB
+  bimodality, outside the weld, that neither THP off, ASLR off, a single
+  malloc arena nor the weld explained; not pursued.
+
+  **The whole child barely gains from a fixed threshold** (2026-10-07,
+  HEAD `b5f393f`, `tools/experiments/malloc_child.py`; records in
+  `malloc_child_2026-10-07.jsonl`). The owner accepted ~12 s per large run
+  if memory is won, and asked to test 4 MiB beside 128 KiB, since a 128 KiB
+  threshold could cost far more in code that allocates and frees
+  128 KiB–32 MB buffers in a loop (PyMeshLab, MeshFix were unmeasured). The
+  real per-file child, as `batch_repair._spawn_child` spawns it (prepare,
+  then repair loading the handoff, each a fresh process, the decimation
+  cache deleted first), `batch_repair.toml` settings (`max_faces` 900,000,
+  `skip_clean`, budget 10 GB) except the sphere (clean, so run with
+  `skip_clean` off to reach reconstruction); variants interleaved and
+  rotated, 2 rounds, peak = `wait4` `ru_maxrss` (the 2 ms sampler agreed).
+  37 of 38 children valid (one sphere run saw 2 pages swapped out
+  system-wide; its retry was valid). Output geometry (prepared PLY and
+  written STL) identical across every variant and round. Repair child,
+  mean of 2 (each pair within 2 MB and 6 s):
+
+  | Model (path covered) | default | mmap_threshold 128 KiB | 4 MiB |
+  |---|---|---|---|
+  | sphere r 132 seg 56, 5³ (winding, 29.2 M faces decimated) | 15.07 GB, 830 s | 15.07 GB, 841 s | 15.07 GB, 838 s |
+  | Laura `base_x.stl`, 2³ (winding, 6.1 M faces decimated) | 3.52 GB, 511 s | 3.41 GB, 535 s | 3.41 GB, 533 s |
+  | Velma `Legs_sfw.stl` (NM fast path: MeshFix on 900 k faces) | 0.95 GB, 74 s | 0.95 GB, 75 s | 0.95 GB, 74 s |
+
+  Prepare children (Velma: 6.5 M → 900 k faces, PyMeshLab, 1.08 GB, 24 s;
+  Laura 0.55 GB, 8 s) did not change in memory or time. Per step, the extra
+  time is almost all in `winding` (sphere +8–11 s, Laura +22–23 s);
+  PyMeshLab decimation (+0.5–1 s of 361 s / 66 s) and MeshFix (+0.3–0.8 s
+  of 56 s) barely moved, so the feared loop cost did not show, and 4 MiB
+  gave the same memory as 128 KiB at 0.4–3 s less. What it gains: Laura
+  −0.11 GB (−3%) for +4–5% time; the sphere nothing, because its child
+  peaks in post-reconstruction decimation (15.07 GB), not in
+  reconstruction (3.24–3.81 GB). No spread showed in any whole child even
+  without the tunable (both default rounds within 1 MB on all three
+  models), so the 3.62–3.81 GB weld spread is hidden under the decimation
+  peak on the sphere. Not covered: MeshFix of the full part sequence (sphere
+  and Laura skipped it, "condition not met"; Velma's part took the
+  accepted NM fast path, so only `nm_meshfix` ran), alpha-wrap (not
+  default).
+  Decision (owner, 2026-10-07): not set — the tests show the flag is
+  unneeded.
+  In the same records the repair child peaks during post-reconstruction
+  decimation on the sphere (peak 568–689 s; `winding` ends ~480 s) and on
+  Laura (~461–466 s; `winding` ends ~445 s, decimation 66 s), so a
+  reindex change (option b, at most 3.51 → 3.27 GB inside reconstruction)
+  would lower neither child's peak. Owner, 2026-10-07: (b) not done.
+- **Band mask cost** — bucket the samples by block once instead of scanning
+  them per block.
+- **Grid spacing** — 0.15 mm matched alpha-wrap's quality on Mirko by eye;
+  0.06 mm yields 65× more faces than the decimation target. Whether 0.06 mm
+  is visible after decimation is untested.
+- **Broken models** — one so far (`join_complication.stl`, above). More are
+  needed: large holes (the 0.5 threshold) and features thinner than `h`.
+- **Speed on large inputs** — distance queries scale with the input's face
+  count; the band could be computed against a decimated copy of the input.
+- **GPU** — the machine has an AMD RX 6700 XT; the ready-made GPU stacks
+  (NVIDIA Warp, Kaolin) need CUDA. Taichi (Vulkan) or PyTorch-ROCm would
+  mean implementing the fast winding number ourselves.

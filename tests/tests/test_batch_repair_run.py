@@ -92,12 +92,13 @@ class TestRunSigint(unittest.TestCase):
             "p.add_argument('--destination', required=True)\n"
             "p.add_argument('--max-faces', required=True)\n"
             "p.add_argument('--result-file', required=True)\n"
-            "p.add_argument('--managed-child', action='store_true')\n"
             "p.add_argument('--reconstruct-budget-bytes')\n"
             "p.add_argument('--min-shell-faces')\n"
+            "p.add_argument('--reconstruction')\n"
             "p.add_argument('--mode', default='repair')\n"
             "p.add_argument('--cache-path')\n"
             "p.add_argument('--load-from')\n"
+            "p.add_argument('--parent-pid')\n"
             'args = p.parse_args()\n'
             "if args.mode == 'prepare':\n"
             "    import json as _json, os as _os\n"
@@ -193,8 +194,10 @@ class TestRunSigint(unittest.TestCase):
         from libs import publication
         (self.root / 'out' / 'a.stl').write_bytes(b'x')
         (self.root / 'out' / 'a.failed.stl').write_bytes(b'y')
-        outcome = batch_repair._reconcile(mesh, frozenset(), 'crashed')
+        outcome = batch_repair._reconcile(mesh, frozenset(), 'crashed',
+                                          detail='killed by SIGSEGV')
         self.assertEqual(outcome['category'], 'write_failure')
+        self.assertIn('after child crashed (killed by SIGSEGV)', outcome['reason'])
         self.assertTrue(outcome['recovered'])
         self.assertIsNone(outcome['indicator'])
 
@@ -214,12 +217,13 @@ class TestRunSigint(unittest.TestCase):
             "p.add_argument('--destination', required=True)\n"
             "p.add_argument('--max-faces', required=True)\n"
             "p.add_argument('--result-file', required=True)\n"
-            "p.add_argument('--managed-child', action='store_true')\n"
             "p.add_argument('--reconstruct-budget-bytes')\n"
             "p.add_argument('--min-shell-faces')\n"
+            "p.add_argument('--reconstruction')\n"
             "p.add_argument('--mode', default='repair')\n"
             "p.add_argument('--cache-path')\n"
             "p.add_argument('--load-from')\n"
+            "p.add_argument('--parent-pid')\n"
             'args = p.parse_args()\n'
             "if args.mode == 'prepare':\n"
             "    import json as _json, os as _os\n"
@@ -250,7 +254,7 @@ class TestRunSigint(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('Diagnostic:', printed)
         self.assertIn(str(mesh.path), printed)
-        self.assertIn('recovered after child crashed', printed)
+        self.assertIn('recovered after child crashed (exit status 137)', printed)
 
 
 class TestCleanGateDispatch(unittest.TestCase):
@@ -269,7 +273,7 @@ class TestCleanGateDispatch(unittest.TestCase):
 
         for flag in (False, True):
             config = replace(_BASE_CONFIG,
-                             output=str(root / 'out'),
+                             input=str(root), output=str(root / 'out'),
                              skip_clean=flag)
 
             captured = []
@@ -286,6 +290,34 @@ class TestCleanGateDispatch(unittest.TestCase):
             with self.subTest(flag=flag):
                 self.assertEqual(len(captured), 1)
                 self.assertEqual(captured[0].get('skip_clean'), flag)
+
+    def test_alpha_turns_the_gate_off_and_warns(self):
+        """`--alpha` exists to remove self-intersections, which the gate
+        does not see: `skip_clean = true` reaches no child, and the run
+        says which gate it disabled; without `skip_clean` nothing is said."""
+        mesh = Mesh(str(self.root / 'a.stl'), str(self.root / 'out' / 'a.stl'),
+                    Kind.BINARY_STL, 10, True)
+        Path(mesh.path).write_bytes(b'source')
+
+        for flag in (True, False):
+            config = replace(_BASE_CONFIG, input=str(self.root),
+                             output=str(self.root / 'out'), skip_clean=flag)
+            captured = []
+
+            def refuse(*a, **kw):
+                captured.append(kw)
+                raise OSError('not launched in this test')
+
+            with mock.patch.object(converter, 'prepare',
+                                   side_effect=lambda *a, **k: (a[2](mesh), converter.Summary())[1]), \
+                 mock.patch.object(batch_repair, '_spawn_child', side_effect=refuse), \
+                 mock.patch('builtins.print') as printed:
+                batch_repair._run(config, 'alpha-wrap')
+            text = ' '.join(str(arg) for call in printed.call_args_list for arg in call.args)
+            with self.subTest(flag=flag):
+                self.assertEqual(len(captured), 1)
+                self.assertFalse(captured[0].get('skip_clean'))
+                self.assertEqual('disables the skip_clean gate' in text, flag)
 
 if __name__ == '__main__':
     unittest.main()

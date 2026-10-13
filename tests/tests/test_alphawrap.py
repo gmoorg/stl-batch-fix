@@ -13,8 +13,15 @@ from unittest import mock
 
 import numpy as np
 
-import libs.alphawrap as alphawrap
-from libs.alphawrap import is_available, wrap
+try:
+    import libs.alphawrap as alphawrap
+except ImportError as exc:
+    # CGAL is optional (alpha-wrap is explicit-use): without it this module
+    # has nothing to test. Any other import error is a real failure.
+    if not (exc.name or '').startswith('CGAL'):
+        raise
+    raise unittest.SkipTest('CGAL (optional) is not installed') from exc
+from libs.alphawrap import wrap
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.pipeconfig import StepConfig
 from libs.scanner import scan
@@ -59,7 +66,7 @@ def _sphere(subdivisions=1):
         verts = np.array(verts, dtype=np.float64)
         faces = np.array(new_faces, dtype=np.int64)
 
-    return verts.astype(np.float32), faces
+    return verts.astype(np.float64), faces
 
 
 def _mesh(verts, faces):
@@ -71,17 +78,6 @@ def _mesh(verts, faces):
 def _unloaded():
     return Mesh(path='sphere.stl', destination='sphere.out.stl',
                 kind=Kind.BINARY_STL, triangles=None, is_valid=True)
-
-
-class TestAvailability(unittest.TestCase):
-
-    def test_is_available_when_the_package_is_present(self):
-        with mock.patch.object(alphawrap, '_CGAL', True):
-            self.assertTrue(is_available())
-
-    def test_is_available_is_false_with_nothing_at_all(self):
-        with mock.patch.object(alphawrap, '_CGAL', False):
-            self.assertFalse(is_available())
 
 
 class TestParameterValidation(unittest.TestCase):
@@ -126,14 +122,7 @@ class TestParameterValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             wrap(self.mesh, alpha=0.5, offset=math.inf)
 
-    def test_missing_cgal_raises(self):
-        with mock.patch.object(alphawrap, '_CGAL', False):
-            with self.assertRaises(ValueError) as ctx:
-                wrap(self.mesh, alpha=0.5, offset=0.1)
-        self.assertIn('cgal', str(ctx.exception).lower())
 
-
-@unittest.skipUnless(is_available(), 'cgal is not installed')
 class TestWrap(unittest.TestCase):
 
     def setUp(self):
@@ -158,7 +147,7 @@ class TestWrap(unittest.TestCase):
         self.assertEqual(g.verts.shape[1], 3)
         self.assertEqual(g.faces.ndim, 2)
         self.assertEqual(g.faces.shape[1], 3)
-        self.assertEqual(g.verts.dtype, np.float32)
+        self.assertEqual(g.verts.dtype, np.float64)
         self.assertEqual(g.faces.dtype, np.int64)
         self.assertGreater(len(g.verts), 0)
         self.assertGreater(len(g.faces), 0)
@@ -212,14 +201,6 @@ class TestStep(unittest.TestCase):
                 self.assertFalse(ok)
                 self.assertIs(result, m)
                 self.assertTrue(detail)
-
-    def test_missing_cgal_is_a_step_failure(self):
-        m = _mesh(*_sphere(0))
-        with mock.patch.object(alphawrap, '_CGAL', False):
-            ok, result, detail = alphawrap.step_alpha_wrap(m, StepConfig(whole_model_diag=10))
-        self.assertFalse(ok)
-        self.assertIs(result, m)
-        self.assertIn('cgal', detail)
 
     def test_recipe_and_exception_contract(self):
         m = _mesh(*_sphere(0))

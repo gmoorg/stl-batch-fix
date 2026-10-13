@@ -14,11 +14,10 @@ from libs import pipeconfig, scanner, winding
 from libs.mesh_io import Geometry, Kind, Mesh
 from tests.tests.test_decimator import _sphere
 
-needs_igl = unittest.skipUnless(winding.is_available(), 'libigl/scipy are needed')
 
 
 def mesh(verts, faces):
-    g = Geometry(np.asarray(verts, np.float32), np.asarray(faces, np.int64).reshape(-1, 3))
+    g = Geometry(np.asarray(verts, np.float64), np.asarray(faces, np.int64).reshape(-1, 3))
     return Mesh('/in/m.stl', '/out/m.stl', Kind.BINARY_STL, len(g.faces), True, None, g)
 
 
@@ -57,12 +56,33 @@ def canonical(m, h):
     return np.sort(q.view(np.int64).reshape(len(q), 9), axis=0)
 
 
+def nm_pair(scale=0.5):
+    """Two tetrahedra sharing one edge: closed (no open edges), one
+    non-manifold edge (0-1, used by four faces), no degenerate faces. The
+    second is the first turned 180° about x, so both wind outward."""
+    v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [0, -1, 0], [0, 0, -1]],
+                 float) * scale
+    f = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3],
+         [0, 4, 1], [0, 1, 5], [0, 5, 4], [1, 4, 5]]
+    return v, np.asarray(f)
+
+
+def with_nm_pair(weld):
+    """`_weld` wrapped to add `nm_pair` (inside a radius-10 sphere) to its
+    output: a reconstruction that is closed but non-manifold."""
+    def wrapped(Vo, Fo, keys):
+        g = weld(Vo, Fo, keys)
+        pv, pf = nm_pair()
+        return Geometry(np.vstack([g.verts, pv.astype(np.float64)]),
+                        np.vstack([g.faces, pf + len(g.verts)]))
+    return wrapped
+
+
 def assert_closed(test, m):
     s = scanner.scan(m)
     test.assertEqual((s.open_edges, s.non_manifold, s.degenerate), (0, 0, 0))
 
 
-@needs_igl
 class TestGeometry(unittest.TestCase):
 
     def test_sphere_is_closed_keeps_volume_and_surface(self):
@@ -77,6 +97,25 @@ class TestGeometry(unittest.TestCase):
         m = mesh(*sphere())
         one, many = winding.reconstruct(m, 0.5, 1), winding.reconstruct(m, 0.5, 3)
         self.assertTrue(np.array_equal(canonical(one, 0.5), canonical(many, 0.5)))
+
+    def test_seams_close_exactly_at_any_position_and_scale(self):
+        """Block seams are welded by grid edge, not by coordinate rounding:
+        the result is closed and manifold with the same face count for 1, 2
+        and 3 blocks, far from the origin and at small and large scales.
+        (Translation stays within float32 input precision: 1e5 units has a
+        float32 step of ~0.008, well under h.)"""
+        cases = {'far from origin': (sphere(10, (1e5, -1e5, 1e5)), 0.5),
+                 'tiny': (sphere(0.01), 0.0005),
+                 'huge': (sphere(1000), 50.0),
+                 'shifted box': (box((0.37, 0.11, 0.29), (10.37, 6.11, 8.29)), 0.2)}
+        for name, ((v, f), h) in cases.items():
+            with self.subTest(name):
+                counts = []
+                for blocks in (1, 2, 3):
+                    out = winding.reconstruct(mesh(v, f), h, blocks)
+                    assert_closed(self, out)
+                    counts.append(len(out.geometry.faces))
+                self.assertEqual(len(set(counts)), 1, counts)
 
     def test_large_triangles_are_covered_by_the_band(self):
         """A cube of 12 large triangles, also shifted off the grid: the band
@@ -166,7 +205,6 @@ class TestGeometry(unittest.TestCase):
         self.assertTrue(np.array_equal(canonical(one, 0.5), canonical(two, 0.5)))
 
 
-@needs_igl
 class TestOrientation(unittest.TestCase):
     """Inside is decided by the winding number, which follows face
     orientation: parts are oriented consistently and outward first, so an
@@ -221,7 +259,6 @@ class TestOrientation(unittest.TestCase):
         self.assertLess(result.mesh.geometry.verts[:, 0].max(), 10.6)
 
 
-@needs_igl
 class TestPlan(unittest.TestCase):
 
     def setUp(self):
@@ -260,7 +297,6 @@ class TestPlan(unittest.TestCase):
                 winding.plan(self.m, 0.5, budget)
 
 
-@needs_igl
 class TestContract(unittest.TestCase):
 
     def test_distance_tree_is_built_once_and_winding_queried_per_block(self):
@@ -280,11 +316,56 @@ class TestContract(unittest.TestCase):
         self.assertEqual(len(inits), 1)
         self.assertGreaterEqual(fwn.call_count, 27)
 
+    def welded_to(self, verts, faces):
+        """Patch `_weld` so a reconstruction comes out as the given arrays."""
+        g = Geometry(np.asarray(verts, np.float64), np.asarray(faces, np.int64).reshape(-1, 3))
+        return mock.patch.object(winding, '_weld', return_value=g)
+
     def test_an_open_result_is_rejected(self):
-        tri = (np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], float), np.array([[0, 1, 2]]), {})
-        with mock.patch.object(winding._igl, 'marching_cubes', return_value=tri), \
-             self.assertRaisesRegex(RuntimeError, 'not a closed manifold'):
+        with self.welded_to([[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 1, 2]]), \
+             self.assertRaisesRegex(RuntimeError, 'not closed: open=3'):
             winding.reconstruct(mesh(*sphere()), 0.5, 1)
+
+    def test_empty_non_finite_and_degenerate_results_are_rejected(self):
+        v, f = nm_pair()
+        nan = v.copy(); nan[0, 0] = np.nan
+        cases = {'no faces': (v, np.zeros((0, 3))),
+                 'non-finite': (nan, f),
+                 'degenerate=1': (v, np.vstack([f, [[2, 3, 2]]]))}
+        for message, (verts, faces) in cases.items():
+            with self.subTest(message), self.welded_to(verts, faces), \
+                 self.assertRaisesRegex(RuntimeError, message):
+                winding.reconstruct(mesh(*sphere()), 0.5, 1)
+
+    def test_non_manifold_edges_are_passed_on_not_rejected(self):
+        """Owner decision 2026-10-04: NM edges go on to decimation and the
+        conditional MeshFix instead of failing the part. The step says so."""
+        with mock.patch.object(winding, '_weld', with_nm_pair(winding._weld)):
+            out = winding.reconstruct(mesh(*sphere()), 0.5, 1)
+            ok, _, detail = winding.step_winding_reconstruct(
+                mesh(*sphere()), pipeconfig.StepConfig(whole_model_diag=40.0))
+        s = scanner.scan(out)
+        self.assertEqual((s.open_edges, s.non_manifold, s.degenerate), (0, 1, 0))
+        self.assertTrue(ok, detail)
+        self.assertIn('nm=1 passed on', detail)
+
+    def test_a_clean_result_does_not_mention_non_manifold_edges(self):
+        ok, _, detail = winding.step_winding_reconstruct(
+            mesh(*sphere()), pipeconfig.StepConfig(whole_model_diag=40.0))
+        self.assertTrue(ok, detail)
+        self.assertNotIn('nm=', detail)
+
+    def test_non_manifold_left_in_a_final_output_is_flagged(self):
+        """A custom sequence with no repair after winding: the judge, not
+        winding, catches the NM edges it passed on."""
+        from libs import processor
+        from libs.indicators import Indicator
+        with mock.patch.object(winding, '_weld', with_nm_pair(winding._weld)):
+            outcome = processor.process(
+                mesh(*sphere()), 0, min_shell_faces=0,
+                part_steps=(('winding', winding.step_winding_reconstruct),))
+        self.assertIs(outcome.indicator, Indicator.UNREPAIRED, outcome.reason)
+        self.assertIn('1 non-manifold edge(s) remain', outcome.reason)
 
     def test_invalid_input_is_rejected_before_native_calls(self):
         v, f = sphere()
@@ -300,7 +381,166 @@ class TestContract(unittest.TestCase):
                 winding.reconstruct(mesh(v, f), 0.5, blocks)
 
 
-@needs_igl
+def edge_keys(rows, shape):
+    """Edge keys from (axis, x, y, z) rows, computed independently of
+    `_edge_ids`: the C-order index into a (3, NX, NY, NZ) array."""
+    return np.ravel_multi_index(np.asarray(rows).T, (3, *shape)).astype(np.int64)
+
+
+def row_weld(Vo, Fo, rows):
+    """The weld as it was before int64 keys — row-wise unique over (axis, x,
+    y, z) — kept as the oracle the keyed weld must match array for array."""
+    _, first, inv = np.unique(rows, axis=0, return_index=True, return_inverse=True)
+    Vo, Fo = Vo[first], inv.ravel()[Fo]
+    Fo = Fo[(Fo[:, 0] != Fo[:, 1]) & (Fo[:, 1] != Fo[:, 2]) & (Fo[:, 0] != Fo[:, 2])]
+    return Geometry(Vo, Fo.astype(np.int64, copy=False))
+
+
+class TestWeld(unittest.TestCase):
+    """The weld merges vertices on the same grid edge, never by distance."""
+
+    def test_seam_copies_merge_and_close_neighbours_stay_apart(self):
+        node = np.array([1.0, 1.0, 1.0])
+        # a and b: vertices on two different edges meeting at one grid node,
+        # 1e-12 apart; a2: a's copy from the neighbouring block, 1e-15 off.
+        a, b = node + [1e-12, 0, 0], node + [0, 1e-12, 0]
+        a2, c = a + [1e-15, 0, 0], node + [0, 0, 0.5]
+        verts = np.array([a, b, a2, c])
+        keys = edge_keys([[0, 1, 1, 1], [1, 1, 1, 1], [0, 1, 1, 1], [2, 1, 1, 1]], (4, 4, 4))
+        g = winding._weld(verts, np.array([[0, 1, 3], [2, 3, 1]]), keys)
+        self.assertEqual(len(g.verts), 3, 'a and a2 merge; b stays separate')
+        self.assertEqual(len(g.faces), 2)
+        self.assertEqual(sorted(map(sorted, g.faces.tolist())), [[0, 1, 2], [0, 1, 2]])
+        # Kept exactly: a, b and the node are one point in float32.
+        self.assertEqual(sorted(map(tuple, g.verts.tolist())), sorted(map(tuple, [a, b, c])))
+
+    def test_keyed_weld_matches_the_row_wise_weld_exactly(self):
+        """Same vertices, faces and order as the row-wise weld it replaced,
+        keeping the same (first) copy of each edge. Duplicates have distinct
+        coordinates, so keeping any other copy would show; random faces
+        include some with two corners on one edge, exercising the filter."""
+        rng = np.random.default_rng(7)
+        shape = (5, 7, 3)
+        pool = np.column_stack([rng.integers(0, 3, 300)] +
+                               [rng.integers(0, n, 300) for n in shape])
+        rows = pool[rng.integers(0, len(pool), 2000)]
+        verts = rng.normal(size=(len(rows), 3))
+        faces = rng.integers(0, len(rows), (3000, 3))
+        old = row_weld(verts, faces, rows)
+        new = winding._weld(verts, faces, edge_keys(rows, shape))
+        self.assertLess(len(old.verts), len(verts), 'the data must contain duplicates')
+        self.assertLess(len(old.faces), len(faces), 'the data must contain collapsed faces')
+        for got, want in ((new.verts, old.verts), (new.faces, old.faces)):
+            self.assertEqual((got.dtype, got.shape), (want.dtype, want.shape))
+            self.assertEqual(got.tobytes(), want.tobytes())
+
+    def test_edge_ids_are_global_keys_of_each_vertex_edge(self):
+        """Unequal global dimensions, a nonzero block offset, all three axes,
+        corners packed in either order and vertices in shuffled order: every
+        key decodes to the vertex's axis and global lower corner."""
+        rng = np.random.default_rng(3)
+        block, r0, shape = (3, 4, 5), np.array([10, 20, 30]), (17, 29, 41)
+        nx, ny = block[0], block[1]
+        index = lambda c: int(c[0] + c[1] * nx + c[2] * nx * ny)
+        e2v, rows, n = {}, {}, 0
+        for axis in range(3):
+            for x in range(block[0]):
+                for y in range(block[1]):
+                    for z in range(block[2]):
+                        c = np.array([x, y, z])
+                        d = c.copy(); d[axis] += 1
+                        if d[axis] < block[axis]:
+                            i, j = index(c), index(d)
+                            if rng.random() < 0.5:
+                                i, j = j, i
+                            e2v[(i << 32) | j] = n
+                            rows[n] = [axis, *(c + r0)]
+                            n += 1
+        order = rng.permutation(n)                     # shuffled vertex indices
+        e2v = {k: int(order[v]) for k, v in e2v.items()}
+        want = np.empty((n, 4), np.int64)
+        for v, row in rows.items():
+            want[order[v]] = row
+        ids = winding._edge_ids(e2v, n, block, r0, shape)
+        self.assertEqual(ids.dtype, np.int64)
+        self.assertEqual(ids.shape, (n,))
+        np.testing.assert_array_equal(np.column_stack(np.unravel_index(ids, (3, *shape))), want)
+
+    def test_an_edge_map_that_is_not_one_unit_edge_per_vertex_is_rejected(self):
+        shape, r0 = (4, 4, 4), np.zeros(3, np.int64)
+        def key(i, j):
+            return (i << 32) | j
+        good = {key(0, 1): 0, key(0, 4): 1}            # +x and +y from corner 0
+        ids = winding._edge_ids(good, 2, shape, r0, shape)
+        self.assertEqual(ids.tolist(), edge_keys([[0, 0, 0, 0], [1, 0, 0, 0]], shape).tolist())
+        bad = {'missing a vertex': ({key(0, 1): 0}, 2),
+               'vertex twice': ({key(0, 1): 0, key(0, 4): 0}, 2),
+               'not one step': ({key(0, 5): 0}, 1),
+               'outside the block': ({key(0, 64): 0}, 1)}
+        for name, (e2v, n) in bad.items():
+            with self.subTest(name), self.assertRaises(RuntimeError):
+                winding._edge_ids(e2v, n, shape, r0, shape)
+
+    def test_corners_are_placed_by_block_offset(self):
+        key = (21 << 32) | 22                           # (1,1,1) -> (2,1,1) in a 4³ block
+        shape = (40, 50, 60)
+        ids = winding._edge_ids({key: 0}, 1, (4, 4, 4), np.array([10, 20, 30]), shape)
+        self.assertEqual(ids.tolist(), edge_keys([[0, 11, 21, 31]], shape).tolist())
+
+
+class TestBlockOutput(unittest.TestCase):
+    """Per-block arrays built with fewer copies, byte for byte as before."""
+
+    def test_block_points_match_the_meshgrid_build(self):
+        lo = np.array([-3.7, 0.25, 12.1])
+        for r0, r1, h in (((2, 5, 7), (4, 8, 11), 0.15),     # 3 x 4 x 5, nonzero r0
+                          ((0, 0, 0), (6, 0, 2), 0.1),       # a singleton axis
+                          ((9, 1, 3), (9, 1, 3), 1 / 3)):    # one point
+            r0, r1 = np.array(r0), np.array(r1)
+            axes = [lo[a] + h * np.arange(r0[a], r1[a] + 1) for a in range(3)]
+            want = np.column_stack([g.ravel('F') for g in np.meshgrid(*axes, indexing='ij')])
+            got = winding._block_points(lo, h, r0, r1)
+            with self.subTest(r0=r0.tolist(), r1=r1.tolist()):
+                self.assertEqual((got.dtype, got.shape), (want.dtype, want.shape))
+                self.assertEqual(got.tobytes(), want.tobytes())
+
+    def test_take_joins_and_empties_the_list(self):
+        pieces = [np.arange(6).reshape(2, 3), np.arange(6, 9).reshape(1, 3)]
+        joined = winding._take(pieces)
+        np.testing.assert_array_equal(joined, np.arange(9).reshape(3, 3))
+        self.assertEqual(pieces, [])
+
+
+class TestEdgeKeyBound(unittest.TestCase):
+    """Edge keys must fit int64: 3·P ≤ 2**63 for P grid points."""
+
+    LARGEST = 2 ** 63 // 3                              # largest P whose keys fit
+
+    def test_the_bound_on_both_sides(self):
+        winding._check_edge_keys((self.LARGEST, 1, 1))
+        self.assertLessEqual(3 * self.LARGEST - 1, 2 ** 63 - 1)
+        with self.assertRaisesRegex(ValueError, 'edge keys'):
+            winding._check_edge_keys((self.LARGEST + 1, 1, 1))
+
+    def test_edge_ids_refuses_a_grid_whose_keys_overflow(self):
+        key = (0 << 32) | 1
+        winding._edge_ids({key: 0}, 1, (4, 4, 4), np.zeros(3, np.int64), (self.LARGEST, 1, 1))
+        with self.assertRaisesRegex(ValueError, 'edge keys'):
+            winding._edge_ids({key: 0}, 1, (4, 4, 4), np.zeros(3, np.int64),
+                              (self.LARGEST + 1, 1, 1))
+
+    def test_reconstruct_refuses_before_any_work(self):
+        """A unit cube at h = 1/1.5e6: about 1.5e6 points per axis, P ≈ 3.4e18
+        — inside `_grid`'s index bound (P < 2**62), beyond the key bound. It
+        raises from the grid (the message is the key bound's, not the index
+        bound's) before sampling allocates anything."""
+        cube = mesh(*box((0, 0, 0), (1, 1, 1)))
+        for call in (lambda: winding.reconstruct(cube, 1 / 1.5e6, 1),
+                     lambda: winding.plan(cube, 1 / 1.5e6, 10 ** 9)):
+            with self.subTest(call=call), self.assertRaisesRegex(ValueError, 'edge keys'):
+                call()
+
+
 class TestStep(unittest.TestCase):
 
     def test_a_part_enclosing_no_volume_is_dropped_not_failed(self):
@@ -366,11 +606,6 @@ class TestStep(unittest.TestCase):
                 self.assertFalse(ok)
                 self.assertIs(out, m)
                 self.assertIn(expected, detail)
-        with mock.patch.object(winding, '_AVAILABLE', False):
-            ok, _, detail = winding.step_winding_reconstruct(
-                m, pipeconfig.StepConfig(whole_model_diag=40.0))
-        self.assertFalse(ok)
-        self.assertIn('not installed', detail)
 
 
 if __name__ == '__main__':

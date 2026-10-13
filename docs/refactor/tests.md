@@ -21,7 +21,7 @@ tools/project_python.sh tests/tests/make_fixtures.py --check
 - Verify step order and that every split part reaches repair independently.
 - Compare controlled defects with a known-correct surface.
 - Separate wrapper tests from policy tests; native tool success is not pipeline success.
-- Use real Blender/PyMeshFix only where a stub cannot prove the boundary.
+- Use real native tools (PyMeshFix, PyMeshLab) only where a stub cannot prove the boundary.
 - Cover scale, opposite winding, component retention, invalid input, timeout/crash, atomic writes, and exactly-once reporting.
 
 High-priority probes are `small_valid_shell.stl`, `opposite_volume_shells.stl`, `decimation_lost_appendage.stl`, and `reversed_tjunction_chain.stl`. Their construction is tested; pipeline verdict tests remain missing.
@@ -29,7 +29,7 @@ High-priority probes are `small_valid_shell.stl`, `opposite_volume_shells.stl`, 
 ## Defect-sphere fixtures
 
 `tests/tests/defect_spheres.py` is the single source of defect meshes with a
-known true shape (`fixtures()`, 19 fixtures). The single-defect probe
+known true shape (`fixtures()`, 22 fixtures). The single-defect probe
 builders moved there from `tools/make_probe_meshes.py`, which re-exports
 them; committed `tests/probes/sphere_*.stl` stay byte-reproducible (tested).
 
@@ -41,7 +41,10 @@ sags ~0.12 mm), with `truth_volume` (union volume, computed numerically) and
 `vanish_boxes` that must end up empty (debris).
 
 Fixtures: control `correct`; winding `inverted`, `inverted_third`, `seam`;
-open edges `tjunction`, `tjunction_many`, `hole`; non-manifold `fin`;
+open edges `tjunction`, `tjunction_many`, `hole`; non-manifold `fin`
+(also open), and NM as the only scanned defect `nm_only` (20 closed fins:
+two back-to-back triangles per sphere edge, exactly 20 NM edges, 0 open,
+0 seams), `nm_seam` (+ reversed cap), `nm_hole` (+ 12 faces removed);
 `degenerate`; duplicated `doubles`; multi-shell `two_shells`,
 `shell_inverted`, `overlapping_shells` (union), `touching_shells` (boxes
 sharing a plane); debris `debris_sheet` (open), `debris_speck` (closed,
@@ -64,18 +67,40 @@ fall into three groups. Removal waits until the replacement exists.
 **1. Forced failure paths — keep.** Mocks force conditions no fixture can
 produce; they protect behaviour, not composition.
 
-- Missing library → result/step failure, not a crash: `test_alphawrap`
-  (availability, missing CGAL, empty result), `test_decimator` (availability,
-  missing PyMeshLab, failure recorded), `test_meshfix`
-  (missing library, returned failure), `test_meshlab` (filter exception),
-  `test_blender` (returned failure / raised exception reported),
-  `test_winding` (open result rejected, invalid input rejected before
-  native calls, failures are step results).
+- Tool failure → result/step failure, not a crash: `test_alphawrap`
+  (empty result), `test_decimator` (failure recorded), `test_meshfix`
+  (returned failure), `test_meshlab` (filter exception), `test_winding` (open
+  result rejected, invalid input rejected before native calls, failures are
+  step results).
+- Libraries are not tested (owner, 2026-10-05): they are checked once when a
+  run starts (`libs.dependencies`) and never break during development. No
+  test checks availability or a missing library; required libraries are not
+  skip-guarded. CGAL is optional, so `test_alphawrap`, the alpha-wrap
+  tests in `test_repairer` and `TestEndToEndAlpha` skip without it.
+  `test_batch_repair_cli.test_cgal_is_required_only_with_alpha` tests the
+  run's rule, not the library: with fake probes, `--alpha` stops when CGAL
+  is missing and a default run does not.
+- `--alpha` end to end: `TestEndToEndAlpha` reruns every `test_end_to_end`
+  check with alpha-wrap, except that `c_hole_seam_debris` must be refused
+  (DESTROYED, the source as its marker, run exit 1): alpha-wrap wraps both
+  sides of its hole (owner chose to assert the refusal, 2026-10-10).
+- Selected files beside their sources (`fix_files.py`, 2026-10-11):
+  `test_besidesource` (fast: planned names incl. OBJ/uppercase, every
+  rejected selection, publish replace/stale-marker/failed-move rules, log
+  append never through a symlink, staging removed on success and on an
+  exception, sweep keeps locked/init/foreign/symlinked folders, and the
+  front-end loop with `run` injected: `--alpha` choice, leading-hyphen
+  names, interruption stops later folders); `test_fix_files_smoke` (slow,
+  real pipeline: STL with a space, uppercase OBJ, malformed OBJ →
+  `_fixed.failed.stl` source copy, logs beside, sources unchanged, no
+  staging left, a rerun appends to the logs).
 - I/O and runner failures: `test_converter` (companion copy fails, is
   counted once, interrupted copy leaves nothing, each mesh emitted once),
   `test_batch_repair_cli` (config rejected before intake, malformed TOML,
   intake exception incomplete, companion copy failure, model log
-  unwritable / unopenable), `test_batch_repair_progress` (launch failure
+  unwritable / unopenable, FAILED marker write fails, real SIGINT during a
+  conversion leaves no export), `test_textmesh` (interrupt mid-write
+  publishes nothing), `test_batch_repair_progress` (launch failure
   elapsed), `test_batch_repair_run` (SIGINT during pool start),
   `test_runstate` (spawn/cancel race), `test_runconfig` (`resolve`: autos,
   fraction, zero budget, sysconf unavailable; example lists every field).
@@ -94,7 +119,7 @@ the pipeline is assembled, so every refactor rewrites them:
 |---|---|---|
 | `TestSequence` (order, one call per part, part whole, destination kept, single shell not split) | each part reaches repair intact; merge keeps destination | end-to-end: multi-shell sphere fixture → every shell present, published at the right path |
 | `TestPartIdentity` (part ids, `-` for split/merge) | log attribution | end-to-end: `batch.log` lines carry `1/2`, `2/2` |
-| `TestBlenderBeforePymeshfix.test_production_sequence_is_winding_decimate_meshfix` | default step list | end-to-end outcome on defect fixtures (sequence names unnecessary) |
+| `TestStepSequence.test_production_sequence_is_winding_decimate_meshfix` | default step list | end-to-end outcome on defect fixtures (sequence names unnecessary) |
 | `TestAlphaWrapBinding` (whole-mesh spacing, caps, custom tool bypasses CGAL) | spacing from WHOLE mesh, not per part | per-step: two shells of different size rebuilt with the same `h` (equal bevel / face density) |
 | `TestPartDecimation` (7) | one pass per part with its own target, skipped within target, never fails on a miss, a decimator error fails before MeshFix | per-step: covered for shape by `test_decimator.TestShapeIsKept` (rebuilt rod tip, round sphere); end-to-end `c_multishell_rod` |
 | `TestContract` (no remove-T-vertices, no re-orient filter) | removed MeshLab filters stay out | none needed — those tools are out of the default pipeline; delete with the unwired-tool suites |
@@ -103,7 +128,8 @@ the pipeline is assembled, so every refactor rewrites them:
 
 **Suites outside the default pipeline** (decide with item "remove tests of
 unwired tools"): `test_welder` (39), `test_meshlab` (5), alpha-wrap now explicit-use
-(`test_alphawrap`, 20), Blender repair parts of `test_blender`.
+(`test_alphawrap`, 20). Blender's tests were archived with the module
+(2026-10-06, modules.md `blender` note).
 
 Not a target: frozen-dataclass checks (10) — they protect immutability,
 which nothing else checks, and never churn. Exact duplicates were removed

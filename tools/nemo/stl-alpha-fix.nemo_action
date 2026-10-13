@@ -1,0 +1,8 @@
+[Nemo Action]
+Name=STL alpha fix
+Comment=Repair the selected STL/OBJ files with alpha-wrap; results land beside them as NAME_fixed.stl
+Exec=env STL_FIX_HOLD=1 "@ROOT@/fix_files.sh" --alpha -- %F
+Icon-Name=applications-engineering
+Selection=notnone
+Extensions=stl;obj;
+Terminal=true

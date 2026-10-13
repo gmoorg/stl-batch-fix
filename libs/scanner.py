@@ -86,26 +86,87 @@ def _edges_of(faces: np.ndarray) -> np.ndarray:
     return face_edges(faces)
 
 
-def _degenerate_mask(faces: np.ndarray) -> np.ndarray:
+def degenerate_mask(faces: np.ndarray) -> np.ndarray:
     """Faces with two or more identical corners — zero area, no normal."""
     return ((faces[:, 0] == faces[:, 1])
             | (faces[:, 1] == faces[:, 2])
             | (faces[:, 0] == faces[:, 2]))
 
 
+#: Largest vertex count whose edge keys fit int64: the biggest key is
+#: (n-1)·n + (n-1) = n² - 1, which must stay below 2**63.
+_MAX_KEYED_VERTICES = 3_037_000_499
+
+
+def _edge_counts(faces: np.ndarray) -> np.ndarray:
+    """How many faces use each distinct undirected edge, in no set order.
+
+    One int64 key per edge, `low * n + high`, sorted in place; an edge's
+    count is the length of its run of equal keys.  This replaced
+    `np.unique(face_edges(faces), axis=0, return_counts=True)`, the row-wise
+    unique, which sorts a structured view of the (3m, 2) edge array.  Measured
+    on a 29.2 M-face winding output (sphere r 132; docs/archive/reconstruction.md "Memory
+    floor", `tools/experiments/scan_memory.py`): the row-wise unique added
+    ~197 B and ~3.7 µs per face (+5.74 GB, 107 s) and was the whole
+    reconstruction's peak; the keys add ~34 B per face (+0.99 GB, 2.3 s)
+    with identical counts.
+
+    `n` is the largest face index + 1, not the vertex count: the keys are
+    collision-free only when every index is in [0, n), and Geometry checks
+    the dtype, not the index range.  Negative indices and an `n` whose keys
+    would overflow are refused rather than counted wrongly.  `faces` is only
+    read.
+    """
+    if int(faces.min()) < 0:
+        raise ValueError('scan: negative face index')
+    n = int(faces.max()) + 1
+    if n > _MAX_KEYED_VERTICES:
+        raise ValueError(f'scan: face index {n - 1} too large for int64 edge keys')
+
+    keys = _edge_keys(faces, n)
+    keys.sort()
+
+    # A run starts wherever the key changes; the sentinels at both ends make
+    # the first and last runs close too.
+    change = np.empty(len(keys) + 1, dtype=bool)
+    change[0] = change[-1] = True
+    np.not_equal(keys[1:], keys[:-1], out=change[1:-1])
+    # Freed before the run arrays are built. This works only because no view
+    # of `keys` survives here: with the key loop inlined, its last slice kept
+    # the array alive and the peak rose 34 → 53 B per face (measured).
+    del keys
+    return np.diff(np.flatnonzero(change))
+
+
+def _edge_keys(faces: np.ndarray, n: int) -> np.ndarray:
+    """`low * n + high` for every face edge, one edge column at a time, each
+    written into its slice of the result: no (3m, 2) edge array is built."""
+    m = len(faces)
+    keys = np.empty(3 * m, dtype=np.int64)
+    for k, (i, j) in enumerate(((0, 1), (1, 2), (2, 0))):
+        a, b = faces[:, i], faces[:, j]
+        out = keys[k * m:(k + 1) * m]
+        np.minimum(a, b, out=out)
+        out *= n
+        out += np.maximum(a, b)
+    return keys
+
+
 def scan(mesh: Mesh) -> Scan:
     """Count the mesh's open and non-manifold edges.
 
-    The hot path: this runs after decimation, after Blender, and around every
-    repair pass, so it is one `np.unique` over the edge array and nothing else.
+    The hot path: this runs after decimation and around every repair pass,
+    and on the whole of every reconstruction, so it is one sort over int64
+    edge keys (`_edge_counts`) and nothing else.  A degenerate face's edges
+    are counted like any other's.
     """
     _require_geometry(mesh)
     faces = mesh.geometry.faces
     if len(faces) == 0:
         return Scan(0, 0, 0, 0)
 
-    degenerate = int(_degenerate_mask(faces).sum())
-    _, counts = np.unique(face_edges(faces), axis=0, return_counts=True)
+    degenerate = int(degenerate_mask(faces).sum())
+    counts = _edge_counts(faces)
     return Scan(open_edges=int((counts == 1).sum()),
                 non_manifold=int((counts > 2).sum()),
                 faces=len(faces),
@@ -305,8 +366,7 @@ def diagonal(mesh: Mesh) -> float:
     verts = mesh.geometry.verts
     if len(verts) == 0:
         return 0.0
-    span = verts.max(axis=0).astype(np.float64) - \
-        verts.min(axis=0).astype(np.float64)
+    span = verts.max(axis=0) - verts.min(axis=0)
     return float(np.linalg.norm(span))
 
 
@@ -319,7 +379,7 @@ def volume(mesh: Mesh) -> float:
     _require_geometry(mesh)
     if len(mesh.geometry.faces) == 0:
         return 0.0
-    tri = mesh.geometry.verts[mesh.geometry.faces].astype(np.float64)
+    tri = mesh.geometry.verts[mesh.geometry.faces]
     return float(np.einsum('ij,ij->i', tri[:, 0],
                            np.cross(tri[:, 1], tri[:, 2])).sum() / 6.0)
 
@@ -355,7 +415,7 @@ def component_volume(mesh: Mesh) -> float:
     faces = mesh.geometry.faces
     if len(faces) == 0:
         return 0.0
-    tri = mesh.geometry.verts[faces].astype(np.float64)
+    tri = mesh.geometry.verts[faces]
     # Per-face signed contribution, summed within a component and only then
     # taken as a magnitude: a component's own faces must still cancel normally
     # against each other, or a closed shell would not measure as closed.

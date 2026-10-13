@@ -105,7 +105,7 @@ fi
 # it replaced: 12.75s -> 2.52s raw (2.06M faces), 5.72s -> 0.92s decimated.
 # At 0.92s shell counting costs less than the edge scan itself (2.58s), so it
 # can be asked on every file. A pure-numpy replacement was tried and was SLOWER on
-# real geometry -- see D20 in REFACTOR_DECISIONS.md before attempting one.
+# real geometry -- see D20 in ../stl-batch-fix.old/archive/docs-before-compact-2026-09-19/refactor/splitting-and-repair/d20.md before attempting one.
 echo "→ scipy"
 if "$PYTHON" -c "import scipy" 2>/dev/null; then
     ver=$("$PYTHON" -c "import scipy; print(scipy.__version__)" 2>/dev/null || echo "unknown")
@@ -118,6 +118,21 @@ else
     }
 fi
 
+# ── manifold3d (optional) ─────────────────────────────────────────────────────
+# Only `support_3mf.py --layout grid` uses it (union of the support grid); the
+# repair batch does not.
+echo "→ manifold3d (support grid, optional)"
+if "$PYTHON" -c "import manifold3d" 2>/dev/null; then
+    ok "manifold3d already installed"
+else
+    warn "manifold3d not found — installing (optional)..."
+    if "$PYTHON" -m pip install manifold3d && "$PYTHON" -c "import manifold3d" 2>/dev/null; then
+        ok "manifold3d installed"
+    else
+        warn "manifold3d not available — only support_3mf.py --layout grid is affected"
+    fi
+fi
+
 # ── numpy (required by pymeshfix) ─────────────────────────────────────────────
 echo "→ numpy"
 if "$PYTHON" -c "import numpy" 2>/dev/null; then
@@ -125,18 +140,6 @@ if "$PYTHON" -c "import numpy" 2>/dev/null; then
 else
     warn "numpy not found — installing..."
     "$PYTHON" -m pip install numpy && ok "numpy installed" || fail "numpy install failed"
-fi
-
-# ── Blender ───────────────────────────────────────────────────────────────────
-echo "→ Blender"
-if command -v blender &>/dev/null; then
-    ver=$(blender --version 2>&1 | head -1 || echo "unknown")
-    ok "$ver"
-else
-    fail "Blender not found on PATH — it is REQUIRED: batch_repair.py converts OBJ and"
-    echo "   ASCII STL with it and will not start without it."
-    echo "   Download: https://www.blender.org/download/ and put 'blender' on your PATH."
-    exit 1
 fi
 
 echo

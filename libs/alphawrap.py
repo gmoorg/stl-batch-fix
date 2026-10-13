@@ -13,18 +13,9 @@ import numpy as np
 from . import pipeconfig
 from .mesh_io import Geometry, Mesh, require_geometry
 
-try:
-    from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3 as _alpha_wrap_3
-    from CGAL.CGAL_Kernel import Point_3 as _Point_3
-    from CGAL.CGAL_Polyhedron_3 import Polyhedron_3 as _Polyhedron_3
-    _CGAL = True
-except ImportError:                                    # pragma: no cover
-    _CGAL = False
-
-
-def is_available() -> bool:
-    """Whether the `cgal` package's Alpha Wrapping bindings imported."""
-    return _CGAL
+from CGAL.CGAL_Alpha_wrap_3 import alpha_wrap_3 as _alpha_wrap_3
+from CGAL.CGAL_Kernel import Point_3 as _Point_3
+from CGAL.CGAL_Polyhedron_3 import Polyhedron_3 as _Polyhedron_3
 
 
 def _mesh_to_cgal(mesh: Mesh):
@@ -72,7 +63,7 @@ def _polyhedron_to_geometry(poly) -> Geometry:
                 f"(degree {len(tri)}) — expected a pure triangle mesh")
         faces.append(tri)
 
-    return Geometry(np.array(verts, dtype=np.float32),
+    return Geometry(np.array(verts, dtype=np.float64),
                     np.array(faces, dtype=np.int64))
 
 
@@ -97,10 +88,6 @@ def wrap(mesh: Mesh, alpha: float, offset: float) -> Mesh:
         raise ValueError(f"alpha must be a finite positive number, got {alpha!r}")
     if not (math.isfinite(offset) and offset > 0):
         raise ValueError(f"offset must be a finite positive number, got {offset!r}")
-    if not _CGAL:
-        raise ValueError(
-            "the cgal package is not installed — `pip install cgal` "
-            "(see the alphawrap module docstring)")
 
     points, polygons = _mesh_to_cgal(mesh)
     out = _Polyhedron_3()
@@ -129,11 +116,7 @@ def step_alpha_wrap(mesh: Mesh, config: "pipeconfig.StepConfig | None" = None
         whole_diagonal = config.whole_model_diag if config is not None else None
         if whole_diagonal is None:
             raise ValueError('whole_model_diag is required for alpha wrapping')
-        diagonal = float(whole_diagonal)
-        if not math.isfinite(diagonal) or diagonal <= 0:
-            raise ValueError('whole_diagonal must be finite and positive')
-        alpha = min(diagonal / 800.0, 0.15)
-        offset = min(diagonal / 2000.0, 0.06)
+        alpha, offset = pipeconfig.alpha_wrap_parameters(whole_diagonal)
         result = wrap(mesh, alpha, offset)
         return True, result, f'alpha={alpha}, offset={offset}'
     except Exception as exc:

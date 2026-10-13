@@ -87,12 +87,28 @@ def open_step_log(path: str) -> StepLogger:
 
     def log(source_name: str, event: str, step: str, part: str,
             duration: float | None, detail: str) -> None:
-        stamp = datetime.datetime.now().strftime('%H:%M:%S')
-        duration_field = '' if duration is None else f'{duration:.3f}'
-        f.write(f'{stamp}\t{_escape(source_name)}\t{event}\t{step}\t{part}\t'
-                f'{duration_field}\t{_escape(detail)}\n')
+        f.write(_line(source_name, event, step, part, duration, detail))
 
     return log
+
+
+def append_line(path: str, source_name: str, event: str, step: str, part: str,
+                duration: float | None, detail: str) -> None:
+    """Append one line to the step log at `path` and close it — for the
+    parent's own run-level lines (e.g. which reconstruction the run uses),
+    where a logger held open for the whole run is not needed. Raises
+    OSError; the caller decides what a log that cannot be written means."""
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(path, 'a') as f:
+        f.write(_line(source_name, event, step, part, duration, detail))
+
+
+def _line(source_name: str, event: str, step: str, part: str,
+          duration: float | None, detail: str) -> str:
+    stamp = datetime.datetime.now().strftime('%H:%M:%S')
+    duration_field = '' if duration is None else f'{duration:.3f}'
+    return (f'{stamp}\t{_escape(source_name)}\t{event}\t{step}\t{part}\t'
+            f'{duration_field}\t{_escape(detail)}\n')
 
 
 def null_logger(source_name: str, event: str, step: str, part: str,

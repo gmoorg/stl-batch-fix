@@ -22,7 +22,7 @@ FIXTURES = ds.fixtures()
 
 
 def as_mesh(v, f):
-    g = Geometry(np.asarray(v, np.float32), np.asarray(f, np.int64))
+    g = Geometry(np.asarray(v, np.float64), np.asarray(f, np.int64))
     return Mesh('/m.stl', '/m.stl', Kind.BINARY_STL, len(g.faces), True, None, g)
 
 
@@ -47,6 +47,12 @@ class TestDeclaredDefects(unittest.TestCase):
                     self.assertEqual(len(scanner.shells(m)), d['shells'])
                 if 'volume_sign' in d:
                     self.assertEqual(np.sign(ds.signed_volume(fx.verts, fx.faces)), d['volume_sign'])
+                if 'nm_edges' in d:
+                    self.assertEqual(s.non_manifold, d['nm_edges'], s)
+                if 'open_edges' in d:
+                    self.assertEqual(s.open_edges, d['open_edges'], s)
+                if 'seam_edges' in d:
+                    self.assertEqual(seams, d['seam_edges'])
 
     def test_every_fixture_declares_at_least_its_shell_count(self):
         for name, fx in FIXTURES.items():
@@ -211,7 +217,7 @@ class TestComposites(unittest.TestCase):
         for name, fx in self.COMPOSITES.items():
             path = os.path.join(tmp, name + '.stl')
             mesh_io.write(Mesh(path, path, Kind.BINARY_STL, len(fx.faces), True, None,
-                               Geometry(fx.verts, fx.faces)))
+                               Geometry(fx.verts.astype(np.float64), fx.faces)))
             kept = splitter.by_shells(mesh_io.load(mesh_io.probe(path, path)))
             with self.subTest(name):
                 n = len(kept)

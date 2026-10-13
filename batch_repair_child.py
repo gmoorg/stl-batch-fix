@@ -2,7 +2,7 @@
 """Internal: repair ONE file for `batch_repair.py`. Not for direct use.
 
 The batch runner spawns this script once per file, so a timeout, native
-crash, OOM kill or stray Blender descendant ends only this process. Every
+crash, OOM kill or stray descendant ends only this process. Every
 value it needs arrives on the command line from the parent; it never reads
 `batch_repair.toml`, so editing the config mid-run cannot change a running
 batch. `batch_repair.py` itself takes no arguments — this script is where
@@ -12,6 +12,12 @@ The parent points this process's stdout and stderr at the model's own log
 (`libs.modellog`), so everything any tool prints lands there. This script
 adds a separator line before and after every step, and enables
 `faulthandler` so a native crash also leaves a Python traceback there.
+
+`--parent-pid` (always passed by the runner) ties this process's life to
+the runner's: it is armed before the heavy imports below, so a runner that
+dies, even by SIGKILL, takes this child with it
+(`libs.proctree.exit_with_parent`). Without the flag (a direct diagnostic
+run) nothing is armed.
 """
 
 import argparse
@@ -20,8 +26,44 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from libs import proctree                                                 # noqa: E402
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError('must be a positive integer') from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return value
+
+
+def _add_parent_pid(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument('--parent-pid', type=_positive_int, metavar='PID')
+
+
+def _arm_parent_death(argv) -> None:
+    """Arm `proctree.exit_with_parent` from `--parent-pid`, when present.
+
+    Runs before `import batch_repair` when this file is the script, so a
+    child whose runner is already gone exits before loading the libraries;
+    `main` repeats it for a direct `main(argv)` call (arming twice is
+    harmless). Reads only `--parent-pid` and leaves every other argument,
+    and every argument error, to `main`'s full parser.
+    """
+    early = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    _add_parent_pid(early)
+    args, _ = early.parse_known_args(argv)
+    if args.parent_pid is not None:
+        proctree.exit_with_parent(args.parent_pid)
+
+
+if __name__ == '__main__':
+    _arm_parent_death(sys.argv[1:])
+
 import batch_repair                                                       # noqa: E402
-from libs import childresult, modellog, splitter, steplog                 # noqa: E402
+from libs import childresult, modellog, repairer, splitter, steplog       # noqa: E402
 
 
 def run_one_file(args) -> int:
@@ -34,14 +76,6 @@ def run_one_file(args) -> int:
     child that dies before writing (OOM-killed, segfault inside CGAL,
     SIGKILL from the parent) simply never produces the file, which is
     itself the signal the parent's crash/reconciliation path acts on.
-
-    `args.managed_child` is the explicit marker that this run lives inside a
-    `proctree`-owned process group: `batch_repair._spawn_child` always sets
-    it. Present -> `nested_process_group=True` reaches `processor.process`,
-    so a nested `step_blender_repair` Blender does not get its own session
-    (staying part of the enclosing worker's own group, which
-    `terminate_and_confirm` can then still reach). Absent (a direct
-    diagnostic or test invocation) -> `False`, the safe default.
     """
     step_logger = _with_separators(steplog.open_step_log(args.log_file) if args.log_file
                                    else steplog.null_logger)
@@ -49,14 +83,16 @@ def run_one_file(args) -> int:
         result = batch_repair._prepare_one_file(
             args.one_file, args.destination, args.max_faces, args.cache_path, step_logger,
             reconstruct_budget_bytes=args.reconstruct_budget_bytes,
-            min_shell_faces=args.min_shell_faces)
+            min_shell_faces=args.min_shell_faces,
+            reconstruction=args.reconstruction)
     else:
         result = batch_repair._process_one_file(
             args.one_file, args.destination, args.max_faces, step_logger,
-            nested_process_group=args.managed_child, skip_clean=args.skip_clean,
+            skip_clean=args.skip_clean,
             reconstruct_budget_bytes=args.reconstruct_budget_bytes,
             min_shell_faces=args.min_shell_faces,
-            load_path=args.load_from)
+            load_path=args.load_from,
+            reconstruction=args.reconstruction)
     childresult.write(args.result_file, result)
     return 0
 
@@ -83,16 +119,6 @@ def _with_separators(step_logger: steplog.StepLogger) -> steplog.StepLogger:
     return log
 
 
-def _positive_int(text: str) -> int:
-    try:
-        value = int(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError('must be a positive integer') from None
-    if value <= 0:
-        raise argparse.ArgumentTypeError('must be a positive integer')
-    return value
-
-
 def _non_negative_int(text: str) -> int:
     try:
         value = int(text)
@@ -110,19 +136,23 @@ def main(argv=None) -> int:
     parser.add_argument('--destination', required=True, metavar='DST')
     parser.add_argument('--result-file', required=True, metavar='PATH')
     parser.add_argument('--max-faces', required=True, type=_non_negative_int, metavar='N')
-    parser.add_argument('--managed-child', action='store_true')
     parser.add_argument('--log-file', metavar='PATH')
     parser.add_argument('--skip-clean', action='store_true')
     parser.add_argument('--reconstruct-budget-bytes', type=_positive_int, metavar='BYTES',
                         default=batch_repair.pipeconfig.StepConfig.reconstruct_memory_budget_bytes)
     parser.add_argument('--min-shell-faces', type=_non_negative_int, metavar='N',
                         default=splitter.MIN_SHELL_FACES)
+    parser.add_argument('--reconstruction', choices=repairer.RECONSTRUCTIONS,
+                        default=repairer.RECONSTRUCTIONS[0])
     parser.add_argument('--mode', choices=('prepare', 'repair'), default='repair')
     parser.add_argument('--cache-path', metavar='PATH')
     parser.add_argument('--load-from', metavar='PATH')
+    _add_parent_pid(parser)
     args = parser.parse_args(argv)
     if args.mode == 'prepare' and not args.cache_path:
         parser.error('--mode prepare needs --cache-path')
+    if args.parent_pid is not None:
+        proctree.exit_with_parent(args.parent_pid)
     return run_one_file(args)
 
 

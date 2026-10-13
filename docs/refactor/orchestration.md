@@ -1,12 +1,16 @@
 # Current pipeline
 
-Implemented behavior, checked 2026-09-28. The uniform-step refactor
-(`StepConfig`/`ConditionStep`/`execstep`, described in
-[TODO](TODO.md#uniform-step-refactor)) is implemented.
+Implemented behavior, checked 2026-09-28; the batch-execution intro, step
+5a, job memory and the library check were rechecked on 2026-10-10. The
+uniform-step interface (`StepConfig`/`ConditionStep`/`execstep`, see
+[modules](modules.md#contracts)) is implemented.
 
 ## Batch execution
 
-`batch_repair.py` takes no arguments. It loads `batch_repair.toml` from its own
+`batch_repair.py` takes one optional argument, `--alpha` (alpha-wrap instead
+of winding for every part, 5a; owner 2026-10-10; any other argument stops the
+run). Its first line, on the terminal, in `batch.log` and in progress.log's
+`run_start` record, names the reconstruction. It loads `batch_repair.toml` from its own
 folder (`libs.runconfig`: unknown keys, missing required keys, wrong types and
 out-of-range values are errors; relative paths resolve against that folder),
 resolves automatic values (workers, log path, memory budget), checks the
@@ -14,27 +18,49 @@ input/output folders and dependencies — all before any output or log is
 created — then:
 
 1. `converter.prepare`: walk input, check indicators, copy companions, convert
-   OBJ/ASCII STL with Blender, and collect probed binary meshes. Only `.stl`
-   and `.obj` (any letter case, `converter.MESH_EXTENSIONS`) are meshes;
-   files that are neither a mesh nor a companion are counted as `ignored`
-   before any indicator check and never touched. Intake uses one conversion
-   worker; it precedes isolated repair dispatch.
+   OBJ/ASCII STL in-process (`textmesh`, one at a time in the runner's main
+   thread, so Ctrl+C stops a conversion and removes its staged export), and
+   collect probed binary meshes. Only `.stl` and `.obj` (any letter case,
+   `converter.MESH_EXTENSIONS`) are meshes; files that are neither a mesh
+   nor a companion are counted as `ignored` before any indicator check and
+   never touched. Intake precedes isolated repair dispatch.
 2. Preflight rejects invalid jobs, colliding destination/marker paths, and
-   pre-existing publication paths among emitted jobs. Sort by triangle count.
+   pre-existing publication paths among emitted jobs. A malformed source
+   (`textmesh.Malformed`: a 5+-vertex OBJ face, a facet without three
+   vertices, a bad index, a truncated facet) takes part in the collision and
+   pre-existing checks, then gets its FAILED marker (full source copy) here
+   when it passed both; otherwise it is rejected without one. Sort by
+   triangle count.
 3. Two sequential passes over the same `_Runner` (same pool, timeouts,
    cleanup and Ctrl+C handling). `pool.Pool` threads reserve memory via
    `RunState` and spawn one isolated `batch_repair_child.py` subprocess per
    admitted mesh; the parent passes it every value it needs, and the child
    never reads the TOML file. An oversized job may run alone.
    - **Prepare** (`--mode prepare`), reserved by `jobmemory.prepare_bytes`
-     (source triangles): load, run the initial decimation (step 1 below) and
-     save it atomically to `<input>/stl-decimated/<job source path relative
-     to the input>.<max_faces>.stl` (a converted job is keyed by its
-     `stl-exported/` copy) — reused by later runs, rebuilt if unreadable,
-     not written when no decimation is needed; reload it, then compute
-     `jobmemory.repair_bytes` on the reloaded mesh. A success is a handoff
-     (`childresult.PREPARED`: the mesh to load and the estimate), not a job
-     result. Decimator failure publishes `UNDECIMATED` here and ends the job.
+     (source triangles): load with `mesh_io.load` (it drops triangles with
+     NaN/inf coordinates or coincident corners; the step text says how many
+     of each, once, in the pass that loaded the STL: a repair pass with a
+     prepare handoff and a cache hit do not repeat it), run the initial
+     decimation (step 1 below) and save it atomically as a PLY
+     (`mesh_io.write_ply`) to `<input>.decimated/<job source path relative
+     to the input>.<max_faces>.<decimator.settings_tag()>.ply` — beside the
+     input folder, never inside it (a converted job is keyed by its
+     `stl-exported/` copy; the tag changes with the decimator's
+     parameters). The relative path is lexical: a source that is a symlink
+     to a file outside the input keeps its own name, so its cache stays
+     under `<input>.decimated` and inside the startup overlap checks. The PLY keeps the decimator's vertex table, so the repair
+     pass gets it without re-welding, with the decimator's float64
+     coordinates unrounded. Our loader, not PyMeshLab's STL reader, which holds ~4.5x the
+     mesh's memory (docs/archive/errors/decimation-memory-path.md). The cache is
+     reused by later runs (sources are assumed unmodified) and rebuilt if
+     unreadable; it is read back with `mesh_io.read_ply` and
+     `jobmemory.repair_bytes` computed on it. It is written whenever the
+     handoff names it, even if dropping non-finite triangles left nothing to
+     decimate. Decimator failure publishes `UNDECIMATED` (source copy) and
+     ends the job; a failed save is a write_failure; neither leaves a cache.
+     The old `<input>/stl-decimated/` STL caches are not read (the converter
+     still skips that folder). A success is a handoff (`childresult.PREPARED`:
+     the mesh to load and the estimate), not a job result.
    - **Repair**, only if pass 1 was not cancelled and left nothing
      unresolved, reserved by the handoff's estimate: the child loads the
      prepared mesh (`--load-from`) with `max_faces 0` (decimation already
@@ -47,6 +73,12 @@ created — then:
    the bounded result file regardless of exit code. With no trusted result:
    one new publication is recovered; multiple are inconsistent; none causes
    a source-copy timeout/failure marker, subject to cancellation authorization.
+   That reason says how the child ended: `killed by SIGSEGV`, `exit status 3`,
+   `exited normally without a valid result`, or, when the wait itself failed,
+   `exit cause unknown`. A timeout says only `timed_out`: the status after our
+   own SIGKILL is not the child's. No out-of-memory claim is made (owner,
+   2026-10-05: the signal is enough; check the kernel log for an OOM kill).
+   The same reason is appended to the model log as a `parent:` line.
 6. Exactly-once reporting and counters produce the terminal summary. Recovered
    results get diagnostics even if the recovered output was clean.
 
@@ -55,6 +87,30 @@ ignored during bounded cleanup. Unconfirmed cleanup cancels the run and keeps
 jobs unresolved. Cancelled jobs receive no synthetic marker. Already committed
 outputs can remain, so rerun behavior still follows existing output indicators.
 Incomplete runs, diagnostics, and companion-copy failures return nonzero.
+
+A runner that dies without cleanup (`kill -9`, the OOM killer) takes its
+children with it: each child gets the runner's PID (`--parent-pid`) and,
+before loading any library, asks the kernel for SIGKILL on parent death
+(`proctree.exit_with_parent`, `PR_SET_PDEATHSIG`). A child whose runner is
+already gone by then exits at once with status 75. Before this (found
+2026-10-06), a SIGKILLed runner left its children running with no timeout
+or memory admission. Limits: the signal is tied to the worker thread that
+spawned the child, which reaps it before taking another job, so it never
+fires early; a child whose kill could not be confirmed dies when that worker
+exits. It reaches the child only, not its group: the default pipeline has
+no descendants. Intake conversion runs in the runner itself, so it dies with it. Leftovers are
+those of a timeout kill (pending marker, temp files); the next run redoes
+the job.
+
+Selected files (`fix_files.py`, 2026-10-11) run this same batch, unchanged,
+once per source folder on a staging folder inside it (`libs.besidesource`);
+results then move back beside the sources as `<stem>_fixed…`. The runner is
+the front end's own process, so after an interruption its children are
+cancelled with the bounded wait above; the front end then publishes what
+finished, removes the staging folder and exits without starting another
+folder. A child whose kill stayed unconfirmed dies with the process
+(`exit_with_parent`); anything it writes first lands inside the removed
+staging folder and is swept by the next run there.
 
 ## One mesh
 
@@ -65,15 +121,33 @@ Incomplete runs, diagnostics, and companion-copy failures return nonzero.
 | 2a | Model gate (opt-in `skip_clean = true`) | After `WHOLE_MESH_STEPS`: if `is_already_clean`, skip 3–6 and go to 7 with the decimated mesh; verdict logged as `clean_gate` |
 | 3 | `repairer._split_stage` → `splitter.make_shell_split_step` | Always present; shells with fewer than `min_shell_faces` faces are dropped (`batch_repair.toml`, default 100 = `splitter.MIN_SHELL_FACES`, 0 keeps all; passed child argv → `processor.process` → `repairer.repair`); if all shells are below floor, retain original mesh |
 | 4 | (seam split) | Absent from the default split composition; add a `collection_entry` in `_split_stage` to enable, not a flag |
-| 4a | Part gate (same `skip_clean`, model not clean) | Per retained part: if `is_already_clean`, merge it as split, bypassing 5 (default or custom `part_steps`); verdict logged as `clean_gate` with the part id |
+| 4a | Part gate (same `skip_clean`, model not clean) | Per retained part: if `is_already_clean`, merge it as split, bypassing 5 (default or custom `part_steps`); verdict logged as `clean_gate` with the part id. NM fast path: if NM edges are the only scanned defect (open 0, degenerate 0, winding seams 0) and there are at most `repairer.NM_FAST_PATH_MAX_PERCENT` NM edges per 100 faces of the part (0.05, provisional; a ratio, so no absolute cap on a very large part), MeshFix alone runs as step `nm_meshfix`; its result is merged instead of running 5 when finite, with no NM/open edges or winding seams left, component volume within `NM_FAST_PATH_VOLUME_BAND` (98–102% of the part's, provisional) and no surface further than `NM_FAST_PATH_MAX_DEVIATION` (0.5% of the part's diagonal, provisional) from the other, both ways (`max_deviation`: sampled maximum over face centroids and used vertices; output→input catches new surface such as a cap, input→output deleted surface). The volume band alone accepted Robocop BODY.stl's MeshFix result, a square recess deleted and capped flat at +0.37% volume (2026-10-12). Otherwise — including over the limit, unmeasurable input volume, MeshFix failure or any error — 5 runs on the original part; never a failure. Decision logged as `nm_fast_path` with the NM count, part faces, percentage and outcome |
 | 5 | Per-part `DEFAULT_PART_STEPS`, via `execstep.run_sequence` | `(winding, decimate, meshfix)` by default; caller may replace `part_steps` entirely — nothing appended |
-| 5a | `winding.step_winding_reconstruct` | Rebuilds the part as a solid: grid spacing `h = min(whole_model_diag/800, 0.15)` (alpha-wrap's alpha); block count from `StepConfig.reconstruct_memory_budget_bytes` (`batch_repair.toml` `reconstruct_memory_budget_gb`, default 10). A part that rebuilds to nothing (an open sheet such as debris, or a closed part thinner than the grid) is dropped, with `dropped` and the reason in the step detail; the model is merged without it, and the judge's retained-volume check still catches gross loss. Fails the part if no block count fits the estimate, or if the result is not closed/manifold/non-degenerate. Replaced `alphawrap.step_alpha_wrap` (2026-10-03), which remains available as an explicit entry |
-| 5b | `decimator.make_step()` | Reads `faceCount` (target captured after splitting, before wrapping) from `StepConfig`; same implementation as step 1, ONE call (PyMeshLab defaults; the former `decimate_again` round was removed with fast_simplification, 2026-10-04 — see [reconstruction](reconstruction.md#decimation-after-reconstruction-2026-10-04)). Missing the target is **never** a reason to fail the part or the mesh (owner decision, 2026-10-03): the other steps decide whether the model is repaired, and extra faces only make slicing and printing slower. |
+| 5a | `winding.step_winding_reconstruct` | Rebuilds the part as a solid: grid spacing `h = min(whole_model_diag/800, 0.15)` (alpha-wrap's alpha); block count from `StepConfig.reconstruct_memory_budget_bytes` (`batch_repair.toml` `reconstruct_memory_budget_gb`, default 10). A part that rebuilds to nothing (an open sheet such as debris, or a closed part thinner than the grid) is dropped, with `dropped` and the reason in the step detail; the model is merged without it, and the judge's retained-volume check still catches gross loss. Fails the part if no block count fits the estimate, or if the result is empty, non-finite, open or degenerate; non-manifold edges are passed on (`nm=N passed on` in the detail) for 5b/5c to repair (owner decision 2026-10-04). Replaced `alphawrap.step_alpha_wrap` (2026-10-03). With `--alpha`, `repairer.part_steps_for('alpha-wrap')` puts `alphawrap.step_alpha_wrap` here instead (alpha/offset from `pipeconfig.alpha_wrap_parameters`, no block budget); 5b and 5c are unchanged. Alpha-wrap goes through a hole wider than alpha and wraps both sides of the surface (a skin ~2 × offset thick): the judge refuses that model as DESTROYED (end-to-end `c_hole_seam_debris`), where winding closes the hole |
+| 5b | `decimator.make_step()` | Reads `faceCount` (target captured after splitting, before wrapping) from `StepConfig`; same implementation as step 1, ONE call (PyMeshLab defaults; the former `decimate_again` round was removed with fast_simplification, 2026-10-04 — see [reconstruction](../archive/reconstruction.md#decimation-after-reconstruction-2026-10-04)). Missing the target is **never** a reason to fail the part or the mesh (owner decision, 2026-10-03): the other steps decide whether the model is repaired, and extra faces only make slicing and printing slower. |
 | 5c | `execstep.ConditionStep(scanner.scan, scanner.has_defects, meshfix.step_meshfix_repair)` | MeshFix only if the decimated part has open or non-manifold edges (decimating any rebuilt surface adds a few); unavailable/failed tool fails the step |
 | 6 | `execstep.run_merge_step` → `splitter.merge` | Concatenate successful parts; no welding or boolean union |
 | 7 | Closing repair checks | Finite coordinates, component volume, lost-vertex measurements; exceptions fail repair |
 | 8 | `processor._judge` | Ordered gates below |
 | 9 | `processor.write` | Atomically write accepted mesh or a full-mesh failure marker |
+
+Gate check on real models (2a/4a; 2026-10-06, `skip_clean = true`,
+`max_faces = 900000`, outputs under `/mnt/sda2/STL/GateSample/out/`): five
+models were skipped whole, four had some clean parts merged unrepaired, and
+every output passed the repair tool Bambu recommends, which found nothing the
+scan missed. The Amidara base (no NM or open edges, 922 winding seams) fails
+the gate and is repaired normally (100.00% volume, 0 seams). Slicing and
+printing were not confirmed; the task was closed by the owner (2026-10-06)
+and `skip_clean` stays off by default.
+
+`--alpha` forces `skip_clean` off (owner, 2026-10-11;
+`batch_repair._without_clean_gate_for_alpha`, applied at the top of
+`_run`). Alpha-wrap is run to remove self-intersections: they print fine
+but stop Bambu Studio's mesh boolean. `is_already_clean` does not detect
+them, so with the gate on, a self-intersecting model (2a) or part (4a, or
+the NM fast path) would be merged without being wrapped. When the toml
+set `skip_clean = true`, the run logs a `[warning]` naming the disabled
+gate on the terminal and in `batch.log`, right after the reconstruction line.
 
 Reconstruction uses `h=min(diag/800, 0.15)` (alpha-wrap, when listed explicitly,
 uses that as alpha with `offset=min(diag/2000, 0.06)`); `diag` belongs to the
@@ -139,6 +213,74 @@ open-edge counts and the same volume as the in-memory result. These are
 fits to these runs, not bounds; MeshFix-heavy multi-part models are not yet
 in the table.
 
+**Re-measured with float64 vertices (2026-10-05).** Same method, both code
+trees on the same machine in one session (before: `daa5687`, float32
+`Geometry`). The constants were kept: every peak moved by 0–4 %, and every
+estimate still exceeds its peak by at least 1.44×. Mirko is no longer on
+disk; its row above was not re-measured.
+
+| Model | Prepare peak, before → after | Repair peak, before → after | Estimate | Ratio after |
+|---|---|---|---|---|
+| foot1 | 130 → 130 MB | 2.77 → 2.82 GB | 4.04 GB | 1.44 |
+| sphere r 132 | 130 → 130 MB | 14.90 → 15.07 GB | 24.2 GB | 1.61 |
+| join_complication (→ 900 k) | 1.89 → 1.91 GB | 1.61 → 1.68 GB | 2.79 GB | 1.66 |
+| join_complication, cache hit | 326 → 331 MB | — | — | — |
+| join_complication, `max_faces` 0 | 0.90 → 0.92 GB | 1.94 → 1.97 GB | 3.40 GB | 1.72 |
+
+Prepare on join: 3.06 GB reserved for 1.91 GB, 1.60×. The "before" column
+differs from the 2026-10-04 table (join repair 1.47 → 1.61 GB) because the
+code changed in between (PLY cache, planarquadric decimation, chunked
+load); compare within this table only.
+
+### Alpha-wrap (`--alpha`, 2026-10-10)
+
+`jobmemory.repair_bytes(..., 'alpha-wrap')`: per part, the wrap step costs
+`ALPHA_BYTES_PER_UNIT` (2,150 B) per unit of A/α² plus
+`ALPHA_BYTES_PER_INPUT_FACE` (500 B) per part face, and outputs
+`1.6·units + 1.2·part faces` faces, which feed the decimation, MeshFix and
+finished-part terms as for winding. No block budget applies.
+
+Method: the real repair child (`--reconstruction alpha-wrap --max-faces 0`),
+one model at a time, `wait4` max RSS (the acceptance figure); VmRSS sampled
+every 0.2 s and matched to step-log times to find the phase. The original
+sources had left `/mnt/sda2/STL/Fixing`, so each model is its 900k PLY
+decimation cache written out as an STL (`Fixing.decimated/…900000.1cd393dc.ply`).
+`c3po 150k` is that cache decimated to 150k (same area, fewer faces);
+`c3po ×0.4` is it scaled to 62 mm, so alpha is below the 0.15 cap. Every
+other model has a diagonal over 120 mm, so alpha = 0.15. Shell floor 100.
+
+| Model (cache) | Parts | Faces | Units A/α² | Wrapped faces | Peak | Estimate | Ratio | Result |
+|---|---|---|---|---|---|---|---|---|
+| sword (`zoro/Roronoa Zoro v2/…/Sword_for_head`) | 1 | 900 k | 0.09 M | 1.03 M | 0.90 GB | 1.36 GB | 1.51 | PROCESS |
+| robocop arm (`Robocop Statue/RIGHT_ARM`) | 1 | 900 k | 0.43 M | 1.46 M | 1.39 GB | 1.87 GB | 1.34 | PROCESS |
+| c3po ×0.4 (alpha 0.077) | 1 | 900 k | 0.72 M | 1.89 M | 1.83 GB | 2.50 GB | 1.36 | PROCESS |
+| c3po 150k | 1 | 150 k | 1.19 M | 1.79 M | 2.35 GB | 3.05 GB | 1.30 | PROCESS |
+| c3po (`Princess_Leia_x20/C3PO_Head`) | 1 | 900 k | 1.19 M | 2.55 M | 2.64 GB | 3.51 GB | 1.33 | PROCESS |
+| frost leg (`…Pre_Supported/FROST_leg_left (hollowed out)`) | 1,061 | 900 k | 1.42 M | 2.90 M | 2.21 GB | 2.88 GB | 1.30 | DESTROYED |
+| bust | 4 | 900 k | 3.68 M | 6.61 M | 4.26 GB | 5.36 GB | 1.26 | DESTROYED |
+| zoro 178 (`zoro/NomNom Zoro/…/178mm_zoro`) | 1 | 900 k | 3.27 M | 5.32 M | 6.17 GB | 7.99 GB | 1.30 | PROCESS |
+| leia lower body (`Princess_Leia_x20/Lower_Body`) | 1 | 900 k | 6.35 M | 9.71 M | 11.58 GB | 14.62 GB | 1.26 | PROCESS |
+
+Findings:
+
+- The peak was in the `alpha_wrap` step on every model; decimation and
+  MeshFix stayed lower.
+- Wrapped faces ≈ 1.38·units + 1.0·part faces (bust +10 %). Area alone is
+  wrong: the sword's 0.09 M units wrapped to 1.03 M faces.
+- Wrap-step peak ≈ 0.41 GB + 1.58–1.70 KB per unit + ~390 B per input face
+  (the c3po pair: 750 k more faces, +0.29 GB). 500 B/face is an empirical
+  allowance, not a measured allocation: it keeps the mostly fixed-cost
+  sword above 1.25×.
+- The per-unit cost rises slowly with size (1.58 KB small, 1.66 zoro, 1.70
+  leia), so the margin is thinnest on the largest wraps (bust, leia 1.26).
+  Not measured beyond 6.35 M units (the largest cache, Rock_Base_B, is
+  13.4 M); not measured on inputs above 900 k faces (no such source left;
+  the historical 3.8 M-face join_complication, 3.59 GB in
+  [reconstruction](../archive/reconstruction.md), is context, not calibration).
+- The bust and the hollowed frost leg were refused (DESTROYED) under
+  alpha-wrap; the bust was published by the default (winding) run on
+  2026-10-08. Holes wider than alpha: see step 5a.
+
 ## Limits and observability
 
 - Initial-decimation loss, meaningful small-part loss, and final winding are
@@ -146,8 +288,8 @@ in the table.
 - Each model has a raw log beside its output (`foo.log`): intake conversion
   and every repair attempt append a dated header; a repair child's stdout and
   stderr go straight into it (all tools, crash messages, faulthandler
-  traceback), with a separator line before and after each step. Blender's
-  output is copied in after each Blender run. A log that cannot be written
+  traceback), with a separator line before and after each step. Intake
+  conversion adds one line with what it wrote and dropped, or why it failed. A log that cannot be written
   only produces a warning.
 - Incremental step logging exists (`batch.log`), and `progress.log` persists
   run/progress/job/final records; the terminal summary is printed separately.
@@ -160,7 +302,15 @@ in the table.
   rebuilt to 29 M faces and decimated for 353 s at 13.9 GB. Admission now
   reserves for it; reducing it is an open owner decision.
 - Process-group cleanup cannot cover descendants that deliberately leave the
-  group. Conversion intake and direct Blender use have separate lifecycle limits.
-- Startup checks libigl, Blender, PyMeshFix, and PyMeshLab (also the
-  decimator). Splitting itself uses NumPy/SciPy, not PyMeshLab.
+  group.
+- Startup checks every library once (`libs.dependencies.check_all`, from
+  `_check_environment`): NumPy, SciPy, libigl, PyMeshLab and PyMeshFix
+  required (Blender is retired since 2026-10-06, see modules.md), CGAL
+  optional, and required for a `--alpha` run (`also_required`). Every run
+  probes CGAL here (a default run reports it as optional, as before);
+  only a `--alpha` run loads `libs.alphawrap`. One line each: `[debug]` when
+  available or an optional one is missing, `[error]` when a required one is,
+  and the run stops. Library modules import their packages plainly, so a
+  missing required package usually fails earlier, at import. No step
+  handles a missing library (owner, 2026-10-05).
 - No TUI is planned: runs are configured by editing `batch_repair.toml`.

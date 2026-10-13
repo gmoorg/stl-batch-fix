@@ -37,7 +37,7 @@ TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
 
 def mesh(verts=TETRA_VERTS, faces=TETRA_FACES,
          path='/in/body.stl', destination='/out/body.stl'):
-    geometry = Geometry(np.array(verts, dtype=np.float32),
+    geometry = Geometry(np.array(verts, dtype=np.float64),
                         np.array(faces, dtype=np.int64).reshape(-1, 3))
     return Mesh(path, destination, Kind.BINARY_STL, len(geometry.faces),
                 True, None, geometry)
@@ -159,6 +159,22 @@ class TestTheDecision(unittest.TestCase):
                 self.assertTrue(outcome.reason.strip())
                 self.assertIsNotNone(outcome.repair)
                 self.assertIsNotNone(outcome.decimation)
+
+
+class TestReconstructionChoice(unittest.TestCase):
+    """A bad choice stops before any work: nothing is decimated."""
+
+    def test_unknown_reconstruction_raises_before_decimation(self):
+        with mock.patch.object(processor, 'decimate_initial') as decimate:
+            with self.assertRaises(ValueError):
+                process(mesh(), 0, reconstruction='marching-cubes')
+        decimate.assert_not_called()
+
+    def test_custom_steps_cannot_be_combined_with_alpha_wrap(self):
+        with mock.patch.object(processor, 'decimate_initial') as decimate:
+            with self.assertRaises(ValueError):
+                process(mesh(), 0, part_steps=(), reconstruction='alpha-wrap')
+        decimate.assert_not_called()
 
 
 class TestNoFaceCountRejectionGate(unittest.TestCase):

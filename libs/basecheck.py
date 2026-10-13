@@ -194,7 +194,13 @@ class Result:
 
 @dataclass(frozen=True)
 class Grid:
-    """The underside map, kept for plotting.  NaN = no material below foot_height."""
+    """The underside map and its masks.  NaN = no material in the analysed band.
+
+    contact       cells in layer 1
+    flagged       check B: above layer 1, too low for support, shallow
+    overhang      shallow undersides above the unsupportable band — what
+                  automatic supports would have to carry
+    """
 
     x0: float
     y0: float
@@ -202,6 +208,7 @@ class Grid:
     height: np.ndarray
     contact: np.ndarray
     flagged: np.ndarray
+    overhang: np.ndarray
 
 
 # ---------------------------------------------------------------- clipping
@@ -463,8 +470,8 @@ def check(parts, thresholds: Thresholds, keep_grid: bool = False) -> Result:
                      f'support, above layer 1')
 
     overhangs = ()
+    free = valid & shallow_under & (height >= th.unsupportable_top)
     if not th.supports_enabled:
-        free = valid & shallow_under & (height >= th.unsupportable_top)
         overhangs = _regions(free, height, contact, lattice, bbox_min, th.min_region_area)
         if overhangs:
             risks.append(f'{len(overhangs)} near-plate overhang region(s) and supports are off')
@@ -473,7 +480,7 @@ def check(parts, thresholds: Thresholds, keep_grid: bool = False) -> Result:
 
     grid = None
     if keep_grid:
-        grid = Grid(lattice.x0, lattice.y0, cell, height, contact, gap)
+        grid = Grid(lattice.x0, lattice.y0, cell, height, contact, gap, free)
     return Result(base, unsupportable, overhangs, shallow, tuple(risks),
                   tuple(incomplete), tuple(notes), cell, min_z, grid)
 

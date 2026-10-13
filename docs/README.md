@@ -6,9 +6,12 @@ Read only the reference relevant to the task:
 - [Pipeline](refactor/orchestration.md): current calls, conditions, failures.
 - [TODO](refactor/TODO.md): open work and agreed future design.
 - [Tests](refactor/tests.md): commands, suite boundaries, regression evidence.
-- [Reconstruction](refactor/reconstruction.md): winding-number + marching-cubes experiment (alpha-wrap alternative).
 
-[Archives](../../stl-batch-fix.old/archive/README.md) (outside the repository) retain dated reviews and historical evidence.
+[Archive](archive/README.md) (in the repository, since 2026-10-10): the
+investigations behind current decisions — winding reconstruction evidence,
+the 2026-10-04 full-run errors. The older
+[outside archive](../../stl-batch-fix.old/archive/README.md) keeps dated
+reviews and history from before. Neither is a specification.
 All current actions belong in TODO. Avoid recursive documentation reads.
 
 ## Keep one current reference per topic

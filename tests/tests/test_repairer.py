@@ -35,30 +35,37 @@ from unittest import mock
 
 import numpy as np
 
-from libs import alphawrap, decimator, execstep, meshfix, meshlab, pipeconfig, repairer, scanner, welder, winding
+from libs import decimator, execstep, meshfix, meshlab, pipeconfig, repairer, scanner, splitter, welder, winding
 from libs.mesh_io import Geometry, Kind, Mesh
 from libs.pipeconfig import StepConfig
 from libs.repairer import Result, Step, StepResult, repair
+from tests.tests import defect_spheres as ds
 
 TETRA_VERTS = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
 TETRA_FACES = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
 
-#: Historical combined CLEAN call, retained to test the unwired tools.
-CLEAN_FILTERS_COMBINED: tuple[tuple[str, dict], ...] = (
-    ('meshing_remove_null_faces', {}),
-    ('meshing_merge_close_vertices', {'threshold': 0.1}),
-    ('meshing_remove_duplicate_faces', {}),
-    ('meshing_remove_unreferenced_vertices', {}),
-)
+def clean_filters_combined() -> tuple[tuple[str, dict], ...]:
+    """Historical combined CLEAN call, retained to test the unwired tools."""
+    return (
+        ('meshing_remove_null_faces', {}),
+        ('meshing_merge_close_vertices', {'threshold': meshlab.percent(0.1)}),
+        ('meshing_remove_duplicate_faces', {}),
+        ('meshing_remove_unreferenced_vertices', {}),
+    )
 
-#: Only tests that explicitly exercise these retained tools need them.
-HAVE_TOOLS = meshlab.is_available() and meshfix.is_available()
-needs_tools = unittest.skipUnless(
-    HAVE_TOOLS, "pymeshlab and pymeshfix are both needed")
+try:
+    from libs import alphawrap
+except ImportError as exc:
+    # CGAL is optional (alpha-wrap is explicit-use): only the tests that use
+    # it are skipped. Any other import error is a real failure.
+    if not (exc.name or '').startswith('CGAL'):
+        raise
+    alphawrap = None
+needs_cgal = unittest.skipIf(alphawrap is None, 'CGAL (optional) is not installed')
 
 
 def mesh(verts, faces, source='/in/body.stl', destination='/out/body.stl'):
-    geometry = Geometry(np.array(verts, dtype=np.float32),
+    geometry = Geometry(np.array(verts, dtype=np.float64),
                         np.array(faces, dtype=np.int64).reshape(-1, 3))
     return Mesh(source, destination, Kind.BINARY_STL, len(geometry.faces),
                 True, None, geometry)
@@ -174,7 +181,7 @@ class TestContract(unittest.TestCase):
         at 200% volume. The other three are not optional."""
         self.assertEqual(self._clean_filter_calls(),
                          [('meshing_remove_null_faces', {}),
-                          ('meshing_merge_close_vertices', {'threshold': 0.1}),
+                          ('meshing_merge_close_vertices', {'threshold': meshlab.percent(0.1)}),
                           ('meshing_remove_duplicate_faces', {}),
                           ('meshing_remove_unreferenced_vertices', {})])
 
@@ -220,30 +227,31 @@ class TestLostVertices(unittest.TestCase):
     """Exact comparison reported 382 losses on a mesh that lost nothing."""
 
     def test_float_noise_is_not_a_loss(self):
-        """PyMeshLab's float64 round trip re-rounds coordinates a repair never
-        touched. Measured: the furthest such move was 1.0e-05."""
-        before = np.array(TETRA_VERTS, dtype=np.float32)
+        """Float noise on a vertex a repair never meant to move. Measured
+        1.0e-05 at most while PyMeshLab's float64 results were rounded back
+        to float32."""
+        before = np.array(TETRA_VERTS, dtype=np.float64)
         after = before + 1e-6
         self.assertEqual(repairer._count_lost(before, after), 0)
 
     def test_a_deleted_vertex_is_a_loss(self):
-        before = np.array(TETRA_VERTS, dtype=np.float32)
+        before = np.array(TETRA_VERTS, dtype=np.float64)
         self.assertEqual(repairer._count_lost(before, before[:3]), 1)
 
     def test_a_real_displacement_is_a_loss(self):
         """The fixtures that genuinely lose geometry move a vertex by ~8.0,
         the sphere's radius — five orders of magnitude above the noise."""
-        before = np.array(TETRA_VERTS, dtype=np.float32)
+        before = np.array(TETRA_VERTS, dtype=np.float64)
         after = before.copy()
         after[0] = [50, 50, 50]
         self.assertEqual(repairer._count_lost(before, after), 1)
 
     def test_an_empty_output_loses_everything(self):
-        before = np.array(TETRA_VERTS, dtype=np.float32)
+        before = np.array(TETRA_VERTS, dtype=np.float64)
         self.assertEqual(repairer._count_lost(before, np.empty((0, 3))), 4)
 
     def test_the_tolerance_is_adjustable(self):
-        before = np.array(TETRA_VERTS, dtype=np.float32)
+        before = np.array(TETRA_VERTS, dtype=np.float64)
         after = before + 0.01
         self.assertEqual(repairer._count_lost(before, after, 1e-4), 4)
         self.assertEqual(repairer._count_lost(before, after, 1.0), 0)
@@ -261,7 +269,7 @@ class TestSequence(unittest.TestCase):
         # One Step.PART entry per part: `part_steps=` now REPLACES the
         # default per-part sequence entirely (the uniform-step refactor
         # removed the old auto-appended `_decimate_to_target_and_fix` tail —
-        # see docs/refactor/TODO.md's "Uniform-step refactor" section), so a
+        # see docs/refactor/modules.md's "Contracts" section), so a
         # single-entry custom `part_steps` produces exactly one PART record.
         self.assertEqual([s.step for s in result.steps],
                          [Step.SPLIT, Step.PART, Step.MERGE])
@@ -275,7 +283,7 @@ class TestSequence(unittest.TestCase):
     # uniform-step refactor (docs/refactor/TODO.md) -- there is no on/off
     # flag any more, so this premise no longer applies.
 
-    @unittest.skipUnless(alphawrap.is_available(), "cgal is needed")
+    @needs_cgal
     def test_an_inverted_mesh_comes_back_outward(self):
         """Real alpha wrapping reconstructs outward-facing geometry."""
         result = repair(inverted_tetra(), min_shell_faces=0,
@@ -531,6 +539,7 @@ class TestFailure(unittest.TestCase):
         self.assertIn('rebuild gave up', result.problem)
         self.assertNotIn(Step.MERGE, [s.step for s in result.steps])
 
+    @needs_cgal
     def test_an_explicit_alpha_wrap_still_propagates_failure(self):
         with mock.patch.object(alphawrap, 'wrap', side_effect=RuntimeError('wrap gave up')):
             result = repair(tetra(), min_shell_faces=0,
@@ -540,7 +549,6 @@ class TestFailure(unittest.TestCase):
         self.assertNotIn(Step.MERGE, [s.step for s in result.steps])
 
 
-@needs_tools
 class TestWhyCleanIsAllFourFilters(unittest.TestCase):
     """The four filters are a set, and the reasons were prose until now.
 
@@ -576,13 +584,13 @@ class TestWhyCleanIsAllFourFilters(unittest.TestCase):
                         "that is what makes the doubles case dangerous")
         alone = meshlab.apply_filters(
             doubled, (('meshing_merge_close_vertices',
-                       {'threshold': 0.1}),))
+                       {'threshold': meshlab.percent(0.1)}),))
         self.assertGreater(scanner.scan(alone).non_manifold, 0,
                            "merge alone should leave a branching surface")
 
     def test_the_full_set_repairs_what_merge_alone_breaks(self):
         """The same input through all four comes out as one tetrahedron."""
-        result = meshlab.apply_filters(self.doubled(), CLEAN_FILTERS_COMBINED)
+        result = meshlab.apply_filters(self.doubled(), clean_filters_combined())
         self.assertEqual(len(result.geometry.faces), len(TETRA_FACES))
         self.assertTrue(scanner.scan(result).is_clean)
 
@@ -596,10 +604,10 @@ class TestWhyCleanIsAllFourFilters(unittest.TestCase):
         weight.
         """
         merged = meshlab.apply_filters(
-            self.doubled(), CLEAN_FILTERS_COMBINED[:3])       # all but the last
+            self.doubled(), clean_filters_combined()[:3])       # all but the last
         orphans = (len(merged.geometry.verts)
                    - len(np.unique(merged.geometry.faces)))
-        full = meshlab.apply_filters(self.doubled(), CLEAN_FILTERS_COMBINED)
+        full = meshlab.apply_filters(self.doubled(), clean_filters_combined())
         after = (len(full.geometry.verts)
                  - len(np.unique(full.geometry.faces)))
         self.assertEqual(after, 0, "the last filter should leave no orphans")
@@ -632,7 +640,6 @@ class TestZeroThicknessSheets(unittest.TestCase):
         self.assertEqual(scanner.scan(masked).open_edges, 0,
                          "the sheet no longer masks the hole — fixture stale")
 
-    @needs_tools
     def test_removing_a_flap_from_a_sound_mesh_restores_it(self):
         """A flap on intact surface shows as non-manifold, and removing it
         returns the mesh to its control exactly."""
@@ -647,7 +654,6 @@ class TestZeroThicknessSheets(unittest.TestCase):
         self.assertAlmostEqual(scanner.volume(fixed), scanner.volume(sound),
                                places=5)
 
-    @needs_tools
     def test_removing_a_sheet_that_masked_a_hole_repairs_it(self):
         """The direction that matters: one face of the sheet becomes the
         missing surface and the redundant one goes, so the filter **repairs**
@@ -658,7 +664,6 @@ class TestZeroThicknessSheets(unittest.TestCase):
         self.assertTrue(scanner.scan(fixed).is_clean)
         self.assertEqual(len(fixed.geometry.faces), len(self.FACES))
 
-    @needs_tools
     def test_both_faces_are_never_deleted(self):
         """Deleting both is rejected, not untried: a sheet may be large and
         both faces may be the only surface in that region, so removing both
@@ -670,7 +675,7 @@ class TestZeroThicknessSheets(unittest.TestCase):
                          "a face of the sheet survives as real surface")
 
 
-@unittest.skipUnless(alphawrap.is_available(), "cgal is needed")
+@needs_cgal
 class TestRealTools(unittest.TestCase):
     """Real CGAL topology through part_steps= at a cheap explicit resolution.
 
@@ -700,7 +705,7 @@ class TestRealTools(unittest.TestCase):
         self.assertTrue(scanner.scan(result.mesh).is_clean)
 
 
-class TestBlenderBeforePymeshfix(unittest.TestCase):
+class TestStepSequence(unittest.TestCase):
     """Composition and ordering behavior for an explicitly configured route.
 
     `repairer.PART_MESH_STEPS`/`_repair_part` (a fixed, always-composed
@@ -739,49 +744,49 @@ class TestBlenderBeforePymeshfix(unittest.TestCase):
             entries, mesh_in, None, steps, step=Step.PART)
         return outcome.ok, outcome.mesh, outcome.detail
 
-    def test_blender_runs_before_pymeshfix(self):
+    def test_steps_run_in_order(self):
         fake_steps = (('orient', self._record('orient')),
-                     ('blender', self._record('blender')),
+                     ('rebuild', self._record('rebuild')),
                      ('pymeshfix', self._record('pymeshfix')))
         ok, _, detail = self._run(fake_steps, tetra())
         self.assertTrue(ok, detail)
-        self.assertEqual(self.calls, ['orient', 'blender', 'pymeshfix'])
+        self.assertEqual(self.calls, ['orient', 'rebuild', 'pymeshfix'])
 
-    def test_pymeshfix_receives_blenders_output_not_the_original_part(self):
+    def test_the_next_step_receives_the_previous_output_not_the_original(self):
         """The composition must forward geometry, not just call order."""
         original = tetra()
-        blender_output = mesh([[9, 9, 9], [10, 9, 9], [9, 10, 9], [9, 9, 10]],
+        rebuilt = mesh([[9, 9, 9], [10, 9, 9], [9, 10, 9], [9, 9, 10]],
                               TETRA_FACES)
         seen_by_pymeshfix = []
 
         def fake_orient(m, config=None):
             return True, m, 'oriented'
 
-        def fake_blender(m, config=None):
-            return True, blender_output, 'blender ran'
+        def fake_rebuild(m, config=None):
+            return True, rebuilt, 'rebuild ran'
 
         def fake_pymeshfix(m, config=None):
             seen_by_pymeshfix.append(m)
             return True, m, 'pymeshfix ran'
 
-        fake_steps = (('orient', fake_orient), ('blender', fake_blender),
+        fake_steps = (('orient', fake_orient), ('rebuild', fake_rebuild),
                      ('pymeshfix', fake_pymeshfix))
         self._run(fake_steps, original)
 
         self.assertEqual(len(seen_by_pymeshfix), 1)
-        self.assertIs(seen_by_pymeshfix[0], blender_output)
+        self.assertIs(seen_by_pymeshfix[0], rebuilt)
         self.assertFalse(
             np.array_equal(seen_by_pymeshfix[0].geometry.verts,
                            original.geometry.verts),
-            "pymeshfix must see blender's changed geometry, not the input")
+            "pymeshfix must see the rebuilt geometry, not the input")
 
-    def test_a_hard_blender_failure_stops_before_pymeshfix(self):
+    def test_a_hard_failure_stops_the_sequence(self):
         fake_steps = (('orient', lambda m, config=None: (True, m, 'oriented')),
-                     ('blender', self._record('blender', ok=False)),
+                     ('rebuild', self._record('rebuild', ok=False)),
                      ('pymeshfix', self._record('pymeshfix')))
         ok, _, detail = self._run(fake_steps, tetra())
         self.assertFalse(ok)
-        self.assertEqual(self.calls, ['blender'])
+        self.assertEqual(self.calls, ['rebuild'])
         self.assertNotIn('pymeshfix', self.calls)
 
 class TestAlphaWrapBinding(unittest.TestCase):
@@ -818,8 +823,9 @@ class TestAlphaWrapBinding(unittest.TestCase):
 
     # Alpha-wrap is no longer the default part step (winding reconstruction
     # replaced it) but stays available: these run it as an explicit entry.
-    ALPHA_WRAP = (('alpha_wrap', alphawrap.step_alpha_wrap),)
+    ALPHA_WRAP = (('alpha_wrap', alphawrap.step_alpha_wrap),) if alphawrap else ()
 
+    @needs_cgal
     def test_alpha_wrap_step_uses_whole_mesh_recipe(self):
         whole = two_tetrahedra()
         with mock.patch.object(alphawrap, 'wrap', side_effect=lambda m, a, o: m) as wrapped:
@@ -831,6 +837,7 @@ class TestAlphaWrapBinding(unittest.TestCase):
             self.assertAlmostEqual(call.args[1], diagonal / 800)
             self.assertAlmostEqual(call.args[2], diagonal / 2000)
 
+    @needs_cgal
     def test_alpha_wrap_step_caps_alpha_and_offset_on_a_large_mesh(self):
         original = two_tetrahedra()
         large = original.with_geometry(Geometry(
@@ -859,6 +866,7 @@ class TestAlphaWrapBinding(unittest.TestCase):
             for call in rebuilt.call_args_list:
                 self.assertAlmostEqual(call.args[1], expected)
 
+    @needs_cgal
     def test_custom_tool_bypasses_cgal(self):
         """A custom `part_steps` that never mentions `step_alpha_wrap` never
         touches CGAL.
@@ -873,8 +881,7 @@ class TestAlphaWrapBinding(unittest.TestCase):
         still worth guarding, is that CGAL itself is never invoked when the
         supplied sequence has no step that calls it.
         """
-        with mock.patch.object(alphawrap, '_CGAL', False), \
-             mock.patch.object(alphawrap, '_alpha_wrap_3',
+        with mock.patch.object(alphawrap, '_alpha_wrap_3',
                                side_effect=AssertionError('CGAL touched')):
             result = repair(tetra(), min_shell_faces=0, part_steps=(('recorder', Recorder()),))
         self.assertTrue(result.ok, result.problem)
@@ -883,7 +890,7 @@ class TestAlphaWrapBinding(unittest.TestCase):
 class TestIsAlreadyClean(unittest.TestCase):
     """`is_already_clean(mesh) -> bool` — the skip-gate spike's own check,
     stateless and independent of `pipeconfig`/any other module state (see
-    docs/refactor/TODO.md's "Algorithm questions" section for the spike this
+    ../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md's "Algorithm questions" section for the spike this
     was written for). This tests the function itself; its opt-in call sites
     in `repair` are covered by `TestCleanGates`.
     """
@@ -904,6 +911,12 @@ class TestIsAlreadyClean(unittest.TestCase):
         faces = TETRA_FACES + [[0, 2, 4]]
         m = mesh(verts, faces)
         self.assertFalse(repairer.is_already_clean(m))
+
+    def test_non_manifold_edges_alone_are_not_clean(self):
+        """`nm_only`: NM edges with no open edge and no seam — the case the
+        proposed NM-only fast path would route (docs/refactor/TODO.md)."""
+        fx = ds.fixtures()['nm_only']
+        self.assertFalse(repairer.is_already_clean(mesh(fx.verts, fx.faces)))
 
     def test_inverted_winding_is_not_clean_even_though_scan_is_clean(self):
         """The exact case `Scan.is_clean` alone misses — one face reversed
@@ -1003,11 +1016,277 @@ class TestCleanGates(unittest.TestCase):
 
     def test_model_skip_keeps_the_non_finite_guard(self):
         bad = mesh([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, np.nan]], TETRA_FACES)
-        with mock.patch.object(repairer, 'is_already_clean', return_value=True):
+        with mock.patch.object(repairer, '_is_clean', return_value=True):
             result, recorder, _ = self._run(bad, skip_clean=True)
         self.assertFalse(result.ok)
         self.assertIn('NaN or infinite', result.problem)
         self.assertEqual(recorder.seen, [])
+
+
+def fixture_mesh(name):
+    fx = ds.fixtures()[name]
+    return mesh(fx.verts, fx.faces), fx
+
+
+def fin_tips(fx):
+    """A fin fixture's tips: the centres of its vanish boxes."""
+    return np.array([(np.asarray(lo) + hi) / 2 for lo, hi in fx.vanish_boxes])
+
+
+def small_fins_mesh(n=3, h=0.05):
+    """`n` closed fins `h` high on a 40-segment sphere: NM-only, and MeshFix's
+    result stays within `NM_FAST_PATH_MAX_DEVIATION` (removed surface ~1.9e-3
+    of the diagonal at the defaults). The `nm_only` fixture's 1.5-high fins on
+    a 20-segment sphere do not: the fin tips and MeshFix's flat refills of the
+    coarse facets move the surface ~2% of the diagonal. Returns the mesh and
+    the fin tips."""
+    v, f, tips = ds.build_closed_fins(*ds.sphere(seg=40), n=n, h=h)
+    return mesh(v, f), tips
+
+
+class TestNmFastPath(unittest.TestCase):
+    """`skip_clean`'s NM-only fast path: a part whose only scanned defect is
+    NM edges gets MeshFix alone; a result that is not accepted, or any error,
+    runs the part sequence on the ORIGINAL part instead (never a failure).
+    The fixtures are 2.5% NM per face, far over the production limit, so the
+    route tests lift it; the limit tests set their own."""
+
+    DEFAULT_MAX_PERCENT = repairer.NM_FAST_PATH_MAX_PERCENT
+
+    def setUp(self):
+        patcher = mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', 100.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, m, part_steps, **flags):
+        events = []
+
+        def logger(source_name, event, step, part, duration, detail):
+            events.append((step, detail))
+
+        result = repair(m, min_shell_faces=0, part_steps=part_steps,
+                        step_logger=logger, source_name='/x.stl', **flags)
+        return result, [detail for step, detail in events if step == 'nm_fast_path']
+
+    def _assert_fell_back(self, m, **flags):
+        """A recording sequence ran once, on the original part's geometry."""
+        recorder = Recorder()
+        result, log = self._run(m, (('recorder', recorder),), skip_clean=True, **flags)
+        self.assertTrue(result.ok, result.problem)
+        self.assertEqual(len(recorder.seen), 1)
+        np.testing.assert_array_equal(recorder.seen[0].geometry.verts, m.geometry.verts)
+        np.testing.assert_array_equal(recorder.seen[0].geometry.faces, m.geometry.faces)
+        return log
+
+    def _assert_kept_own_surface(self, result, m, tips):
+        self.assertTrue(result.ok, result.problem)
+        out = result.mesh
+        scan = scanner.scan(out)
+        self.assertEqual((scan.non_manifold, scan.open_edges, scanner.winding_seams(out)[0]), (0, 0, 0))
+        # The fins are gone: no output vertex at any fin tip.
+        tip_distance, _ = repairer.cKDTree(out.geometry.verts).query(tips)
+        self.assertGreater(tip_distance.min(), 1e-3)
+        # Every output vertex is a retained input vertex (MeshFix moves them
+        # ~1e-6; a rebuilt surface moves them ~0.1): no rebuilt surface.
+        distance, _ = repairer.cKDTree(m.geometry.verts).query(out.geometry.verts)
+        self.assertLess(distance.max(), repairer.LOST_VERTEX_TOLERANCE)
+        low, high = repairer.NM_FAST_PATH_VOLUME_BAND
+        self.assertTrue(low <= scanner.component_volume(out) / scanner.component_volume(m) <= high)
+
+    def test_nm_only_part_gets_meshfix_alone(self):
+        m, tips = small_fins_mesh()
+        result, log = self._run(m, None, skip_clean=True)
+        self._assert_kept_own_surface(result, m, tips)
+        self.assertEqual(len(log), 1)
+        self.assertTrue(log[0].startswith('NM 3 in 3126 faces (0.096%): kept'), log)
+
+    def test_the_default_limits_accept_the_small_fixture(self):
+        """Production NM limit and deviation limit, nothing lifted (one fin:
+        0.032% NM; three would be over the 0.05% limit)."""
+        m, tips = small_fins_mesh(n=1)
+        with mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', self.DEFAULT_MAX_PERCENT):
+            result, log = self._run(m, (), skip_clean=True)
+        self._assert_kept_own_surface(result, m, tips)
+        self.assertIn(': kept', log[0])
+
+    def test_it_takes_precedence_over_a_custom_sequence(self):
+        m, tips = small_fins_mesh()
+        result, _ = self._run(m, (), skip_clean=True)
+        self._assert_kept_own_surface(result, m, tips)
+
+    def test_large_fins_fall_back_on_the_shape_check(self):
+        """MeshFix's own results, not forced ones: a removed 1.5-high fin is
+        surface deleted; nm_only's coarse refills are new surface."""
+        for label, m, what in (('one tall fin', small_fins_mesh(n=1, h=1.5)[0], 'removed surface'),
+                               ('nm_only', fixture_mesh('nm_only')[0], 'new surface')):
+            with self.subTest(label):
+                log = self._assert_fell_back(m)
+                self.assertIn(f'fallback: {what}', log[0])
+
+    def test_a_shape_changing_result_falls_back(self):
+        """The Robocop BODY.stl case: MeshFix's result passes topology and
+        volume but adds surface the input never had (a capped recess there,
+        a raised vertex here); the sequence gets the original part."""
+        m, _ = small_fins_mesh()
+        clean = mesh(*ds.sphere(seg=40))
+        bumped = np.array(clean.geometry.verts)
+        bumped[500] *= 1.05                          # 0.5 out on a radius of 10
+        candidate = mesh(bumped, clean.geometry.faces)
+        low, high = repairer.NM_FAST_PATH_VOLUME_BAND
+        kept = scanner.component_volume(candidate) / scanner.component_volume(m)
+        self.assertTrue(low <= kept <= high, f'fixture assumption: volume {kept}')
+        with mock.patch.object(meshfix, 'repair',
+                               return_value=meshfix.Result(candidate, True, None, 0.0)):
+            log = self._assert_fell_back(m)
+        self.assertIn('fallback: new surface', log[0])
+
+    def test_an_error_in_the_shape_check_falls_back(self):
+        m, _ = small_fins_mesh()
+        with mock.patch.object(repairer, 'max_deviation', side_effect=RuntimeError('boom')):
+            log = self._assert_fell_back(m)
+        self.assertIn('fallback: RuntimeError: boom', log[0])
+
+    def test_off_without_skip_clean(self):
+        m, _ = fixture_mesh('nm_only')
+        result, log = self._run(m, ())
+        self.assertTrue(result.ok, result.problem)
+        np.testing.assert_array_equal(result.mesh.geometry.faces, m.geometry.faces)
+        self.assertEqual(log, [])
+
+    def test_other_defects_are_not_eligible(self):
+        for name in ('nm_seam', 'nm_hole'):
+            with self.subTest(name):
+                m, _ = fixture_mesh(name)
+                self.assertEqual(self._assert_fell_back(m), [])
+
+    def test_a_degenerate_face_is_not_eligible(self):
+        m, _ = fixture_mesh('nm_only')
+        f = m.geometry.faces
+        # [a,b,b] twice: zero-area, edge-connected (one shell), and its b-b
+        # self-edge is shared by the pair, so no open edge appears.
+        a, b = f[0][0], f[0][1]
+        m = mesh(m.geometry.verts, np.vstack([f, [[a, b, b], [a, b, b]]]))
+        scan = scanner.scan(m)
+        self.assertTrue(scan.degenerate > 0 and scan.non_manifold > 0 and scan.open_edges == 0
+                        and len(splitter.by_shells(m, min_faces=0)) == 1, f'fixture assumption: {scan}')
+        self.assertEqual(self._assert_fell_back(m), [])
+
+    def test_at_the_limit_is_tried_over_it_is_not(self):
+        m, fx = fixture_mesh('nm_only')
+        with mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', 2.5), \
+                mock.patch.object(repairer, 'NM_FAST_PATH_MAX_DEVIATION', 1.0):
+            self._assert_kept_own_surface(self._run(m, (), skip_clean=True)[0], m, fin_tips(fx))
+        with mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', 2.4):
+            log = self._assert_fell_back(m)
+        self.assertEqual(log, ['NM 20 in 800 faces (2.500%) over limit 2.400%: not tried'])
+
+    def test_the_limit_is_a_share_of_the_part_faces(self):
+        """Same NM count, different sizes: only the larger part is tried."""
+        small = mesh(*ds.build_closed_fins(*ds.sphere(seg=20))[:2])
+        large = mesh(*ds.build_closed_fins(*ds.sphere(seg=40))[:2])
+        for m in (small, large):
+            scan = scanner.scan(m)
+            self.assertEqual((scan.non_manifold, scan.open_edges, scan.degenerate,
+                              scanner.winding_seams(m)[0]), (20, 0, 0, 0), 'fixture assumption')
+        self.assertEqual(len(small.geometry.faces), 800)
+        self.assertGreater(len(large.geometry.faces), 2000)
+        with mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', 1.0), \
+                mock.patch.object(repairer, '_nm_fast_path', return_value=(None, 'stub')):
+            self.assertIn('over limit', self._assert_fell_back(small)[0])
+            self.assertIn('fallback: stub', self._assert_fell_back(large)[0])
+
+    def test_the_default_limit_excludes_the_dense_fixture(self):
+        m, _ = fixture_mesh('nm_only')
+        with mock.patch.object(repairer, 'NM_FAST_PATH_MAX_PERCENT', self.DEFAULT_MAX_PERCENT):
+            log = self._assert_fell_back(m)
+        self.assertEqual(log, ['NM 20 in 800 faces (2.500%) over limit 0.050%: not tried'])
+
+    def test_zero_input_volume_is_not_tried(self):
+        # Two closed fins on one edge, nothing else: 1 NM edge, encloses nothing.
+        m = mesh([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                 [[0, 1, 2], [1, 0, 2], [0, 1, 3], [1, 0, 3]])
+        self.assertEqual(scanner.scan(m).non_manifold, 1, 'fixture assumption')
+        log = self._assert_fell_back(m)
+        self.assertIn('fallback: input volume', log[0])
+
+    def test_a_rejected_meshfix_result_falls_back(self):
+        m, _ = fixture_mesh('nm_only')
+        nan = np.array(m.geometry.verts)
+        nan[0, 0] = np.nan
+        candidates = {
+            'nm left': m,
+            'open left': fixture_mesh('hole')[0],
+            'seams left': fixture_mesh('seam')[0],
+            'non-finite': mesh(nan, m.geometry.faces),
+        }
+        for label, candidate in candidates.items():
+            with self.subTest(label), mock.patch.object(
+                    meshfix, 'repair', return_value=meshfix.Result(candidate, True, None, 0.0)):
+                log = self._assert_fell_back(m)
+                self.assertIn('fallback:', log[0])
+
+    def test_a_failed_meshfix_falls_back(self):
+        m, _ = fixture_mesh('nm_only')
+        failed = meshfix.Result(m, False, 'pymeshfix produced an empty mesh', 0.0)
+        with mock.patch.object(meshfix, 'repair', return_value=failed):
+            log = self._assert_fell_back(m)
+        self.assertIn('fallback:', log[0])
+        self.assertIn('empty mesh', log[0])
+
+    def test_an_error_during_the_attempt_falls_back(self):
+        m, _ = fixture_mesh('nm_only')
+        with mock.patch.object(repairer, '_nm_fast_path', side_effect=RuntimeError('boom')):
+            log = self._assert_fell_back(m)
+        self.assertEqual(log, ['NM 20 in 800 faces (2.500%): fallback: RuntimeError: boom'])
+
+    def test_volume_band_bounds(self):
+        """nm_only keeps ~98.95% of its volume (coarse sphere, flat refills).
+        Its refills also move the surface ~2% of the diagonal, so the shape
+        limit is lifted: this tests the volume band alone."""
+        m, fx = fixture_mesh('nm_only')
+        lifted = mock.patch.object(repairer, 'NM_FAST_PATH_MAX_DEVIATION', 1.0)
+        lifted.start()
+        self.addCleanup(lifted.stop)
+        for band, accepted in (((0.985, 0.99), True),    # inside, near the top
+                               ((0.995, 1.02), False),   # below the lower bound
+                               ((0.97, 0.985), False)):  # above the upper bound
+            with self.subTest(band), mock.patch.object(repairer, 'NM_FAST_PATH_VOLUME_BAND', band):
+                if accepted:
+                    self._assert_kept_own_surface(self._run(m, (), skip_clean=True)[0], m, fin_tips(fx))
+                else:
+                    self.assertIn('outside', self._assert_fell_back(m)[0])
+
+
+class TestMaxDeviation(unittest.TestCase):
+    """`repairer.max_deviation`: the fast path's shape measure."""
+
+    def test_a_mesh_against_itself_is_zero(self):
+        m = mesh(*ds.sphere(seg=40))
+        self.assertAlmostEqual(repairer.max_deviation(m, m), 0.0, places=6)
+
+    def test_it_measures_the_furthest_sample_one_way(self):
+        """A vertex raised 0.5: that far from the sphere, but the sphere's own
+        samples stay within the facet sag of the bumped mesh."""
+        clean = mesh(*ds.sphere(seg=40))
+        bumped = np.array(clean.geometry.verts)
+        bumped[500] *= 1.05
+        bumped = mesh(bumped, clean.geometry.faces)
+        self.assertAlmostEqual(repairer.max_deviation(bumped, clean), 0.5, delta=0.01)
+        self.assertLess(repairer.max_deviation(clean, bumped), 0.5)
+
+    def test_batches_cover_every_face(self):
+        clean = mesh(*ds.sphere(seg=40))
+        bumped = np.array(clean.geometry.verts)
+        bumped[-2] *= 1.05                           # a vertex of the last faces
+        bumped = mesh(bumped, clean.geometry.faces)
+        with mock.patch.object(repairer, 'DEVIATION_CHUNK_FACES', 7):
+            self.assertAlmostEqual(repairer.max_deviation(bumped, clean), 0.5, delta=0.01)
+
+    def test_non_finite_input_is_not_a_number(self):
+        clean = mesh(*ds.sphere(seg=20))
+        bad = np.array(clean.geometry.verts)
+        bad[0, 0] = np.nan
+        self.assertFalse(math.isfinite(repairer.max_deviation(mesh(bad, clean.geometry.faces), clean)))
 
 
 class TestPartDecimation(unittest.TestCase):
@@ -1036,7 +1315,7 @@ class TestPartDecimation(unittest.TestCase):
 
     def geometry(self, n):
         return Geometry(np.array(TETRA_VERTS + [[10, 10, 10], [11, 10, 10], [10, 11, 10], [10, 10, 11]],
-                                 dtype=np.float32),
+                                 dtype=np.float64),
                         np.array((TETRA_FACES + [[4, 6, 5], [4, 5, 7]])[:n], dtype=np.int64))
 
     def test_one_pass_with_the_parts_own_target_and_meshfix_gets_its_output(self):
@@ -1100,83 +1379,6 @@ class TestPartDecimation(unittest.TestCase):
         self.assertEqual(len([s for s in result.steps if s.step is Step.PART]), 1)
         result = repair(tetra(), min_shell_faces=0, part_steps=())
         self.assertEqual([s for s in result.steps if s.step is Step.PART], [])
-
-
-class TestNestedProcessGroupWiring(unittest.TestCase):
-    """Proves `repairer.repair(..., nested_process_group=True)` — the REAL
-    entry point, not a bypass — actually reaches `blender.step_blender_repair`
-    through `StepConfig`, deciding whether the Blender invocation it launches
-    gets its own process session.
-    """
-
-    def _stand_in(self, body: str) -> str:
-        import os
-        import stat
-        import tempfile
-        fd, path = tempfile.mkstemp(suffix='.sh')
-        with os.fdopen(fd, 'w') as f:
-            f.write("#!/bin/sh\n" + body)
-        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
-        self.addCleanup(lambda: os.unlink(path) if os.path.exists(path) else None)
-        return path
-
-    def _run_with_blender_step(self, nested_process_group):
-        import os
-        import tempfile
-        from libs import blender, mesh_io
-
-        # A stand-in that copies a pre-built valid PLY to Blender's own
-        # `--dst` argument (parsed out of the rendered script file, `$3`,
-        # since the script assigns `dst = '<path>'` — matching the shape
-        # `blender.REPAIR_SCRIPT.format` always produces): `repair()`
-        # requires the destination file to exist to accept the run.
-        source_ply = os.path.join(tempfile.mkdtemp(prefix='repairer-nested-test-'),
-                                  'canned.ply')
-        mesh_io.write_ply(mesh(TETRA_VERTS, TETRA_FACES), source_ply)
-        exe = self._stand_in(
-            "dst=$(sed -n \"s/^dst = '\\(.*\\)'$/\\1/p\" \"$3\")\n"
-            f"cp {source_ply} \"$dst\"\n"
-            "echo BLENDER_OK\n"
-            "exit 0\n"
-        )
-        captured = {}
-        real_popen = __import__('subprocess').Popen
-
-        def spy(*args, **kwargs):
-            captured['start_new_session'] = kwargs.get('start_new_session')
-            return real_popen(*args, **kwargs)
-
-        m = mesh(TETRA_VERTS, TETRA_FACES)
-        # `step_blender_repair` constructs its own `Runner` internally with
-        # no way to inject the stand-in executable — patch `Runner.__init__`
-        # to force our stand-in while preserving the constructor's own
-        # `own_process_group` argument, which is exactly the thing under
-        # test (it is `step_blender_repair`'s own decision, driven by
-        # `config.nested_process_group`, and must reach here unmodified).
-        orig_init = blender.Runner.__init__
-
-        def patched_init(self, executable='blender', own_process_group=True):
-            orig_init(self, exe, own_process_group)
-
-        with mock.patch('subprocess.Popen', spy), \
-             mock.patch.object(blender.Runner, '__init__', patched_init):
-            result = repair(
-                m, part_steps=(('blender_repair', blender.step_blender_repair),),
-                nested_process_group=nested_process_group)
-        self.assertTrue(result.ok, result.problem)
-        return captured['start_new_session']
-
-    def test_nested_true_does_not_take_its_own_session(self):
-        started_own_session = self._run_with_blender_step(nested_process_group=True)
-        self.assertFalse(started_own_session,
-                         "nested_process_group=True must reach Runner as "
-                         "own_process_group=False")
-
-    def test_nested_false_default_takes_its_own_session(self):
-        started_own_session = self._run_with_blender_step(nested_process_group=False)
-        self.assertTrue(started_own_session,
-                        "nested_process_group=False (the default) must "
-                        "reach Runner as own_process_group=True")
 
 
 if __name__ == '__main__':

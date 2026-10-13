@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import decimator, execstep, indicators, mesh_io, pipeconfig, repairer, scanner, splitter, steplog
 from .execstep import Step
@@ -89,7 +89,7 @@ def _judge(source: Mesh,
     to decimate the merged, repaired mesh a second time against the whole
     file's `max_faces` budget, which is what introduced non-manifold edges
     on real models (confirmed 2026-09-23; see
-    docs/refactor/TODO.md's "alpha-wrap's second decimation pass
+    ../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md's "alpha-wrap's second decimation pass
     reintroduces non-manifold edges" entry). `repairer.repair` now
     decimates each PART back to its own pre-alpha-wrap size individually,
     and fixes any part that comes out defective, before merge — so by the
@@ -165,11 +165,17 @@ def _judge(source: Mesh,
                    scan=scan, decimation=decimated, repair=repaired)
 
 
-def _decimation_failure_reason(result: decimator.Result) -> str:
+def _decimation_failure_reason(attempts) -> str:
     """Explain every failed decimation attempt for the undecimated marker."""
-    attempts = '; '.join(f"{rung.value}: {why}"
-                         for rung, why in result.attempts)
-    return f"every decimator failed ({attempts})"
+    listed = '; '.join(f"{rung.value}: {why}" for rung, why in attempts)
+    return f"every decimator failed ({listed})"
+
+
+def undecimated_outcome(attempts) -> Outcome:
+    """The UNDECIMATED outcome for an initial decimation that failed: the
+    marker is the source, untouched."""
+    return Outcome(Indicator.UNDECIMATED, None, 'source',
+                   _decimation_failure_reason(attempts))
 
 
 def _decimate_logged(mesh: Mesh, max_faces: int, step_name: str,
@@ -177,7 +183,7 @@ def _decimate_logged(mesh: Mesh, max_faces: int, step_name: str,
     """The initial whole-mesh decimation pass, run through the SAME shared
     executor and the SAME `decimator.make_step` implementation that
     `repairer.repair` uses for each part's post-reconstruction `decimate`
-    entry — one decimator step implementation in every position (docs/refactor/TODO.md's "Uniform-step refactor" section).
+    entry — one decimator step implementation in every position (docs/refactor/modules.md's "Contracts" section).
 
     `evidence` is a fresh local list owned entirely by this call: nothing
     else reads or writes it, and it goes out of scope when this function
@@ -226,9 +232,8 @@ def decimate_initial(mesh: Mesh, max_faces: int,
         # Its own outcome, not a lesser repair failure.  A file that cannot be
         # reduced will be reduced by the printer instead, which reintroduces
         # exactly the defects this tool removes.
-        return (Outcome(Indicator.UNDECIMATED, None, 'source',
-                        _decimation_failure_reason(decimated),
-                        decimation=decimated), decimated)
+        return (replace(undecimated_outcome(decimated.attempts), decimation=decimated),
+                decimated)
     return None, decimated
 
 
@@ -236,11 +241,11 @@ def process(mesh: Mesh, max_faces: int,
             part_steps=None,
             step_logger: steplog.StepLogger = steplog.null_logger,
             source_name: str = '',
-            nested_process_group: bool = False,
             *,
             skip_clean: bool = False,
             reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
-            min_shell_faces: int = splitter.MIN_SHELL_FACES
+            min_shell_faces: int = splitter.MIN_SHELL_FACES,
+            reconstruction: str = repairer.RECONSTRUCTIONS[0]
             ) -> Outcome:
     """Decimate, repair and judge one loaded mesh.  Nothing is written.
 
@@ -256,11 +261,6 @@ def process(mesh: Mesh, max_faces: int,
     Raises `ValueError` if the mesh is not loaded — a programming error at the
     call site.
 
-    `nested_process_group` is threaded straight into `repairer.repair(...)` —
-    a caller-known fact about whether this call runs inside an enclosing
-    `proctree`-managed process group. See
-    `pipeconfig.StepConfig.nested_process_group`.
-
     `step_logger`, when supplied, is called before and after the initial
     whole-mesh decimation pass — previously invisible to any log, since
     neither `decimator.Result` nor its `Rung`/`attempts` reached anywhere
@@ -270,7 +270,7 @@ def process(mesh: Mesh, max_faces: int,
     PART is decimated back to its own pre-alpha-wrap size individually,
     inside `repairer.repair` itself (an ordinary entry in
     `repairer.DEFAULT_PART_STEPS`), and fixed there if that decimation left
-    defects — see docs/refactor/TODO.md's "alpha-wrap's second decimation
+    defects — see ../stl-batch-fix.old/archive/docs-snapshot-2026-09-26/docs/refactor/TODO.md's "alpha-wrap's second decimation
     pass reintroduces non-manifold edges" entry for why the old whole-mesh
     second pass was removed.
 
@@ -289,13 +289,20 @@ def process(mesh: Mesh, max_faces: int,
     decimated mesh, and a gated mesh is still judged here like any other.
     """
     mesh_io.require_geometry(mesh)
+    # Settled before any work: an unknown name raises here, and a caller's
+    # own `part_steps` cannot be combined with a non-default reconstruction
+    # (it would silently override it).
+    if part_steps is None:
+        part_steps = repairer.part_steps_for(reconstruction)
+    elif reconstruction != repairer.RECONSTRUCTIONS[0]:
+        raise ValueError('part_steps and a non-default reconstruction '
+                         f'({reconstruction!r}) cannot be combined')
     failed, decimated = decimate_initial(mesh, max_faces, step_logger, source_name)
     if failed is not None:
         return failed
 
     repaired = repairer.repair(decimated.mesh, part_steps=part_steps,
                                step_logger=step_logger, source_name=source_name,
-                               nested_process_group=nested_process_group,
                                skip_clean=skip_clean,
                                reconstruct_budget_bytes=reconstruct_budget_bytes,
                                min_shell_faces=min_shell_faces)

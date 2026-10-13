@@ -204,7 +204,7 @@ def generate():
         v, f = build()
         path = os.path.join(PROBE_DIR, f'{name}.stl')
         mesh_io.write(Mesh(path, path, Kind.BINARY_STL, len(f), True, None,
-                           Geometry(np.asarray(v, np.float32), np.asarray(f, np.int64))))
+                           Geometry(np.asarray(v, np.float64), np.asarray(f, np.int64))))
         print(f'  {name:28} {len(f):>9,} tris  '
               f'{os.path.getsize(path)/1048576:6.2f} MB', flush=True)
 

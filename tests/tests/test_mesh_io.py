@@ -13,13 +13,17 @@ import shutil
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
 import struct as _struct
 
 import numpy as np
 
+from libs import mesh_io
+from tests.tests import defect_spheres as ds
+
 from libs.mesh_io import (
-    BYTES_PER_TRIANGLE, HEADER_BYTES, Geometry, Kind, Mesh, bounds, diagonal,
+    BYTES_PER_TRIANGLE, HEADER_BYTES, Geometry, Kind, LoadDrops, Mesh, bounds, diagonal,
     dimensions, kind, load, probe, read_ply, triangle_count, write, write_ply,
 )
 
@@ -292,6 +296,30 @@ class TestLoad(MeshIOCase):
         self.assertEqual(len(loaded.geometry.verts), 4,
                          "-0.0 did not weld with 0.0")
 
+    def test_vertices_are_float64_and_write_back_bit_identical(self):
+        """Welded on float32 bits, held as float64, rounded once at `write`:
+        every corner of the file comes back with the same bits (0.1 is not
+        exact in float32, so a second rounding would show)."""
+        triangles = [tuple(tuple(c + 0.1 for c in v) for v in tri) for tri in _TETRA]
+        src = _binary_stl(self.path('p.stl'), triangles=triangles)
+        loaded = load(probe(src, self.path('out.stl')))
+        self.assertEqual(loaded.geometry.verts.dtype, np.float64)
+        write(loaded)
+        corners = lambda path: open(path, 'rb').read()[84:]
+        a = np.frombuffer(corners(src), np.uint8).reshape(-1, 50)[:, 12:48]
+        b = np.frombuffer(corners(self.path('out.stl')), np.uint8).reshape(-1, 50)[:, 12:48]
+        np.testing.assert_array_equal(a, b)
+
+    def test_a_coordinate_beyond_float32_is_refused_and_nothing_is_written(self):
+        dst = _binary_stl(self.path('keep.stl'))
+        before = open(dst, 'rb').read()
+        v = np.array([[0, 0, 0], [1e39, 0, 0], [0, 1, 0]], np.float64)
+        mesh = Mesh(dst, dst, Kind.BINARY_STL, 1, True, None,
+                    Geometry(v, np.array([[0, 1, 2]], np.int64)))
+        with self.assertRaises(ValueError):
+            write(mesh)
+        self.assertEqual(open(dst, 'rb').read(), before)
+
     def test_triangle_count_comes_from_the_geometry(self):
         many = _TETRA * 1000
         loaded = load(probe(_binary_stl(self.path('m.stl'), triangles=many),
@@ -328,32 +356,40 @@ class TestLoad(MeshIOCase):
         self.assertIsNone(result.geometry)
         self.assertIsNotNone(result.problem)
 
-    def test_a_nan_coordinate_is_invalid_not_a_clean_mesh(self):
-        """A03: NaN geometry measures as flawless and is not a model.
+    def test_triangles_with_a_non_finite_coordinate_are_dropped(self):
+        """A03 / owner 2026-10-05, garbage in, garbage out: a NaN or infinite
+        vertex has no position, so its triangles are dropped (even for one
+        bad coordinate) and the rest load and weld as usual. A NaN that got
+        in would scan `open=0, nm=0` with NaN volume, which every `<` guard
+        downstream passes."""
+        nan, inf = float('nan'), float('inf')
+        triangles = list(_TETRA) + [[(nan, 0, 0), (1, 0, 0), (0, 1, 0)],
+                                    [(5, 5, 5), (6, 5, inf), (5, 6, 5)]]
+        path = _binary_stl(self.path('bad.stl'), triangles=triangles)
+        result = load(probe(path, self.path('out.stl')))
+        self.assertTrue(result.is_valid, result.problem)
+        self.assertEqual(result.triangles, len(_TETRA))
+        self.assertTrue(np.isfinite(result.geometry.verts).all())
+        clean = load(probe(_binary_stl(self.path('clean.stl')), self.path('o.stl')))
+        np.testing.assert_array_equal(result.geometry.verts, clean.geometry.verts)
+        np.testing.assert_array_equal(result.geometry.faces, clean.geometry.faces)
 
-        A NaN vertex loads, scans `open=0, nm=0`, and has NaN volume — and
-        `NaN < MIN_VOLUME_KEPT` is False, so every comparison that would have
-        caught it says "fine".  It cannot be judged downstream, so it is
-        refused here, where the coordinates first enter memory.
-        """
+    def test_a_file_with_no_finite_triangle_is_invalid(self):
         nan = float('nan')
-        poisoned = [[(nan, nan, nan), (1, 0, 0), (0, 1, 0)]]
-        path = _binary_stl(self.path('nan.stl'), triangles=poisoned)
-
+        path = _binary_stl(self.path('nan.stl'), triangles=[[(nan, nan, nan), (1, 0, 0), (0, 1, 0)]])
         result = load(probe(path, self.path('out.stl')))
         self.assertFalse(result.is_valid)
         self.assertIsNone(result.geometry)
-        self.assertIn('finite', result.problem)
+        self.assertIn('no finite triangles', result.problem)
 
-    def test_an_infinite_coordinate_is_invalid_too(self):
-        """Infinity breaks every same comparison NaN does."""
-        big = float('inf')
-        poisoned = [[(big, 0, 0), (1, 0, 0), (0, 1, 0)]]
-        path = _binary_stl(self.path('inf.stl'), triangles=poisoned)
-
+    def test_non_finite_stored_normals_are_ignored(self):
+        path = _binary_stl(self.path('n.stl'))
+        with open(path, 'r+b') as f:
+            f.seek(84)
+            f.write(struct.pack('<f', float('nan')))
         result = load(probe(path, self.path('out.stl')))
-        self.assertFalse(result.is_valid)
-        self.assertIsNone(result.geometry)
+        self.assertTrue(result.is_valid, result.problem)
+        self.assertEqual(result.triangles, len(_TETRA))
 
     def test_ordinary_coordinates_still_load(self):
         """The guard must not reject the models this tool exists for."""
@@ -368,6 +404,123 @@ class TestLoad(MeshIOCase):
         with self.assertRaises(ValueError):
             load(ascii_mesh)
 
+
+
+class _Trickle:
+    """A file whose `readinto` returns at most `step` bytes per call, and
+    nothing once `limit` bytes have been read that way (a file cut short
+    after `triangle_count` checked its size)."""
+
+    def __init__(self, f, step, limit=None):
+        self.f, self.step, self.left = f, step, limit
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.f.close()
+
+    def __getattr__(self, name):
+        return getattr(self.f, name)
+
+    def readinto(self, view):
+        n = min(len(view), self.step)
+        if self.left is not None:
+            n = min(n, self.left)
+        got = self.f.readinto(view[:n]) if n else 0
+        if self.left is not None:
+            self.left -= got
+        return got
+
+
+class TestChunkedLoad(MeshIOCase):
+    """`load` reads in chunks and drops two kinds of triangle. A fixture with
+    known properties: a closed sphere plus planted triangles, at chunk sizes
+    that put the planted ones on chunk boundaries."""
+
+    NAN, INF = float('nan'), float('inf')
+
+    def fixture(self):
+        v, f = ds.sphere(10.0, 6)                     # 32 vertices, 60 faces
+        tris = [list(map(tuple, t)) for t in np.asarray(v, np.float32)[np.asarray(f)]]
+        a, b = tris[5][0], tris[5][1]                 # real sphere corners
+        planted = {
+            0: [(self.NAN, 0, 0), (1, 0, 0), (0, 1, 0)],           # non-finite
+            6: [a, a, b],                                          # coincident, end of chunk 1 (size 7)
+            7: [(0, 0, -0.0), (0, 0, 0.0), (1, 2, 3)],             # coincident after the fold
+            20: [b, b, b],                                         # all three
+            21: [(self.NAN, 0, 0), (self.NAN, 0, 0), (4, 5, 6)],   # both: counts as non-finite
+            30: [(100, 0, 0), (101, 0, 0), (102, 0, 0)],           # collinear, distinct: kept
+        }
+        for i in sorted(planted):
+            tris.insert(i, planted[i])
+        tris.append([(5, 5, 5), (6, 5, self.INF), (5, 6, 5)])      # non-finite, last
+        everything = np.asarray(tris, np.float32) + np.float32(0.0)
+        bad = {0, 6, 7, 20, 21, len(tris) - 1}
+        kept = np.asarray([t for i, t in enumerate(everything) if i not in bad])
+        path = _binary_stl(self.path('planted.stl'), triangles=tris)
+        return path, kept, len(np.unique(kept.reshape(-1, 3), axis=0))
+
+    def test_known_fixture_at_every_chunk_size(self):
+        path, kept, n_verts = self.fixture()
+        for chunk in (1, 3, 7, mesh_io.CHUNK_TRIANGLES):
+            with self.subTest(chunk=chunk):
+                result = load(probe(path, self.path('out.stl')), chunk_triangles=chunk)
+                self.assertTrue(result.is_valid, result.problem)
+                g = result.geometry
+                # Same triangles, same order, same corner order (winding).
+                np.testing.assert_array_equal(g.verts[g.faces], kept)
+                self.assertEqual(len(g.verts), n_verts)       # (1, 2, 3) etc. not kept
+                self.assertEqual(result.triangles, len(kept))
+                self.assertEqual(result.load_drops, LoadDrops(nonfinite=3, degenerate=3))
+
+    def test_a_clean_file_drops_nothing(self):
+        result = load(probe(_binary_stl(self.path('a.stl')), self.path('out.stl')),
+                      chunk_triangles=3)
+        self.assertEqual(result.load_drops, LoadDrops(0, 0))
+        self.assertEqual(len(result.geometry.verts), 4)
+
+    def test_negative_zero_welds_across_chunks(self):
+        triangles = (((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+                     ((-0.0, -0.0, -0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+        result = load(probe(_binary_stl(self.path('z.stl'), triangles=triangles),
+                            self.path('out.stl')), chunk_triangles=1)
+        self.assertEqual(len(result.geometry.verts), 4)
+
+    def test_a_file_of_only_coincident_triangles_is_invalid(self):
+        path = _binary_stl(self.path('d.stl'), triangles=[[(0, 0, 0), (0, 0, 0), (1, 0, 0)],
+                                                          [(self.NAN, 0, 0), (1, 0, 0), (0, 1, 0)]])
+        result = load(probe(path, self.path('out.stl')))
+        self.assertFalse(result.is_valid)
+        self.assertIn('no non-degenerate triangles', result.problem)
+        self.assertEqual(result.load_drops, LoadDrops(nonfinite=1, degenerate=1))
+
+    def test_partial_reads_are_continued(self):
+        path, kept, _ = self.fixture()
+        real_open = open
+        with mock.patch.object(mesh_io, 'open', create=True,
+                               new=lambda *a, **k: _Trickle(real_open(*a, **k), step=7)):
+            result = load(probe(path, self.path('out.stl')), chunk_triangles=4)
+        self.assertTrue(result.is_valid, result.problem)
+        np.testing.assert_array_equal(result.geometry.verts[result.geometry.faces], kept)
+
+    def test_a_file_cut_short_while_reading_is_invalid(self):
+        path = _binary_stl(self.path('a.stl'))
+        real_open = open
+        cut = 2 * BYTES_PER_TRIANGLE + 10
+        with mock.patch.object(mesh_io, 'open', create=True,
+                               new=lambda *a, **k: _Trickle(real_open(*a, **k), step=1 << 20,
+                                                            limit=cut)):
+            result = load(probe(path, self.path('out.stl')), chunk_triangles=3)
+        self.assertFalse(result.is_valid)
+        self.assertEqual(result.problem, f'short read: expected {4 * BYTES_PER_TRIANGLE:,} '
+                                         f'bytes, got {cut:,}')
+
+    def test_a_ply_read_carries_no_load_drops(self):
+        path, _, _ = self.fixture()
+        loaded = load(probe(path, self.path('out.stl')))
+        write_ply(loaded, self.path('c.ply'))
+        self.assertIsNone(read_ply(self.path('c.ply'), loaded).load_drops)
 
 class TestWrite(MeshIOCase):
 
@@ -411,8 +564,9 @@ class TestWrite(MeshIOCase):
                                places=5, msg="the normal is not unit length")
 
     def test_a_degenerate_face_gets_a_zero_normal_not_a_nan(self):
-        """A zero-area face has no normal; NaNs in the file break slicers."""
-        degenerate = (((0, 0, 0), (1, 0, 0), (1, 0, 0)),)
+        """A zero-area face has no normal; NaNs in the file break slicers.
+        Collinear: `load` keeps it (a coincident-corner one it drops)."""
+        degenerate = (((0, 0, 0), (1, 0, 0), (2, 0, 0)),)
         src = _binary_stl(self.path('d.stl'), triangles=degenerate)
         write(load(probe(src, self.path('out.stl'))))
         with open(self.path('out.stl'), 'rb') as f:
@@ -445,6 +599,15 @@ class TestWithGeometry(MeshIOCase):
                          "the count was carried over, not re-derived")
         self.assertEqual(loaded.triangles, 4, "the original was mutated")
 
+    def test_geometry_takes_float64_vertices_and_int64_faces_only(self):
+        """Every library takes float64 vertices; a float32 producer would put
+        a converted copy back in front of each call."""
+        v, f = np.zeros((3, 3)), np.array([[0, 1, 2]], np.int64)
+        for bad_v, bad_f in ((v.astype(np.float32), f), (v.astype('>f8'), f),
+                             (v, f.astype(np.int32))):
+            with self.subTest(v=bad_v.dtype, f=bad_f.dtype), self.assertRaises(TypeError):
+                Geometry(bad_v, bad_f)
+
     def test_the_path_is_carried_over(self):
         """A changed mesh still knows which file it came from."""
         loaded = load(probe(_binary_stl(self.path('a.stl')), self.path('out.stl')))
@@ -468,7 +631,7 @@ class TestDimensions(MeshIOCase):
 
 
 class TestPly(MeshIOCase):
-    """The Blender scratch boundary.
+    """The PLY boundary (the decimation cache; formerly Blender's too).
 
     PLY exists here for one reason: STL stores no vertex table, so a mesh
     written as STL arrives as loose triangles and has to be welded back by
@@ -500,8 +663,8 @@ class TestPly(MeshIOCase):
     def test_a_non_finite_vertex_is_refused(self):
         """A03, at the other entrance: `load` is not the only way in.
 
-        Rejecting NaN at `load` covers files.  Geometry also arrives from
-        Blender through this boundary, and a NaN that gets in here reaches
+        Rejecting NaN at `load` covers files.  Geometry also arrives
+        through this boundary, and a NaN that gets in here reaches
         `repairer._count_lost`, whose cKDTree raises from outside the repair
         sequence's own error handling — the crash the review recorded.
         """
@@ -512,7 +675,7 @@ class TestPly(MeshIOCase):
         with open(ply, 'rb') as f:
             raw = bytearray(f.read())
         start = raw.find(b'end_header\n') + len(b'end_header\n')
-        raw[start:start + 4] = np.float32(np.nan).tobytes()
+        raw[start:start + 8] = np.float64(np.nan).tobytes()
         with open(ply, 'wb') as f:
             f.write(bytes(raw))
 
@@ -568,7 +731,7 @@ class TestPly(MeshIOCase):
 
     def test_an_ascii_ply_is_rejected(self):
         """This reader handles one dialect deliberately — what `write_ply`
-        emits and Blender's exporter produces."""
+        emits and Blender's exporter produced (Blender retired 2026-10-06)."""
         mesh = self.loaded()
         path = self.path('ascii.ply')
         with open(path, 'wb') as f:
@@ -586,7 +749,7 @@ class TestPly(MeshIOCase):
             read_ply(path, mesh)
 
     def test_extra_float_vertex_properties_are_dropped(self):
-        """Blender may append normals depending on export flags. Extra float
+        """An exporter (Blender's did) may append normals. Extra float
         columns shift the stride and must be skipped, not misread as
         coordinates."""
         mesh = self.loaded()
@@ -613,7 +776,7 @@ class TestPly(MeshIOCase):
         self.assertTrue(np.array_equal(back.geometry.verts, verts))
 
     def test_a_non_triangular_face_is_rejected(self):
-        """Blender triangulates before export, so a quad means the file did
+        """Both layouts carry triangles only, so a quad means the file did
         not come from where it claims to have."""
         mesh = self.loaded()
         verts = mesh.geometry.verts
@@ -633,6 +796,135 @@ class TestPly(MeshIOCase):
             f.write(record.tobytes())
         with self.assertRaises(ValueError):
             read_ply(path, mesh)
+
+
+
+TETRA_V = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], float)
+TETRA_F = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
+
+
+def ply_bytes(vertex_props, face_prop, verts, faces, *, coord='<f4', index='<u4',
+              comments=(), extra=b''):
+    """A PLY file assembled from its parts, for crafting both accepted
+    layouts and every way out of them."""
+    head = ['ply', 'format binary_little_endian 1.0', *comments,
+            f'element vertex {len(verts)}', *[f'property {p}' for p in vertex_props],
+            f'element face {len(faces)}', f'property {face_prop}', 'end_header']
+    rec = np.zeros(len(faces), dtype=[('n', 'u1'), ('v', index, 3)])
+    rec['n'] = 3
+    rec['v'] = faces
+    return ('\n'.join(head) + '\n').encode() + np.asarray(verts, coord).tobytes() \
+        + rec.tobytes() + extra
+
+
+DOUBLE_XYZ = ['double x', 'double y', 'double z']
+FLOAT_XYZ = ['float x', 'float y', 'float z']
+
+
+class TestPlyLayouts(MeshIOCase):
+    """The two accepted layouts (float32: the retired Blender's; float64:
+    PyMeshLab and write_ply) and the strict rejection of everything else."""
+
+    def mesh(self, verts=TETRA_V, dtype=np.float64):
+        g = Geometry(np.asarray(verts, dtype), TETRA_F.astype(np.int64))
+        return Mesh(self.path('m.stl'), self.path('o.stl'), Kind.BINARY_STL, 4, True, None, g)
+
+    def read(self, data):
+        path = self.path('t.ply')
+        with open(path, 'wb') as f:
+            f.write(data)
+        return read_ply(path, self.mesh())
+
+    def test_pymeshlab_bare_export_reads_back(self):
+        import pymeshlab
+        v = TETRA_V + [0.1, 0.2, 1e-9]           # a value float32 rounds
+        ms = pymeshlab.MeshSet()
+        ms.add_mesh(pymeshlab.Mesh(v, TETRA_F.astype(np.int32)))
+        path = self.path('pm.ply')
+        ms.save_current_mesh(path, binary=True, save_vertex_normal=False,
+                             save_vertex_color=False, save_vertex_quality=False,
+                             save_face_color=False, save_face_quality=False,
+                             save_wedge_texcoord=False, save_wedge_normal=False)
+        back = read_ply(path, self.mesh())
+        m = ms.current_mesh()
+        np.testing.assert_array_equal(back.geometry.verts, m.vertex_matrix())
+        np.testing.assert_array_equal(back.geometry.faces, m.face_matrix())
+        self.assertEqual(back.geometry.verts.dtype, np.float64)
+
+    def test_float32_layout_is_widened_exactly(self):
+        v = (TETRA_V + 0.1).astype(np.float32)
+        back = self.read(ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', v, TETRA_F))
+        self.assertEqual(back.geometry.verts.dtype, np.float64)
+        np.testing.assert_array_equal(back.geometry.verts, v.astype(np.float64))
+
+    def test_float64_is_written_as_double_without_loss(self):
+        v = TETRA_V + 0.1                         # 0.1 is not exact in float32
+        path = self.path('d.ply')
+        write_ply(self.mesh(v, np.float64), path)
+        data = open(path, 'rb').read()
+        self.assertIn(b'property double x', data)
+        body = data.index(b'end_header\n') + len(b'end_header\n')
+        self.assertEqual(data[body:body + 4 * 24], np.asarray(v, '<f8').tobytes())
+        back = read_ply(path, self.mesh())
+        np.testing.assert_array_equal(back.geometry.verts, v)
+
+    def test_a_double_beyond_float32_range_is_read_exactly(self):
+        v = np.vstack([TETRA_V[:3], [[1e300, 0, 0]]])
+        back = self.read(ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices', v, TETRA_F,
+                                   coord='<f8', index='<i4'))
+        np.testing.assert_array_equal(back.geometry.verts, v)
+
+    def test_comments_are_ignored_even_one_naming_end_header(self):
+        back = self.read(ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices', TETRA_V,
+                                   TETRA_F, coord='<f8', index='<i4',
+                                   comments=['comment VCGLIB generated',
+                                             'comment says end_header here']))
+        np.testing.assert_array_equal(back.geometry.faces, TETRA_F)
+
+    def test_everything_outside_the_two_layouts_is_rejected(self):
+        V, F = TETRA_V, TETRA_F
+        cases = {
+            'mixed vertex types': ply_bytes(['float x', 'float y', 'double z'],
+                                            'list uchar uint vertex_indices', V, F),
+            'double with an extra property': ply_bytes(DOUBLE_XYZ + ['double nx'],
+                                                       'list uchar uint vertex_indices',
+                                                       np.hstack([V, V[:, :1]]), F, coord='<f8'),
+            'list uint int': ply_bytes(DOUBLE_XYZ, 'list uint int vertex_indices', V, F,
+                                       coord='<f8', index='<i4'),
+            'list uchar short': ply_bytes(DOUBLE_XYZ, 'list uchar short vertex_indices', V, F,
+                                          coord='<f8', index='<i4'),
+            'int indices with float vertices': ply_bytes(FLOAT_XYZ, 'list uchar int vertex_indices',
+                                                         V, F, index='<i4'),
+            'negative index': ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices', V,
+                                        np.vstack([F[:3], [[0, 1, -1]]]), coord='<f8', index='<i4'),
+            'index past the vertices': ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', V,
+                                                 np.vstack([F[:3], [[0, 1, 4]]])),
+            'truncated': ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', V, F)[:-1],
+            'trailing byte': ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', V, F,
+                                       extra=b'\0'),
+            'NaN': ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices',
+                             np.vstack([V[:3], [[np.nan, 0, 0]]]), F, coord='<f8', index='<i4'),
+            'infinity': ply_bytes(DOUBLE_XYZ, 'list uchar int vertex_indices',
+                                  np.vstack([V[:3], [[np.inf, 0, 0]]]), F, coord='<f8', index='<i4'),
+        }
+        good = ply_bytes(FLOAT_XYZ, 'list uchar uint vertex_indices', V, F)
+        header, body = good.split(b'end_header\n')
+        lines = header.split(b'\n')                       # ply, format, elem v, x, y, z, elem f, face, ''
+        def edited(new_lines):
+            return b'\n'.join(new_lines) + b'end_header\n' + body
+        cases.update({
+            'repeated format': edited(lines[:2] + [lines[1]] + lines[2:]),
+            'property before any element': edited(lines[:2] + [b'property float w'] + lines[2:]),
+            'extra element': edited(lines[:-1] + [b'element edge 0', b'']),
+            'face element first': edited(lines[:2] + lines[6:8] + lines[2:6] + [b'']),
+            'two face properties': edited(lines[:-1] + [b'property float q', b'']),
+            'negative count': edited([lines[0], lines[1], b'element vertex -4'] + lines[3:]),
+            'big-endian': edited([lines[0], b'format binary_big_endian 1.0'] + lines[2:]),
+        })
+        for name, data in cases.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                self.read(data)
+
 
 
 if __name__ == '__main__':
