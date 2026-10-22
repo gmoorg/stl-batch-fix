@@ -269,6 +269,7 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                        *,
                        skip_clean: bool = False,
                        reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
+                       reconstruct_ceiling_bytes: int | None = None,
                        min_shell_faces: int = splitter.MIN_SHELL_FACES,
                        load_path: str | None = None,
                        reconstruction: str = repairer.RECONSTRUCTIONS[0]
@@ -322,6 +323,7 @@ def _process_one_file(source_path: str, destination: str, max_faces: int,
                                            step_logger=step_logger, source_name=source_name,
                                            skip_clean=skip_clean,
                                            reconstruct_budget_bytes=reconstruct_budget_bytes,
+                                           reconstruct_ceiling_bytes=reconstruct_ceiling_bytes,
                                            min_shell_faces=min_shell_faces,
                                            reconstruction=reconstruction)
                 if outcome.repair is not None:
@@ -426,6 +428,7 @@ def _prepare_one_file(source_path: str, destination: str, max_faces: int,
                       step_logger: steplog.StepLogger = steplog.null_logger,
                       *,
                       reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
+                      reconstruct_ceiling_bytes: int | None = None,
                       min_shell_faces: int = splitter.MIN_SHELL_FACES,
                       reconstruction: str = repairer.RECONSTRUCTIONS[0]) -> ChildResult:
     """The prepare pass for one file: initial decimation, cache, estimate.
@@ -501,7 +504,7 @@ def _prepare_one_file(source_path: str, destination: str, max_faces: int,
                     return terminal()
         stage, category = 'process', 'process_failure'
         estimate = jobmemory.repair_bytes(mesh, min_shell_faces, reconstruct_budget_bytes,
-                                          reconstruction)
+                                          reconstruction, reconstruct_ceiling_bytes)
     except Exception as exc:                          # noqa: BLE001 — reported, not raised
         reason = f'{type(exc).__name__}: {exc}'
         return terminal()
@@ -591,6 +594,7 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
                   skip_clean: bool = False,
                   output_log=None,
                   reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
+                  reconstruct_ceiling_bytes: int | None = None,
                   min_shell_faces: int = splitter.MIN_SHELL_FACES,
                   mode: str = 'repair',
                   cache_path: str | None = None,
@@ -612,6 +616,8 @@ def _spawn_child(python: str, script: str, mesh: Mesh, max_faces: int,
     if skip_clean:
         argv.append('--skip-clean')
     argv += ['--reconstruct-budget-bytes', str(reconstruct_budget_bytes)]
+    if reconstruct_ceiling_bytes is not None:
+        argv += ['--reconstruct-ceiling-bytes', str(reconstruct_ceiling_bytes)]
     argv += ['--min-shell-faces', str(min_shell_faces)]
     argv += ['--reconstruction', reconstruction]
     if mode != 'repair':
@@ -952,6 +958,7 @@ class _Runner:
                                    output_log=output_log,
                                    reconstruct_budget_bytes=runconfig.budget_bytes(
                                        self.config.reconstruct_memory_budget_gb),
+                                   reconstruct_ceiling_bytes=self.config.reconstruct_memory_ceiling_bytes,
                                    min_shell_faces=self.config.min_shell_faces,
                                    mode=mode,
                                    cache_path=cache_path,

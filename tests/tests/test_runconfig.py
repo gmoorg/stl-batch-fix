@@ -38,14 +38,14 @@ class TestExampleFile(unittest.TestCase):
     def test_example_lists_every_field(self):
         with open(EXAMPLE, 'rb') as handle:
             raw = tomllib.load(handle)
-        self.assertEqual(set(raw), {f.name for f in fields(RunConfig)})
+        self.assertEqual(set(raw), {f.name for f in runconfig.toml_fields()})
 
     def test_example_values_equal_the_code_defaults(self):
         # Raw TOML, not `load()`: `load` resolves relative paths, which would
         # make "" vs a resolved path a false mismatch.
         with open(EXAMPLE, 'rb') as handle:
             raw = tomllib.load(handle)
-        for f in fields(RunConfig):
+        for f in runconfig.toml_fields():
             if f.default is not MISSING:
                 with self.subTest(key=f.name):
                     self.assertEqual(raw[f.name], f.default)
@@ -279,6 +279,51 @@ class TestResolve(unittest.TestCase):
         with self._meminfo(None), mock.patch('os.sysconf', side_effect=ValueError), \
              self.assertRaisesRegex(ConfigError, 'memory_budget_bytes'):
             runconfig.resolve(self.base())
+
+
+class TestLargeFile(unittest.TestCase):
+    base = TestResolve.base
+    _meminfo = TestResolve._meminfo
+
+    def test_ram_plus_swap_budget_one_worker_no_deadline(self):
+        with self._meminfo('MemAvailable: 2000 kB\nSwapTotal: 9000 kB\nSwapFree: 6000 kB\n'):
+            config = runconfig.large_file(self.base(memory_budget_fraction=0.5, workers=4,
+                                                    reconstruct_memory_budget_gb=20.0))
+        allowance = (2000 + 6000) * 1024 // 2
+        self.assertEqual((config.workers, config.per_file_timeout), (1, None))
+        self.assertEqual(config.memory_budget_bytes, allowance)
+        self.assertEqual(config.reconstruct_memory_ceiling_bytes, allowance)
+        self.assertEqual(config.reconstruct_memory_budget_gb, 20.0)     # target kept
+        resolved = runconfig.resolve(config)
+        self.assertEqual((resolved.workers, resolved.memory_budget_bytes), (1, allowance))
+
+    def test_no_swap_is_ram_alone(self):
+        with self._meminfo('MemAvailable: 2000 kB\nSwapFree: 0 kB\n'):
+            config = runconfig.large_file(self.base(memory_budget_fraction=0.5))
+        self.assertEqual(config.reconstruct_memory_ceiling_bytes, 2000 * 1024 // 2)
+
+    def test_unreadable_memory_is_an_error(self):
+        for text in (None, 'MemAvailable: 2000 kB\n', 'SwapFree: 10 kB\n',
+                     'MemAvailable: 2000 kB\nSwapFree: x kB\n'):
+            with self.subTest(text=text), self._meminfo(text), \
+                 self.assertRaisesRegex(ConfigError, 'large mode'):
+                runconfig.large_file(self.base())
+
+    def test_normal_runs_have_no_ceiling(self):
+        self.assertIsNone(self.base().reconstruct_memory_ceiling_bytes)
+        self.assertEqual(self.base().per_file_timeout, 3600.0)
+
+
+class TestRuntimeOnlyKeys(_TempDir):
+    def test_the_ceiling_is_not_a_config_key(self):
+        with self.assertRaisesRegex(ConfigError, 'unknown key'):
+            self.load_text(REQUIRED + 'reconstruct_memory_ceiling_bytes = 5\n')
+
+    def test_the_timeout_is_still_a_finite_positive_number(self):
+        self.assertEqual(self.load_text(REQUIRED + 'per_file_timeout = 5\n').per_file_timeout, 5.0)
+        for text in ('0', 'inf', 'nan', '"x"', 'true'):
+            with self.subTest(text=text), self.assertRaisesRegex(ConfigError, 'per_file_timeout'):
+                self.load_text(REQUIRED + f'per_file_timeout = {text}\n')
 
 if __name__ == '__main__':
     unittest.main()

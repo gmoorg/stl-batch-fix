@@ -9,6 +9,8 @@ import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -247,6 +249,39 @@ class TestFixFiles(_Folder):
         self.assertEqual((staged.log_file, staged.max_faces), ('', 0))
         self.assertTrue((self.folder / 'a_fixed.stl').exists())
         self.assertEqual(self.staging_left(), [])
+
+    def test_large_runs_one_file_with_the_large_file_config(self):
+        path = self.file('a.stl')
+        run = self.run_returning(batch_repair.RunOutcome(0))
+        large = lambda config: replace(config, workers=1, per_file_timeout=None,
+                                       memory_budget_bytes=123,
+                                       reconstruct_memory_ceiling_bytes=123)
+        with mock.patch.object(fix_files.runconfig, 'large_file', side_effect=large):
+            self.assertEqual(fix_files._main(['--large', '--', path], run=run), 0)
+        config, reconstruction = self.calls[0]
+        self.assertEqual(reconstruction, 'winding')
+        self.assertEqual((config.workers, config.per_file_timeout,
+                          config.reconstruct_memory_ceiling_bytes), (1, None, 123))
+        self.assertTrue((self.folder / 'a_fixed.stl').exists())
+
+    def test_large_rejects_alpha_and_several_files(self):
+        a, b = self.file('a.stl'), self.file('b.stl')
+        run = self.run_returning(batch_repair.RunOutcome(0))
+        for argv in (['--large', '--alpha', '--', a], ['--large', '--', a, b]):
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit) as ctx:
+                fix_files._main(argv, run=run)
+            self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self.calls, [])
+
+    def test_large_mode_memory_problem_stops_before_running(self):
+        path = self.file('a.stl')
+        run = self.run_returning(batch_repair.RunOutcome(0))
+        with mock.patch.object(fix_files.runconfig, 'large_file',
+                               side_effect=fix_files.ConfigError('large mode: no meminfo')), \
+             redirect_stderr(io.StringIO()):
+            self.assertEqual(fix_files._main(['--large', path], run=run), 2)
+        self.assertEqual(self.calls, [])
 
     def test_leading_hyphen_file_name(self):
         self.file('-a.stl')

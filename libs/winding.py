@@ -53,11 +53,12 @@ class EmptyResult(RuntimeError):
 class BudgetError(ValueError):
     """The estimated memory cannot fit the budget at any block count."""
 
-    def __init__(self, floor: int, minimum: int, budget: int):
+    def __init__(self, floor: int, minimum: int, budget: int, ceiling: int | None = None):
+        limit = '' if ceiling is None else f', RAM+swap ceiling {ceiling / 1e9:.2f} GB'
         super().__init__(
             f'estimated memory does not fit the budget: floor {floor / 1e9:.2f} GB, '
-            f'best attainable {minimum / 1e9:.2f} GB, budget {budget / 1e9:.2f} GB')
-        self.floor, self.minimum, self.budget = floor, minimum, budget
+            f'best attainable {minimum / 1e9:.2f} GB, budget {budget / 1e9:.2f} GB{limit}')
+        self.floor, self.minimum, self.budget, self.ceiling = floor, minimum, budget, ceiling
 
 
 @dataclass(frozen=True)
@@ -234,11 +235,27 @@ def _surface_keys(A, B, C, n1, n2, bound, lo, h, shape) -> np.ndarray:
 # Planning and reconstruction
 # ---------------------------------------------------------------------------
 
-def plan(mesh: Mesh, h: float, budget_bytes: int) -> Plan:
-    """Choose the fewest blocks whose estimated peak fits `budget_bytes`."""
+def _check_bytes(value, what: str) -> None:
+    if isinstance(value, bool) or not (isinstance(value, int) and value > 0):
+        raise ValueError(f'{what} must be a positive integer of bytes')
+
+
+def plan(mesh: Mesh, h: float, budget_bytes: int, ceiling_bytes: int | None = None) -> Plan:
+    """Choose the fewest blocks whose estimated peak fits `budget_bytes`.
+
+    `ceiling_bytes` (None: no fallback, the default and every folder run)
+    is the large-file mode's RAM+swap allowance (`runconfig.large_file`).
+    The budget stays the preferred target, capped at the ceiling. Only when
+    no block count fits it does the plan fall back to the fewest blocks
+    reaching the lowest estimate, if that fits the ceiling. A larger target
+    would pick fewer, bigger blocks (the estimate grows with block points)
+    and push into swap a part whose finest split would mostly fit in RAM.
+    """
     _check_spacing(h)
-    if isinstance(budget_bytes, bool) or not (isinstance(budget_bytes, int) and budget_bytes > 0):
-        raise ValueError('memory budget must be a positive integer of bytes')
+    _check_bytes(budget_bytes, 'memory budget')
+    if ceiling_bytes is not None:
+        _check_bytes(ceiling_bytes, 'memory ceiling')
+        budget_bytes = min(budget_bytes, ceiling_bytes)
     V, F = _validated(mesh)
     lo, shape = _grid(V, h)
     _, _, _, area, L, H = _triangle_frames(V, F)
@@ -248,10 +265,13 @@ def plan(mesh: Mesh, h: float, budget_bytes: int) -> Plan:
     best = None
     for blocks in range(1, max_blocks_per_axis(shape) + 1):
         est = estimate_bytes(len(F), total_area, h, samples, _largest_block(shape, blocks))
-        best = est if best is None else min(best, est)
+        if best is None or est < best[1]:
+            best = (blocks, est)
         if est <= budget_bytes:
             return Plan(h, lo, shape, blocks, samples, est)
-    raise BudgetError(floor, best, budget_bytes)
+    if ceiling_bytes is not None and best[1] <= ceiling_bytes:
+        return Plan(h, lo, shape, best[0], samples, best[1])
+    raise BudgetError(floor, best[1], budget_bytes, ceiling_bytes)
 
 
 def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
@@ -555,8 +575,9 @@ def step_winding_reconstruct(mesh: Mesh, config: "pipeconfig.StepConfig | None" 
             raise ValueError('whole_model_diag is required for reconstruction')
         budget = (config.reconstruct_memory_budget_bytes if config is not None
                   else pipeconfig.StepConfig().reconstruct_memory_budget_bytes)
+        ceiling = config.reconstruct_memory_ceiling_bytes if config is not None else None
         h = grid_spacing(whole_diagonal)
-        p = plan(mesh, h, budget)
+        p = plan(mesh, h, budget, ceiling)
         try:
             result = reconstruct(mesh, h, p.blocks_per_axis)
         except EmptyResult as exc:

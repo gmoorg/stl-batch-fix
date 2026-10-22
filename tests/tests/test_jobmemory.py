@@ -78,6 +78,15 @@ class TestRepair(unittest.TestCase):
             winding.plan(m, h, tiny)
         self.assertGreaterEqual(jobmemory.repair_bytes(m, 100, tiny), tiny)
 
+    def test_a_ceiling_reserves_the_fallback_plan_the_step_will_use(self):
+        m = mesh_of(sphere())
+        tiny = 1_000_000
+        h = winding.grid_spacing(float(np.linalg.norm(np.ptp(m.geometry.verts, 0))))
+        fallback = winding.plan(m, h, tiny, 10 ** 12)
+        self.assertGreater(fallback.estimate_bytes, tiny)
+        self.assertGreaterEqual(
+            jobmemory.repair_bytes(m, 100, tiny, 'winding', 10 ** 12), fallback.estimate_bytes)
+
     def test_an_unloaded_mesh_raises(self):
         with self.assertRaises(ValueError):
             jobmemory.repair_bytes(Mesh('/m', '/o', Kind.BINARY_STL, 4, True), 100, BUDGET)

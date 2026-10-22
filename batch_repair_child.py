@@ -83,6 +83,7 @@ def run_one_file(args) -> int:
         result = batch_repair._prepare_one_file(
             args.one_file, args.destination, args.max_faces, args.cache_path, step_logger,
             reconstruct_budget_bytes=args.reconstruct_budget_bytes,
+            reconstruct_ceiling_bytes=args.reconstruct_ceiling_bytes,
             min_shell_faces=args.min_shell_faces,
             reconstruction=args.reconstruction)
     else:
@@ -90,6 +91,7 @@ def run_one_file(args) -> int:
             args.one_file, args.destination, args.max_faces, step_logger,
             skip_clean=args.skip_clean,
             reconstruct_budget_bytes=args.reconstruct_budget_bytes,
+            reconstruct_ceiling_bytes=args.reconstruct_ceiling_bytes,
             min_shell_faces=args.min_shell_faces,
             load_path=args.load_from,
             reconstruction=args.reconstruction)
@@ -140,6 +142,8 @@ def main(argv=None) -> int:
     parser.add_argument('--skip-clean', action='store_true')
     parser.add_argument('--reconstruct-budget-bytes', type=_positive_int, metavar='BYTES',
                         default=batch_repair.pipeconfig.StepConfig.reconstruct_memory_budget_bytes)
+    parser.add_argument('--reconstruct-ceiling-bytes', type=_positive_int, metavar='BYTES',
+                        default=None)
     parser.add_argument('--min-shell-faces', type=_non_negative_int, metavar='N',
                         default=splitter.MIN_SHELL_FACES)
     parser.add_argument('--reconstruction', choices=repairer.RECONSTRUCTIONS,

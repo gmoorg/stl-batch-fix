@@ -113,6 +113,8 @@ workers = 0
 # Seconds one file may take before its child process is killed and the file
 # gets a `.timeout` marker (a full copy of the source, printable as a fallback).
 # Must be a finite positive number.
+# The right-click "STL fix large (RAM+swap)" (fix_files.py --large) ignores
+# it (no time limit) and also sets workers = 1 and a RAM+swap memory budget.
 # Default: 3600.0
 per_file_timeout = 3600.0
 

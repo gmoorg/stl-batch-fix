@@ -33,7 +33,7 @@ class StepConfig:
     None) -> (ok, mesh, detail)`. Most steps ignore `config` entirely;
     decimation reads `faceCount`, alpha wrap and winding reconstruction read
     `whole_model_diag`, winding reconstruction reads
-    `reconstruct_memory_budget_bytes`. Add a field here only when a step
+    `reconstruct_memory_budget_bytes` and `reconstruct_memory_ceiling_bytes`. Add a field here only when a step
     actually needs it, not speculatively.
 
     faceCount         target face count for a decimation step; 0 means "no
@@ -50,11 +50,16 @@ class StepConfig:
                       and not a batch-wide guarantee: concurrent workers each
                       use their own. From `batch_repair.toml`'s
                       `reconstruct_memory_budget_gb`.
+    reconstruct_memory_ceiling_bytes  None, except in the right-click
+                      large-file mode (`runconfig.large_file`): the RAM+swap
+                      allowance `winding.plan` falls back to when no block
+                      count fits the budget.
     """
 
     faceCount: int = 0
     whole_model_diag: float | None = None
     reconstruct_memory_budget_bytes: int = 10_000_000_000
+    reconstruct_memory_ceiling_bytes: int | None = None
 
 
 def alpha_wrap_parameters(whole_model_diag: float) -> tuple[float, float]:

@@ -640,6 +640,36 @@ class TestCancellation(_PoolTestCase):
             self.assertFalse(os.path.exists(path.replace('.stl', '.failed.stl')))
 
 
+    def test_no_deadline_waits_without_timeout_and_cancellation_still_stops(self):
+        """`per_file_timeout=None` (large-file mode): the wait has no
+        timeout, and a run-wide cancel still ends a hanging child."""
+        mesh = self.mesh('hang_a.stl')
+        (self.root / 'in').mkdir(parents=True, exist_ok=True)
+        Path(mesh.path).write_bytes(b'source')
+        runner = self.make_runner([mesh], workers=1, per_file_timeout=None)
+        timeouts = []
+        real = subprocess.Popen.communicate
+
+        def spy(proc, *args, **kwargs):
+            timeouts.append(kwargs.get('timeout', 'missing'))
+            return real(proc, *args, **kwargs)
+
+        def cancel_soon():
+            time.sleep(0.5)
+            runner.run_state.cancel('test-triggered cancellation')
+
+        from libs.pool import Pool
+        threading.Thread(target=cancel_soon, daemon=True).start()
+        started = time.monotonic()
+        with mock.patch.object(subprocess.Popen, 'communicate', spy):
+            Pool(1, runner.selector, runner.handler).start()
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual(timeouts[0], None)
+        self.assertEqual(len(runner.results), 1)
+        self.assertNotEqual(runner.results[0].get('indicator'), 'TIMED_OUT')
+        self.assertFalse((self.root / 'out' / 'hang_a.timeout.stl').exists())
+
+
 class TestLaunchFailure(_PoolTestCase):
     def test_missing_interpreter_is_process_failure(self):
         args = self.make_args()

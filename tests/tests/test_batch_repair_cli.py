@@ -488,6 +488,7 @@ class TestCleanGateFlags(unittest.TestCase):
             args.result_file = str(self.root / 'result.json')
             args.skip_clean = flag
             args.reconstruct_budget_bytes = 10 ** 10
+            args.reconstruct_ceiling_bytes = None
             args.min_shell_faces = 100
             args.mode, args.cache_path, args.load_from = 'repair', None, None
             args.reconstruction = 'winding'
@@ -538,6 +539,53 @@ class TestReconstructBudgetPlumbing(unittest.TestCase):
                                       reconstruct_budget_bytes=2_500_000_000).wait()
         argv = captured['argv']
         self.assertEqual(argv[argv.index('--reconstruct-budget-bytes') + 1], '2500000000')
+        self.assertNotIn('--reconstruct-ceiling-bytes', argv)
+        with mock.patch('subprocess.Popen', spy):
+            batch_repair._spawn_child(sys.executable, 'c.py', mesh, 0, '/tmp/r.json',
+                                      reconstruct_ceiling_bytes=90_000_000_000).wait()
+        argv = captured['argv']
+        self.assertEqual(argv[argv.index('--reconstruct-ceiling-bytes') + 1], '90000000000')
+
+    def test_child_hands_the_ceiling_to_both_passes(self):
+        seen = {}
+
+        def fake(key):
+            def record(*args, **kwargs):
+                seen[key] = kwargs['reconstruct_ceiling_bytes']
+                return batch_repair.ChildResult(path='a.stl', category='intake_failure',
+                                                indicator=None, stage='intake', reason='x',
+                                                written_path=None)
+            return record
+
+        common = ['--one-file', 'a.stl', '--destination', 'b.stl', '--max-faces', '0',
+                  '--result-file', str(self.root / 'r.json')]
+        with mock.patch.object(batch_repair, '_prepare_one_file', fake('prepare')), \
+             mock.patch.object(batch_repair, '_process_one_file', fake('repair')):
+            batch_repair_child.main(common + ['--reconstruct-ceiling-bytes', '9000',
+                                              '--mode', 'prepare', '--cache-path', 'c.ply'])
+            batch_repair_child.main(common + ['--reconstruct-ceiling-bytes', '9000'])
+        self.assertEqual(seen, {'prepare': 9000, 'repair': 9000})
+        with mock.patch.object(batch_repair, '_process_one_file', fake('default')):
+            batch_repair_child.main(common)
+        self.assertIsNone(seen['default'])
+
+    def test_ceiling_reaches_every_part_step_config(self):
+        from libs import repairer
+        from libs.mesh_io import Geometry, Kind, Mesh
+        import numpy as np
+        verts = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], np.float64)
+        faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], np.int64)
+        m = Mesh('/a.stl', '/b.stl', Kind.BINARY_STL, 4, True, None, Geometry(verts, faces))
+        seen = []
+
+        def record(part, config=None):
+            seen.append(config.reconstruct_memory_ceiling_bytes)
+            return True, part, 'recorded'
+
+        repairer.repair(m, min_shell_faces=0, part_steps=(('record', record),),
+                        reconstruct_ceiling_bytes=7_000_000_000)
+        repairer.repair(m, min_shell_faces=0, part_steps=(('record', record),))
+        self.assertEqual(seen, [7_000_000_000, None])
 
     def test_spawn_child_passes_the_reconstruction_in_both_modes(self):
         from libs.mesh_io import Kind, Mesh
@@ -638,6 +686,7 @@ class TestReconstructBudgetPlumbing(unittest.TestCase):
              mock.patch('builtins.print'):
             batch_repair._run(config)
         self.assertEqual(captured[0]['reconstruct_budget_bytes'], 2_500_000_000)
+        self.assertIsNone(captured[0]['reconstruct_ceiling_bytes'])
 
 
 class TestMinShellFacesPlumbing(unittest.TestCase):
@@ -715,6 +764,7 @@ class TestMinShellFacesPlumbing(unittest.TestCase):
         args.result_file = str(self.root / 'result.json')
         args.skip_clean = False
         args.reconstruct_budget_bytes = 10 ** 10
+        args.reconstruct_ceiling_bytes = None
         args.min_shell_faces = 250
         args.mode, args.cache_path, args.load_from = 'repair', None, None
         args.reconstruction = 'winding'

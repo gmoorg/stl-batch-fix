@@ -272,6 +272,7 @@ def repair(mesh: Mesh,
            *,
            skip_clean: bool = False,
            reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
+           reconstruct_ceiling_bytes: int | None = None,
            ) -> Result:
     """Split, wrap each part, and merge; no file is written.
 
@@ -391,7 +392,8 @@ def repair(mesh: Mesh,
             target_faces = len(part.geometry.faces)
             part_config = pipeconfig.StepConfig(
                 faceCount=target_faces, whole_model_diag=whole_model_diag,
-                reconstruct_memory_budget_bytes=reconstruct_budget_bytes)
+                reconstruct_memory_budget_bytes=reconstruct_budget_bytes,
+                reconstruct_memory_ceiling_bytes=reconstruct_ceiling_bytes)
             part_id = f'{index + 1}/{len(parts)}'
 
             # Part gate (same `skip_clean` switch): a part that is already clean is merged

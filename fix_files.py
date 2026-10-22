@@ -2,6 +2,12 @@
 """Fix selected STL/OBJ files beside their sources: `foo.stl` -> `foo_fixed.stl`.
 
     fix_files.py [--alpha] [--] FILE...
+    fix_files.py --large [--] FILE
+
+`--large` (the third right-click entry) is for one model too big for the
+normal budget: `runconfig.large_file` runs it with one worker, no per-file
+time limit and a RAM+swap allowance the rebuild may plan into when the
+configured per-part target cannot fit it.
 
 The file manager's right-click entries run this (tools/nemo/). Every option
 comes from the same `batch_repair.toml` as a folder run; only `input`,
@@ -25,15 +31,22 @@ import batch_repair
 from libs import besidesource, repairer, runconfig
 from libs.runconfig import ConfigError, RunConfig
 
+LARGE_FLAG = '--large'
 
 def _parse(argv) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog='fix_files.py',
         description='Repair STL/OBJ files; results land beside each as NAME_fixed.stl.')
-    parser.add_argument(batch_repair.ALPHA_FLAG, action='store_true',
-                        help='alpha-wrap reconstruction instead of winding')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(batch_repair.ALPHA_FLAG, action='store_true',
+                      help='alpha-wrap reconstruction instead of winding')
+    mode.add_argument(LARGE_FLAG, action='store_true',
+                      help='one file, RAM+swap allowance, no time limit (runconfig.large_file)')
     parser.add_argument('files', nargs='+', metavar='FILE')
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.large and len(args.files) != 1:
+        parser.error(f'{LARGE_FLAG} takes exactly one file')
+    return args
 
 
 def reserved_names(config: RunConfig) -> tuple[str, ...]:
@@ -83,9 +96,16 @@ def _main(argv, run=batch_repair.run) -> int:
     reconstruction = 'alpha-wrap' if args.alpha else repairer.RECONSTRUCTIONS[0]
     try:
         config = runconfig.load(batch_repair.CONFIG_PATH)
+        if args.large:
+            config = runconfig.large_file(config)
     except ConfigError as error:
         print(f'fix_files: error: {batch_repair.CONFIG_PATH}: {error}', file=sys.stderr)
         return 2
+    if args.large:
+        print(f'large mode: one worker, no time limit, per-part target '
+              f'{config.reconstruct_memory_budget_gb:g} GB, RAM+swap allowance '
+              f'{config.reconstruct_memory_ceiling_bytes / 1e9:.1f} GB '
+              f'(slow while it swaps; Ctrl+C stops it)', flush=True)
 
     groups, rejected = besidesource.plan(args.files, reserved_names(config))
     for path, reason in rejected:

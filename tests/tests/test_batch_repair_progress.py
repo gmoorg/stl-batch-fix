@@ -103,6 +103,7 @@ class TestSourceIdentity(unittest.TestCase):
     def _fake_process(self, mesh, max_faces, part_steps=None, step_logger=None,
                       source_name='', *,
                       skip_clean=False, reconstruct_budget_bytes=None,
+                      reconstruct_ceiling_bytes=None,
                       min_shell_faces=None, reconstruction=None):
         # A trivial stand-in for `processor.process` that still drives the
         # step_logger once, so these tests exercise the real

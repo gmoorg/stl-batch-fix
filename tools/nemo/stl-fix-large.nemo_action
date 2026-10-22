@@ -1,0 +1,8 @@
+[Nemo Action]
+Name=STL fix large (RAM+swap)
+Comment=Repair ONE large STL/OBJ file with a RAM+swap memory allowance and no time limit; result lands beside it as NAME_fixed.stl
+Exec=env STL_FIX_HOLD=1 "@ROOT@/fix_files.sh" --large -- %F
+Icon-Name=applications-engineering
+Selection=s
+Extensions=stl;obj;
+Terminal=true

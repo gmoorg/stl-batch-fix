@@ -90,13 +90,14 @@ def _area(mesh: Mesh) -> float:
     return float(np.linalg.norm(cross, axis=1).sum() / 2)
 
 
-def _reconstruction_bytes(part: Mesh, h: float, budget_bytes: int) -> int:
+def _reconstruction_bytes(part: Mesh, h: float, budget_bytes: int,
+                          ceiling_bytes: int | None) -> int:
     """`winding.plan`'s own estimate; for a part that fits no block count,
     the budget it will fail against (it still plans, then fails)."""
     try:
-        return winding.plan(part, h, budget_bytes).estimate_bytes
-    except winding.BudgetError:
-        return budget_bytes
+        return winding.plan(part, h, budget_bytes, ceiling_bytes).estimate_bytes
+    except winding.BudgetError as error:
+        return error.budget
     except (ValueError, winding.EmptyResult):
         return 0
 
@@ -110,12 +111,14 @@ def _alpha_wrap(part: Mesh, alpha: float) -> tuple[int, int]:
 
 
 def repair_bytes(mesh: Mesh, min_shell_faces: int, reconstruct_budget_bytes: int,
-                 reconstruction: str = 'winding') -> int:
+                 reconstruction: str = 'winding',
+                 reconstruct_ceiling_bytes: int | None = None) -> int:
     """Reservation for the repair child that will load `mesh`.
 
     Mirrors `repairer.repair`'s path for `reconstruction`: diagonal of the
     whole mesh, shell split with the same floor, then the reconstruction
-    (winding, or alpha-wrap, which ignores `reconstruct_budget_bytes`),
+    (winding, planned with the same budget and ceiling as the step, or
+    alpha-wrap, which ignores both),
     decimation and MeshFix per part. `skip_clean` is ignored: a gated mesh
     needs less, never more.
     """
@@ -136,7 +139,8 @@ def repair_bytes(mesh: Mesh, min_shell_faces: int, reconstruct_budget_bytes: int
             rebuild_bytes, rebuilt = _alpha_wrap(part, alpha)
         else:
             rebuilt = int(REBUILT_FACES_PER_UNIT * _area(part) / h ** 2)
-            rebuild_bytes = _reconstruction_bytes(part, h, reconstruct_budget_bytes)
+            rebuild_bytes = _reconstruction_bytes(part, h, reconstruct_budget_bytes,
+                                                  reconstruct_ceiling_bytes)
         part_peak = max(rebuild_bytes,
                         DECIMATE_BYTES_PER_FACE * rebuilt,
                         MESHFIX_BYTES_PER_FACE * rebuilt)

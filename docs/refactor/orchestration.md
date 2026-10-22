@@ -112,6 +112,23 @@ folder. A child whose kill stayed unconfirmed dies with the process
 (`exit_with_parent`); anything it writes first lands inside the removed
 staging folder and is swept by the next run there.
 
+`fix_files.py --large FILE` (2026-10-21, the third right-click entry) runs
+one file through `runconfig.large_file`: `workers=1`, `per_file_timeout=None`
+(the wait has no deadline; cancellation still kills the child), and
+allowance = `memory_budget_fraction` × (`MemAvailable` + `SwapFree`) as both
+the admission budget and `reconstruct_memory_ceiling_bytes`. The ceiling
+travels like the budget (child `--reconstruct-ceiling-bytes`, `StepConfig`,
+`jobmemory.repair_bytes`), so admission and the step plan alike.
+`winding.plan` keeps `reconstruct_memory_budget_gb` as the target (capped
+at the ceiling) and only when nothing fits falls back to the fewest blocks
+reaching the lowest estimate. Why not simply a ceiling-sized target: plan
+picks the fewest blocks that fit, so a ~180 GB target would choose one
+large block and swap a part whose finest split mostly fits in RAM. Trigger:
+`/mnt/sda2/Bust.stl`, part 1/5 `BudgetError` floor 20.70 GB > budget 20 GB
+(2026-10-21). Owner choices: RAM+swap, no timeout, one file, winding only
+(`--large` with `--alpha` is rejected). The ceiling is not a TOML key
+(`runconfig.RUNTIME_ONLY`).
+
 ## One mesh
 
 | Order | Invocation | Condition / parameters |
@@ -296,7 +313,8 @@ Findings:
 - Admission estimates are calibrated on measured runs (see "Job memory"),
   not enforced limits; an oversized job admitted alone can exceed the budget.
   The automatic budget is `memory_budget_fraction` × `MemAvailable`
-  (`/proc/meminfo`), falling back to free pages.
+  (`/proc/meminfo`), falling back to free pages; only `fix_files.py
+  --large` adds `SwapFree` (above).
 - Post-reconstruction decimation is bounded by no budget: memory and time
   follow the rebuilt face count (~3·A/h²). A 6,160-face sphere of radius 132
   rebuilt to 29 M faces and decimated for 353 s at 13.9 GB. Admission now
