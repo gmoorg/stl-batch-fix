@@ -22,15 +22,30 @@ square) — both bounds hold for the part of the triangle above the square,
 so their maximum does too.  Any model material above a cell is bounded below
 by some surface triangle over it, so the bound covers flared connectors and
 vertical faces as well.  A solid over a cell may then reach
-    limit = min(ceiling over the cell - gap, ceiling of every cell within
-                xy_distance) - EPS
-i.e. `gap` below anything directly above it and below anything beside it.
+    limit = min(ceiling of the cell and every cell within xy_distance) - gap - EPS
+i.e. `gap` below anything directly above it or beside it.  The gap applies
+beside too: walls run past the model's edges (whole lattice squares), and a
+top level with a lower edge just outside it would touch that edge.
 Every generated solid is a union of boxes whose footprint is a set of whole
 cells, each box no higher than the limit of every cell it touches; wall tops
 are therefore stepped per cell, never interpolated.
 
 The candidate area (what needs support) comes from `basecheck`'s underside
 map; only clearance uses the triangles.
+
+Walls follow whole lattice squares (pitch x pitch, between consecutive
+lattice lines): every square holding an eligible cell gets all four of its
+edges as walls, each running on past the corners far enough to overlap the
+crossing wall, so the walls form closed cells that brace each other.  Walls
+placed only over the eligible cells stood alone as pins wherever the
+supported strip was thinner than the pitch (torso.3mf, 2026-10-16: 175 of
+177 wall pieces under 2.5 mm long, up to 29 mm tall).  The cost is wall
+up to one pitch beyond the area that needs it, near surfaces that did not.
+A wall's top is the clearance limit, capped at its square's highest
+eligible limit (never above max_height - gap), so walls beyond the model's
+footprint (no ceiling) stay finite and no taller than their square needs.
+Clearance can still cut a wall short of its crossing wall; such runs are
+kept and counted (`unbraced_runs`), not dropped.
 """
 
 from __future__ import annotations
@@ -116,8 +131,11 @@ class GridSupport:
     near_area       eligible area within pitch/2 of a generated wall (a
                     proximity measure, not proof the wall holds that point)
     missed_area     eligible area farther than that from every wall
+    unbraced_runs/unbraced_length  wall runs that meet no crossing wall
+                    (expected where the model leaves no room for one) — kept
     gap_median/gap_p95  vertical CAD clearance between wall tops and the
-                    model's lower bound directly above them
+                    model's lower bound directly above them, over wall cells
+                    with model overhead (nan when none has)
     """
 
     vertices: np.ndarray
@@ -134,6 +152,8 @@ class GridSupport:
     near_area: float
     missed_area: float
     fallback_crosses: int
+    unbraced_runs: int
+    unbraced_length: float
     gap_median: float
     gap_p95: float
     top_range: tuple[float, float]
@@ -165,7 +185,10 @@ def build(tris: np.ndarray, candidates: np.ndarray, cx0: float, cy0: float, ccel
     rows, cols = np.nonzero(candidates)
     lo = np.array([cx0 + cols.min() * ccell, cy0 + rows.min() * ccell])
     hi = np.array([cx0 + (cols.max() + 1) * ccell, cy0 + (rows.max() + 1) * ccell])
-    pad = s.margin + s.width + MAX_CLOSING + s.connector_width + ROUTE_PAD
+    # Every lattice square holding a candidate lies inside the snapped box,
+    # so the pad below is measured from its walls, whatever the pitch.
+    lo, hi = np.floor(lo / s.pitch) * s.pitch, np.ceil(hi / s.pitch) * s.pitch
+    pad =s.margin + s.width + MAX_CLOSING + s.connector_width + ROUTE_PAD
     origin = np.floor((lo - pad) / cell) * cell
     nx, ny = (int(v) for v in np.ceil((hi + pad - origin) / cell))
     if nx * ny > MAX_CELLS:
@@ -174,9 +197,9 @@ def build(tris: np.ndarray, candidates: np.ndarray, cx0: float, cy0: float, ccel
     raster = _Raster(float(origin[0]), float(origin[1]), cell, nx, ny)
 
     covered = _resample(candidates, cx0, cy0, ccell, raster)
-    # Every wall stands under an eligible cell, so no top exceeds max_height
-    # - gap, and the base is lower still: triangles wholly above max_height
-    # can never come within the gap of the grid and are left out.
+    # Every wall top is capped at max_height - gap (`_squares`), and the base
+    # is lower still: triangles wholly above max_height can never come within
+    # the gap of the grid and are left out.
     low = tris[tris[:, :, 2].min(axis=1) < max_height] if len(tris) else tris
     ceiling = _ceiling(low, raster)
     limit = _limit(ceiling, raster, s)
@@ -189,16 +212,24 @@ def build(tris: np.ndarray, candidates: np.ndarray, cx0: float, cy0: float, ccel
                         f'({s.min_wall:g}) + gap ({s.gap:g}) clear of the model')
 
     base_ok = limit >= s.base_height
+    square, capmap = _squares(eligible, limit, raster, s, max_height)
+    reach = _reach(capmap, raster, s)
     closing = _square(min(s.pitch, MAX_CLOSING) / cell)
     footprint = ndimage.binary_closing(eligible, structure=closing) | eligible
     footprint = ndimage.binary_dilation(footprint, structure=_square((s.margin + s.width) / cell))
-    base = footprint & base_ok
+    # The wall zone joins the base explicitly: with no margin the walls'
+    # overlap past each square edge reaches beyond the dilated footprint.
+    # One cell more keeps wall ends inside the base outline, not flush with
+    # its edge (a flush end leaves manifold3d a stray vertex on that face).
+    zone = ndimage.binary_dilation(np.isfinite(reach), structure=_EIGHT)
+    base = (footprint | zone) & base_ok
 
     walls = _Walls(raster, limit, ceiling, s)
-    walls.lattice(eligible, base)
-    crosses = walls.fallback(eligible, base)
+    walls.lattice(reach, base)
+    crosses = walls.fallback(eligible, square, capmap, base)
     if not walls.runs:
         raise GridError('no wall fits under the candidates')
+    unbraced = walls.unbraced()
 
     base = _keep_supporting(base, walls.cells)
     pieces = int(ndimage.label(base, structure=_FOUR)[1])
@@ -215,6 +246,7 @@ def build(tris: np.ndarray, candidates: np.ndarray, cx0: float, cy0: float, ccel
     near = eligible & ndimage.binary_dilation(walls.cells,
                                               structure=_square(s.pitch / 2 / cell))
     gaps = np.asarray(walls.gaps)
+    gaps = gaps[np.isfinite(gaps)]
     return GridSupport(
         vertices=vertices, faces=faces, walls=len(walls.runs),
         wall_length=float(sum(r.length for r in walls.runs)),
@@ -223,7 +255,9 @@ def build(tris: np.ndarray, candidates: np.ndarray, cx0: float, cy0: float, ccel
         candidate_area=float(covered.sum() * area), no_room_area=float(no_room.sum() * area),
         eligible_area=float(eligible.sum() * area), near_area=float(near.sum() * area),
         missed_area=float((eligible & ~near).sum() * area), fallback_crosses=crosses,
-        gap_median=float(np.median(gaps)), gap_p95=float(np.percentile(gaps, 95)),
+        unbraced_runs=len(unbraced), unbraced_length=float(sum(r.length for r in unbraced)),
+        gap_median=float(np.median(gaps)) if len(gaps) else math.nan,
+        gap_p95=float(np.percentile(gaps, 95)) if len(gaps) else math.nan,
         top_range=(float(min(r.tops.min() for r in walls.runs)),
                    float(max(r.tops.max() for r in walls.runs))))
 
@@ -318,7 +352,7 @@ def _limit(ceiling: np.ndarray, raster: _Raster, s: GridSettings) -> np.ndarray:
     """
     k = int(math.ceil(s.xy_distance / raster.cell - 1e-9))
     beside = ndimage.minimum_filter(ceiling, size=2 * k + 1, mode='constant', cval=-np.inf)
-    limit = np.minimum(ceiling - s.gap, beside) - EPS
+    limit = beside - s.gap - EPS        # `beside` includes the cell itself
     ring = k + 1
     limit[:ring, :] = limit[-ring:, :] = -np.inf
     limit[:, :ring] = limit[:, -ring:] = -np.inf
@@ -326,6 +360,39 @@ def _limit(ceiling: np.ndarray, raster: _Raster, s: GridSettings) -> np.ndarray:
 
 
 # ----------------------------------------------------------------- walls
+
+def _squares(eligible, limit, raster: _Raster, s: GridSettings, max_height: float):
+    """The lattice squares that hold an eligible cell, and their wall cap.
+
+    Returns (square, capmap): `square` numbers each cell's lattice square
+    (the cell's centre decides); `capmap` is, per cell, its square's cap —
+    the highest `limit` among that square's eligible cells, never above
+    max_height - gap — or -inf when the square holds no eligible cell.
+    The cap bounds walls standing where nothing is overhead (limit = inf)
+    and keeps every wall no taller than the support its square needs.
+    """
+    c, p = raster.cell, s.pitch
+    sx = np.floor((raster.x0 + (np.arange(raster.nx) + 0.5) * c) / p).astype(np.int64)
+    sy = np.floor((raster.y0 + (np.arange(raster.ny) + 0.5) * c) / p).astype(np.int64)
+    sx -= sx.min()
+    sy -= sy.min()
+    square = sy[:, None] * (int(sx.max()) + 1) + sx[None, :]
+    cap = np.full(int(square.max()) + 1, -np.inf)
+    np.maximum.at(cap, square[eligible], limit[eligible])
+    cap = np.minimum(cap, max_height - s.gap)
+    return square, cap[square]
+
+
+def _reach(capmap, raster: _Raster, s: GridSettings) -> np.ndarray:
+    """`capmap` spread by half a wall width (rounded up to whole cells).
+
+    A wall on a square's edge then sees that square from either side, and
+    runs on past the square's corners far enough to cover the crossing
+    wall's full width, so the two overlap.
+    """
+    k = int(math.ceil((s.width / 2) / raster.cell - 1e-9))
+    return ndimage.maximum_filter(capmap, size=2 * k + 1, mode='constant', cval=-np.inf)
+
 
 @dataclass(frozen=True)
 class _Run:
@@ -339,6 +406,13 @@ class _Run:
     def length(self) -> float:
         return len(self.tops) * self.cell
 
+    def box(self, raster: _Raster, width: float) -> tuple[float, float, float, float]:
+        """The run's footprint as built by `_wall`: (x_lo, x_hi, y_lo, y_hi)."""
+        across = (self.position - width / 2, self.position + width / 2)
+        origin = raster.x0 if self.along_x else raster.y0
+        along = (origin + self.start * self.cell, origin + (self.start + len(self.tops)) * self.cell)
+        return (*along, *across) if self.along_x else (*across, *along)
+
 
 class _Walls:
     """Wall runs on the lattice plus their raster footprint and clearances."""
@@ -349,21 +423,29 @@ class _Walls:
         self.cells = np.zeros(limit.shape, dtype=bool)
         self.gaps: list[float] = []
 
-    def lattice(self, eligible, base):
+    def lattice(self, reach, base):
+        """Every lattice line, wherever it borders a selected square."""
         r, p = self.raster, self.s.pitch
         for along_x in (False, True):
             first = r.y0 if along_x else r.x0
             count = r.ny if along_x else r.nx
             k = math.ceil(first / p)
             while k * p < first + count * r.cell:
-                self.line(along_x, k * p, eligible, base)
+                self.line(along_x, k * p, reach, base)
                 k += 1
 
-    def fallback(self, eligible, base) -> int:
-        """A cross through each eligible patch the lattice missed."""
+    def fallback(self, eligible, square, capmap, base) -> int:
+        """A cross through each eligible patch no wall touches.
+
+        Its arms run edge to edge across the patch's own lattice square, so
+        they end in that square's walls instead of standing alone.
+        """
         labels, n = ndimage.label(eligible, structure=_EIGHT)
         added = 0
-        min_cells = self.s.min_area / (self.raster.cell ** 2)
+        r = self.raster
+        min_cells = self.s.min_area / (r.cell ** 2)
+        k = int(math.ceil((self.s.width / 2) / r.cell - 1e-9))
+        own = np.full(capmap.shape, -np.inf)
         for index, where in enumerate(ndimage.find_objects(labels), start=1):
             patch = labels[where] == index
             if patch.sum() < min_cells or (self.cells[where] & patch).any():
@@ -371,17 +453,35 @@ class _Walls:
             inner = ndimage.distance_transform_edt(np.pad(patch, 1))[1:-1, 1:-1]
             jj, ii = np.unravel_index(np.argmax(inner), patch.shape)
             j, i = where[0].start + jj, where[1].start + ii
-            only = np.zeros_like(eligible)
-            only[where] = patch
-            r = self.raster
+            rows, cols = np.nonzero(square == square[j, i])
+            box = (slice(max(rows.min() - k, 0), rows.max() + k + 1),
+                   slice(max(cols.min() - k, 0), cols.max() + k + 1))
+            own[box] = np.where(square[box] == square[j, i], capmap[box], -np.inf)
+            own[box] = _reach(own[box], r, self.s)
             before = len(self.runs)
-            self.line(False, r.x0 + (i + 0.5) * r.cell, only, base)
-            self.line(True, r.y0 + (j + 0.5) * r.cell, only, base)
+            self.line(False, r.x0 + (i + 0.5) * r.cell, own, base)
+            self.line(True, r.y0 + (j + 0.5) * r.cell, own, base)
+            own[box] = -np.inf
             added += len(self.runs) > before
         return added
 
-    def line(self, along_x, position, eligible, base):
-        """Wall runs on one lattice line, cell by cell."""
+    def unbraced(self) -> list[_Run]:
+        """Runs whose footprint overlaps no perpendicular run's (positive area)."""
+        w, r = self.s.width, self.raster
+        boxes = {along: np.array([run.box(r, w) for run in self.runs if run.along_x == along])
+                 .reshape(-1, 4) for along in (False, True)}
+        out = []
+        for run in self.runs:
+            other = boxes[not run.along_x]
+            x_lo, x_hi, y_lo, y_hi = run.box(r, w)
+            meets = ((np.minimum(x_hi, other[:, 1]) - np.maximum(x_lo, other[:, 0]) > 1e-9)
+                     & (np.minimum(y_hi, other[:, 3]) - np.maximum(y_lo, other[:, 2]) > 1e-9))
+            if not meets.any():
+                out.append(run)
+        return out
+
+    def line(self, along_x, position, reach, base):
+        """Wall runs on one lattice line, cell by cell, capped by `reach`."""
         r, s = self.raster, self.s
         across0 = r.y0 if along_x else r.x0
         a = int(math.floor((position - s.width / 2 - across0) / r.cell))
@@ -391,12 +491,13 @@ class _Walls:
             return
         if along_x:
             lim, ceil = self.limit[a:b + 1, :], self.ceiling[a:b + 1, :]
-            elig, on_base = eligible[a:b + 1, :], base[a:b + 1, :]
+            cap, on_base = reach[a:b + 1, :], base[a:b + 1, :]
         else:
             lim, ceil = self.limit[:, a:b + 1].T, self.ceiling[:, a:b + 1].T
-            elig, on_base = eligible[:, a:b + 1].T, base[:, a:b + 1].T
-        tops = lim.min(axis=0)
-        keep = (elig.any(axis=0) & on_base.all(axis=0)
+            cap, on_base = reach[:, a:b + 1].T, base[:, a:b + 1].T
+        cap = cap.max(axis=0)
+        tops = np.minimum(lim.min(axis=0), cap)
+        keep = (np.isfinite(cap) & on_base.all(axis=0)
                 & (tops >= s.base_height + s.min_wall))
         over = ceil.min(axis=0)
         for start, stop in _runs(keep):

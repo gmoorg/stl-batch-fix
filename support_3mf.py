@@ -32,7 +32,8 @@ off cleanly must be checked by you: nothing here slices or prints.
 
 Exit status: 0 written, every instance handled; 3 written but some instances
 skipped, or nothing written because every candidate was skipped; 4 nothing
-needed support (no file written); 2 error.
+needed support (no file written); 2 error — including an output that
+already exists or is the source, refused before anything is read.
 
     tools/project_python.sh support_3mf.py model.3mf [-o out.3mf]
     tools/project_python.sh support_3mf.py model.3mf --layout grid --max-height 30
@@ -42,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import math
 import os
 import sys
 import zipfile
@@ -153,6 +155,13 @@ def main(argv=None, out=sys.stdout) -> int:
     except ValueError as error:
         print(f'error: {error}', file=sys.stderr)
         return EXIT_ERROR
+    output = args.output or _default_output(args.path, args.layout)
+    try:
+        # Before reading or analysing anything: both can take minutes.
+        bambu3mf.check_destination(args.path, output)
+    except bambu3mf.ReadError as error:
+        print(f'error: {error}', file=sys.stderr)
+        return EXIT_ERROR
     gridsupport = None
     if args.layout == 'grid':
         if not dependencies.check_one('manifold3d', _log_errors):
@@ -166,7 +175,6 @@ def main(argv=None, out=sys.stdout) -> int:
     if not project.is_bambu:
         print('error: not a Bambu Studio project', file=sys.stderr)
         return EXIT_ERROR
-    output = args.output or _default_output(args.path, args.layout)
     try:
         if args.layout == 'ribs':
             rib_settings = ribsupport.RibSettings(pitch=args.pitch, width=_width(project, args),
@@ -313,11 +321,16 @@ def _report_grid(label, support, settings, xy, result, out) -> None:
     print(f'  [GRID] {label}: {s.walls} wall run(s), {s.wall_length:.0f} mm of wall, '
           f'{settings.width:g} mm thick, {settings.pitch:g} mm apart; tops '
           f'{s.top_range[0]:.2f}-{s.top_range[1]:.2f} mm', file=out)
+    if s.unbraced_runs:
+        print(f'    unbraced: {s.unbraced_runs} wall run(s), {s.unbraced_length:.0f} mm, meet no '
+              'crossing wall and may need support themselves', file=out)
     print(f'    base: one piece, {s.base_area:.0f} mm², {settings.base_height:g} mm thick '
           f'(was {s.base_pieces} piece(s); {s.connectors} joining strip(s), '
           f'{s.connector_area:.0f} mm²)', file=out)
-    print(f'    clearance: gap {settings.gap:g} mm (CAD; wall tops sit {s.gap_median:.2f} mm '
-          f'below the model at the median, {s.gap_p95:.2f} mm at the 95th percentile), '
+    measured = ('no model directly above any wall top' if math.isnan(s.gap_median) else
+                f'wall tops sit {s.gap_median:.2f} mm below the model at the median, '
+                f'{s.gap_p95:.2f} mm at the 95th percentile')
+    print(f'    clearance: gap {settings.gap:g} mm (CAD; {measured}), '
           f'sideways {xy.value:g} mm [{xy.source}]', file=out)
     print(f'    coverage: {s.candidate_area:.0f} mm² need support; {s.near_area:.0f} mm² within '
           f'{settings.pitch / 2:g} mm of a wall, {s.missed_area:.0f} mm² farther'

@@ -140,6 +140,16 @@ removal are all unverified.
   the plate in one piece, and do the shin undersides still loop between
   walls? Then: a dense "skin" over the wall tops (owner chose mesh first),
   a support blocker if trees interfere, pitch/gap tuning.
+- [ ] Test-print the whole-square mesh (2026-10-16) on torso.3mf
+  (`/mnt/sda2/torso.mesh.3mf`, `--max-height 30`): do the closed cells
+  print without needing support themselves, and do walls that now reach up
+  to one pitch past the needed area mark surfaces that did not need support?
+  hair_bangs keeps one 1 mm unbraced run.
+  Test print started 2026-10-16 with owner-chosen settings
+  `support_3mf.py /mnt/sda2/torso.3mf --layout grid --width 0.2 --max-height 30
+  --pitch 5` (gap default 0.2). Untried: 0.2 mm walls are half a 0.4 mm
+  nozzle line — check the preview kept them; pitch 5 leaves 5 mm spans for
+  the model to bridge between walls.
 - [ ] Grid base necks: a base piece that reaches another only through a
   narrow slot (≥ one 0.1 mm cell after clearance) counts as joined, so no
   full-width strip is added there; decide whether to require a minimum neck.

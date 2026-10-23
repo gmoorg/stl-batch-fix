@@ -1,5 +1,6 @@
 """Tests for support_3mf.py — automatic coverage, skips, outputs, exit codes."""
 
+import contextlib
 import io
 import os
 import tempfile
@@ -60,6 +61,32 @@ class Cli(unittest.TestCase):
         self.assertAlmostEqual(part.vertices[:, 2].min(), 0.0, places=6)
         self.assertAlmostEqual(part.vertices[:, 2].max(), 0.35, places=6)
         self.assertIn('too low for support', text)
+
+    def test_unusable_output_is_refused_before_reading(self):
+        # The source is not a 3MF: had it been read first, the error would be
+        # about the source, not the refusal.
+        with open(self.path, 'wb') as f:
+            f.write(b'not a 3mf')
+        grid = os.path.join(self.dir.name, 'plate.grid.3mf')
+        for label, args, existing in (
+                ('ribs default', [], self.out),
+                ('grid default', ['--layout', 'grid', '--max-height', '30'], grid),
+                ('output is the source', ['-o', self.path], None)):
+            with self.subTest(label):
+                if existing:
+                    with open(existing, 'wb') as f:
+                        f.write(b'keep me')
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = support_3mf.main([self.path, *args], out=out)
+                self.assertEqual(code, support_3mf.EXIT_ERROR)
+                self.assertIn('refusing to write', err.getvalue())
+                self.assertEqual(out.getvalue(), '')
+                if existing:
+                    with open(existing, 'rb') as f:
+                        self.assertEqual(f.read(), b'keep me')
+                with open(self.path, 'rb') as f:
+                    self.assertEqual(f.read(), b'not a 3mf')
 
     def test_flat_model_needs_nothing_and_writes_nothing(self):
         code, text = self.run_cli({'2': dict(parts=[dict(id='1', mesh=FLAT)])})

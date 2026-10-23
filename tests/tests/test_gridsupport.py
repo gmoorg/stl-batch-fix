@@ -12,6 +12,7 @@ import unittest
 import zipfile
 
 import numpy as np
+from scipy import ndimage
 
 try:
     import manifold3d
@@ -62,6 +63,18 @@ def shin_bottom(x, y):
 SHIN = slab(shin_bottom, size=(20.0, 10.0), n=(80, 80), top=18.0)
 
 
+def thin_bottom(x, y):
+    """A tight curve: shallower than 40° only within ~0.21 mm of y = 5, so the
+    supported strip is thinner than a wall pitch (torso.3mf's undersides)."""
+    return 10.0 + 2.0 * (y - 5.0) ** 2
+
+
+THIN = slab(thin_bottom, size=(20.0, 4.0), n=(80, 160), top=20.0, origin=(0.0, 3.0))
+#: Independent bound on THIN's supported strip: the 40° band half-width
+#: (tan 40° / 4 = 0.21 mm) plus one basecheck cell and one grid cell.
+THIN_BAND = np.tan(np.radians(40.0)) / 4.0 + 0.1 + 0.1
+
+
 def closed_and_positive(vertices, faces):
     edges = np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1)
     _, counts = np.unique(edges, axis=0, return_counts=True)
@@ -86,6 +99,47 @@ def has_cells(vertices, faces, z):
         p = np.asarray(p)
         return 0.5 * np.sum(p[:, 0] * np.roll(p[:, 1], -1) - np.roll(p[:, 0], -1) * p[:, 1])
     return any(area(p) < 0 for p in polygons)
+
+
+def wall_components(vertices, faces, base_height, cell=0.05):
+    """Footprints of the walls above the base, rasterised from the mesh's
+    upward faces: (rows of (x extent, y extent) per 8-connected component)."""
+    t = vertices[faces]
+    n = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    t = t[(n[:, 2] > 0) & (t[:, :, 2].min(axis=1) > base_height + 1e-6)]
+    x0, y0 = vertices[:, 0].min(), vertices[:, 1].min()
+    shape = (int(np.ceil((vertices[:, 1].max() - y0) / cell)) + 1,
+             int(np.ceil((vertices[:, 0].max() - x0) / cell)) + 1)
+    top = np.zeros(shape, dtype=bool)
+    for tri in t:
+        i0, i1 = (int(np.floor((tri[:, 0].min() - x0) / cell)),
+                  int(np.ceil((tri[:, 0].max() - x0) / cell)))
+        j0, j1 = (int(np.floor((tri[:, 1].min() - y0) / cell)),
+                  int(np.ceil((tri[:, 1].max() - y0) / cell)))
+        jj, ii = np.mgrid[j0:j1, i0:i1]
+        px, py = x0 + (ii + 0.5) * cell, y0 + (jj + 0.5) * cell
+        a, b, c = tri[:, :2]
+        d = [(q[0] - p[0]) * (py - p[1]) - (q[1] - p[1]) * (px - p[0])
+             for p, q in ((a, b), (b, c), (c, a))]
+        inside = np.all([e >= 0 for e in d], axis=0) | np.all([e <= 0 for e in d], axis=0)
+        top[jj[inside], ii[inside]] = True
+    labels, count = ndimage.label(top, structure=np.ones((3, 3), dtype=bool))
+    return np.array([((s[1].stop - s[1].start) * cell, (s[0].stop - s[0].start) * cell)
+                     for s in ndimage.find_objects(labels)]).reshape(-1, 2)
+
+
+def straight(components, width):
+    """Components no wider than one wall in some direction: a lone straight run."""
+    return int((components.min(axis=1) <= width + 0.1 + 1e-9).sum())
+
+
+def every_piece_has_a_cell(vertices, faces, z):
+    """Each connected piece of a horizontal slice encloses at least one hole."""
+    mesh = manifold3d.Mesh(vert_properties=vertices.astype(np.float32),
+                           tri_verts=faces.astype(np.uint32))
+    section = manifold3d.Manifold(mesh).slice(z)
+    pieces_ = section.decompose()
+    return bool(pieces_) and all(len(p.to_polygons()) > 1 for p in pieces_)
 
 
 def sample_points(vertices, faces):
@@ -134,6 +188,64 @@ class Geometry(unittest.TestCase):
         self.assertTrue(np.all(np.hypot(dx, dy) >= XY - TOL))
         self.assertGreater(support.near_area, 0.9 * support.eligible_area)
         self.assertGreaterEqual(support.gap_median, GAP)
+
+    def test_strip_thinner_than_the_pitch_gets_closed_cells_not_pins(self):
+        support = build([THIN])
+        v, f = support.vertices, support.faces
+        closed, volume = closed_and_positive(v, f)
+        self.assertTrue(closed)
+        self.assertGreater(volume, 0)
+        self.assertEqual(pieces(v, f), 1)
+        components = wall_components(v, f, 0.4)
+        self.assertGreater(len(components), 0)
+        self.assertEqual(straight(components, 0.42), 0, 'no lone pin or straight stub')
+        self.assertEqual(support.unbraced_runs, 0)
+        # Every wall reaches z = 9 here (lowest cap ≈ 9.8), so the slice there
+        # shows the whole mesh: each piece of it encloses a cell.
+        self.assertTrue(every_piece_has_a_cell(v, f, 9.0))
+        p = sample_points(v, f)
+        over = (p[:, 1] >= 3.0) & (p[:, 1] <= 7.0) & (p[:, 0] >= 0.0) & (p[:, 0] <= 20.0)
+        self.assertTrue(np.all(p[over, 2] <= thin_bottom(p[over, 0], p[over, 1]) - GAP + 1e-3))
+        # Walls beyond the strip stop at the highest supported point, not at
+        # the model above them (or at nothing: past the slab's ends).
+        self.assertTrue(np.all(p[:, 2] <= thin_bottom(0.0, 5.0 + THIN_BAND) - GAP + TOL))
+
+    def test_walls_cut_by_the_model_are_kept_and_counted(self):
+        # Plate-reaching plates along y = 4 and y = 6 leave no room for the
+        # x-walls there, so each y-wall between them is a lone straight stub.
+        plates = [box((-0.5, 3.8, 0.0), (20.5, 4.2, 20.0)),
+                  box((-0.5, 5.8, 0.0), (20.5, 6.2, 20.0))]
+        support = build([THIN, *plates])
+        components = wall_components(support.vertices, support.faces, 0.4)
+        stubs = straight(components, 0.42)
+        self.assertGreater(stubs, 0)
+        self.assertEqual(len(components), stubs, 'every wall here is a stub')
+        self.assertEqual(support.unbraced_runs, stubs)
+        self.assertGreater(support.unbraced_length, 0)
+
+    def test_base_lies_under_every_wall_with_no_margin(self):
+        support = build([THIN], margin=0.0, cell=0.42)
+        v, f = support.vertices, support.faces
+        self.assertEqual(pieces(v, f), 1)
+        self.assertEqual(support.unbraced_runs, 0)
+        mesh = manifold3d.Manifold(manifold3d.Mesh(vert_properties=v.astype(np.float32),
+                                                   tri_verts=f.astype(np.uint32)))
+        base = mesh.slice(0.2)
+        above = mesh.slice(0.6)
+        self.assertGreater(above.area(), 0)
+        self.assertAlmostEqual((above - base).area(), 0.0, places=6,
+                               msg='wall footprint outside the base')
+
+    def test_pitch_wider_than_the_padding_keeps_all_four_walls(self):
+        for dx, dy in ((0.0, 0.0), (3.3, 7.1)):
+            with self.subTest(offset=(dx, dy)):
+                patch = shifted(box((5.0, 5.0, 5.0), (6.0, 6.0, 8.0)), dx, dy)
+                support = build([patch], pitch=20.0)
+                v = support.vertices
+                lo = np.floor((np.array([5.0 + dx, 5.0 + dy])) / 20.0) * 20.0
+                self.assertTrue(np.all(v[:, :2].min(axis=0) <= lo + 0.42 / 2 + TOL))
+                self.assertTrue(np.all(v[:, :2].max(axis=0) >= lo + 20.0 - 0.42 / 2 - TOL))
+                self.assertTrue(has_cells(v, support.faces, 2.0))
 
     def test_flared_post_and_obstacle_beside_a_wall_end_keep_clearance(self):
         # Square frustum: 1 mm wide on the plate, 5 mm wide at z = 12, so its
