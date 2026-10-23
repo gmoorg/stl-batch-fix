@@ -69,7 +69,7 @@ fi
 # Default part reconstruction (libs/winding.py): exact distance (AABB), fast
 # winding number, marching cubes, patch orientation.
 echo "→ libigl (reconstruction)"
-if "$PYTHON" -c "import igl; igl.fast_winding_number; igl.marching_cubes; igl.AABB" 2>/dev/null; then
+if "$PYTHON" -c "import igl; igl.FastWindingNumberBVH; igl.marching_cubes; igl.AABB" 2>/dev/null; then
     ok "libigl already installed"
 else
     warn "libigl not found — installing..."
@@ -77,7 +77,7 @@ else
         fail "libigl install failed — it is REQUIRED for default repair"
         exit 1
     }
-    "$PYTHON" -c "import igl; igl.fast_winding_number; igl.marching_cubes; igl.AABB" 2>/dev/null || {
+    "$PYTHON" -c "import igl; igl.FastWindingNumberBVH; igl.marching_cubes; igl.AABB" 2>/dev/null || {
         fail "libigl import failed — it is REQUIRED for default repair"
         exit 1
     }

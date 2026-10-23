@@ -308,7 +308,13 @@ def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
     F = _oriented(V, F)
     tree = _igl.AABB()
     tree.init(V, F)                                  # built once, reused by every block
-    cuts = [_cuts(n, blocks_per_axis) for n in shape]
+    # The winding-number hierarchy likewise. `igl.fast_winding_number(V, F, Q)`
+    # rebuilds it on every call (~0.55 s on Bust part 1, 723k faces, whatever
+    # Q's size), which made a 35³ split cost hours; the cached one returns the
+    # same values (defaults: expansion order 2, accuracy_scale 2).
+    fwn = _igl.FastWindingNumberBVH()
+    fwn.init(V, F)
+    cuts =[_cuts(n, blocks_per_axis) for n in shape]
     far_value = (BAND + 1) * h
     pieces_v, pieces_f, pieces_e, offset = [], [], [], 0
     for bx in range(blocks_per_axis):
@@ -322,7 +328,7 @@ def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
                     # 32 bits each (see `_edge_ids`).
                     raise RuntimeError(f'block {block_shape} has too many grid points '
                                        'for marching cubes edge keys')
-                field = _block_field(V, F, tree, keys, r0, r1, lo, h, ny, nz, far_value)
+                field = _block_field(V, F, tree, fwn, keys, r0, r1, lo, h, ny, nz, far_value)
                 grid = _block_points(lo, h, r0, r1)
                 mv, mf, e2v = _igl.marching_cubes(field.ravel('F'), grid, *field.shape, 0.0)
                 del grid, field
@@ -335,7 +341,7 @@ def reconstruct(mesh: Mesh, h: float, blocks_per_axis: int) -> Mesh:
         _raise_empty(mesh, V, F)
     # Nothing below needs the input or the last block's output; `mv` would
     # also pin the last vertex piece after `_take` empties the list.
-    del V, F, tree, keys, mv, mf, e2v
+    del V, F, tree, fwn, keys, mv, mf, e2v
     # The joined arrays are call temporaries, so `_weld` owns them and frees
     # each when it rebinds it; joined into locals here they would stay alive
     # beside the welded copies.
@@ -373,9 +379,10 @@ def _take(pieces: list) -> np.ndarray:
     return joined
 
 
-def _block_field(V, F, tree, keys, r0, r1, lo, h, ny, nz, far_value) -> np.ndarray:
+def _block_field(V, F, tree, fwn, keys, r0, r1, lo, h, ny, nz, far_value) -> np.ndarray:
     """Signed field on grid points r0..r1 (inclusive): exact signed distance
-    in the band, ±far_value with the winding-number sign elsewhere."""
+    in the band, ±far_value with the winding-number sign elsewhere. `tree` is
+    the input's `igl.AABB`, `fwn` its `igl.FastWindingNumberBVH`."""
     shape = tuple(int(s) for s in r1 - r0 + 1)
     g0, g1 = r0 - BAND, r1 + BAND                     # band cells that can reach this block
     span = keys[np.searchsorted(keys, g0[0] * ny * nz):
@@ -394,7 +401,7 @@ def _block_field(V, F, tree, keys, r0, r1, lo, h, ny, nz, far_value) -> np.ndarr
     lat = [np.rint(np.arange(r0[a], r1[a] + 1) / K).astype(np.int64) for a in range(3)]
     coarse_axes = [np.arange(l.min(), l.max() + 1) for l in lat]
     coarse = np.stack(np.meshgrid(*coarse_axes, indexing='ij'), -1).reshape(-1, 3)
-    inside_coarse = (_igl.fast_winding_number(V, F, lo + coarse * K * h) > 0.5).reshape(
+    inside_coarse = (fwn.winding_number(lo + coarse * K * h) > 0.5).reshape(
         tuple(len(c) for c in coarse_axes))
     inside = inside_coarse[np.ix_(*(l - l.min() for l in lat))]
     field = np.where(inside, -far_value, far_value)
@@ -405,7 +412,7 @@ def _block_field(V, F, tree, keys, r0, r1, lo, h, ny, nz, far_value) -> np.ndarr
         points = lo + (np.column_stack(idx) + r0) * h
         sq, nearest, _ = tree.squared_distance(V, F, points)
         distance = np.sqrt(sq)
-        inside = _igl.fast_winding_number(V, F, points) > 0.5
+        inside = fwn.winding_number(points) > 0.5
         # A grid point lying ON the input surface sits exactly where the
         # winding number jumps, so its own value is a coin toss (0.5 for a
         # lone face, ~1.0 on a face shared by two touching solids, ~1.5 on a
@@ -417,13 +424,13 @@ def _block_field(V, F, tree, keys, r0, r1, lo, h, ny, nz, far_value) -> np.ndarr
         on_surface = np.flatnonzero(distance < h * 1e-6)
         if len(on_surface):
             inside[on_surface] = _both_sides_inside(
-                V, F, points[on_surface], np.asarray(nearest)[on_surface], h)
+                V, F, fwn, points[on_surface], np.asarray(nearest)[on_surface], h)
         # No value is exactly 0, so marching cubes never has to break a tie.
         field[idx] = np.maximum(distance, h * 1e-6) * np.where(inside, -1.0, 1.0)
     return field
 
 
-def _both_sides_inside(V, F, points, faces, h) -> np.ndarray:
+def _both_sides_inside(V, F, fwn, points, faces, h) -> np.ndarray:
     """For points on the input surface: inside on both sides of the nearest
     face (winding number > 0.5 a step of h·1e-3 along its normal each way)."""
     a, b, c = (V[F[faces, i]] for i in range(3))
@@ -432,8 +439,8 @@ def _both_sides_inside(V, F, points, faces, h) -> np.ndarray:
     usable = length > 0
     normal[usable] /= length[usable, None]
     step = normal * (h * 1e-3)
-    w_plus = _igl.fast_winding_number(V, F, points + step)
-    w_minus = _igl.fast_winding_number(V, F, points - step)
+    w_plus = fwn.winding_number(points + step)
+    w_minus = fwn.winding_number(points - step)
     return usable & (w_plus > 0.5) & (w_minus > 0.5)
 
 

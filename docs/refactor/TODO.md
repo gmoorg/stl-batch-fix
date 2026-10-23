@@ -79,8 +79,7 @@ outside the repository, startup check and `install.sh` section removed
   (sphere, Laura; malloc_child records), so reworking the reindex in
   place/in chunks was dropped (owner, 2026-10-07); streaming each block's
   output likewise only lowers that phase;
-  avoid the per-block winding-number octree
-  rebuild (`igl.FastWindingNumberBVH`, cached); bucket the band's surface
+  bucket the band's surface
   samples by block once instead of scanning all of them per block; for speed
   on large inputs, compute the band against a decimated copy of the input;
   whether a 0.06 mm grid is visible after decimation (untested; 65× more

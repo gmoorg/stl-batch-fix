@@ -335,22 +335,22 @@ class TestPlan(unittest.TestCase):
 
 class TestContract(unittest.TestCase):
 
-    def test_distance_tree_is_built_once_and_winding_queried_per_block(self):
+    def test_distance_and_winding_trees_are_built_once_for_all_blocks(self):
         m = mesh(*sphere())
-        real_aabb = winding._igl.AABB
         inits = []
 
-        class Counting(real_aabb):
-            def init(self, *a):
-                inits.append(1)
-                return super().init(*a)
+        def counting(real):
+            class Counting(real):
+                def init(self, *a):
+                    inits.append(real.__name__)
+                    return super().init(*a)
+            return Counting
 
-        with mock.patch.object(winding._igl, 'AABB', Counting), \
-             mock.patch.object(winding._igl, 'fast_winding_number',
-                               wraps=winding._igl.fast_winding_number) as fwn:
+        with mock.patch.object(winding._igl, 'AABB', counting(winding._igl.AABB)), \
+             mock.patch.object(winding._igl, 'FastWindingNumberBVH',
+                               counting(winding._igl.FastWindingNumberBVH)):
             winding.reconstruct(m, 0.5, 3)
-        self.assertEqual(len(inits), 1)
-        self.assertGreaterEqual(fwn.call_count, 27)
+        self.assertEqual(sorted(inits), ['AABB', 'FastWindingNumberBVH'])
 
     def welded_to(self, verts, faces):
         """Patch `_weld` so a reconstruction comes out as the given arrays."""
