@@ -1,3 +1,25 @@
+> **TEMPORARY HANDOFF (2026-10-16) — delete once the print result is in.**
+> Waiting for the owner's torso test-print report. Printed with
+> `support_3mf.py /mnt/sda2/torso.3mf --layout grid --width 0.2 --max-height 30 --pitch 5`
+> (gap default 0.2; the owner chose width 0.2 and pitch 5 — 0.2 is half a
+> 0.4 mm nozzle line, untried).
+> Committed 2026-10-23 (134dac9), both Codex-reviewed PASS:
+> 1. Whole-square grid mesh — `libs/gridsupport.py` (`_squares`, `_reach`,
+>    unbraced runs, sideways rule now keeps `gap`), report line in
+>    `support_3mf.py`, tests in `tests/tests/test_gridsupport.py`, docs
+>    `docs/refactor/modules.md` grid paragraph + `TODO.md`. Why: the old grid
+>    was lone 0.4 mm pins up to 29 mm tall on torso (175 of 177 pieces).
+> 2. Output check before processing — `bambu3mf.check_destination`, called
+>    first in `support_3mf.main`; test in `tests/tests/test_support_3mf.py`.
+> Focused checks: test_gridsupport, test_support_3mf, test_bambu3mf,
+> test_ribsupport, test_basecheck, test_check_3mf all OK.
+> When the report comes: did the walls print (0.2 width), stand without
+> falling, hold the boot/shin undersides across the 5 mm spans, mark
+> surfaces near the extra walls, and come off plate and model in one piece?
+> Then decide pitch/width, the "skin" (TODO.md grid item) and a commit.
+> `--gap` is clearance, not mesh size (owner mixed them up once; mesh size
+> is `--pitch`). Start the next task with `tools/reset_codex.sh`.
+
 # Claude Code instructions
 
 Treat the directory containing this file as the project root. Return to it before project commands; do not derive project paths from the shell's inherited working directory. Start with [README.md](README.md) and follow only the compact documentation needed.

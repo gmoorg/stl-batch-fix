@@ -1,0 +1,25 @@
+{
+  "brim_object_gap": "0.1",
+  "detect_thin_wall": "0",
+  "elefant_foot_compensation": "0.15",
+  "enable_prime_tower": "1",
+  "enable_support": "0",
+  "from": "system",
+  "name": "0.20mm Standard @BBL X1C",
+  "print_settings_id": "",
+  "skeleton_infill_density": "15%",
+  "skin_infill_density": "15%",
+  "sparse_infill_density": "15%",
+  "sparse_infill_pattern": "grid",
+  "sparse_infill_speed": [
+    "270",
+    "370"
+  ],
+  "support_bottom_z_distance": "0.2",
+  "support_on_build_plate_only": "0",
+  "support_style": "default",
+  "support_threshold_angle": "30",
+  "support_top_z_distance": "0.2",
+  "top_shell_layers": "5",
+  "top_surface_pattern": "monotonicline"
+}
