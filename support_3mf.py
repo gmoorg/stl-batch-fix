@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Add generated support (ribs or a grid) under a Bambu Studio 3MF's undersides.
+"""Add generated support (ribs, a grid or keels) under a Bambu Studio 3MF's undersides.
 
 Writes a NEW 3MF; the original is never modified.  One part is added to each
-handled object.  Two layouts:
+handled object.  Three layouts:
 
 ribs (default)  thin breakaway walls under the undersides the slicer cannot
     support (check B of check_3mf.py: above the layer-1 slice, below first
@@ -21,10 +21,16 @@ grid  a mesh of single-line walls in X and Y under every shallow underside
     base + wall + gap (including the check-B band) are left unsupported and
     reported.  See libs/gridsupport.py.
 
+keel  the grid's clearance and one-piece rules, but oriented to the part:
+    under each elongated underside one wall follows its lowest line, with
+    ribs across it every --pitch along it; other undersides get the grid
+    lattice.  Walls stand on feet (three project line widths) instead of a
+    sheet, so the plate between them stays bare.  Experimental (2026-10-27).
+
 An instance is skipped, and says why, when its analysis cannot be trusted
 (negative volumes, unknown parts, modifiers/support painting parts, per-part
 or unreadable settings) or its object has several instances; for the grid
-also when layer heights vary or no single-piece grid fits.
+and keel layouts also when layer heights vary or no single-piece support fits.
 
 Whether the file opens in Bambu Studio, whether the support appears in the
 sliced preview, whether Bambu's own supports interfere, and whether it comes
@@ -37,6 +43,7 @@ already exists or is the source, refused before anything is read.
 
     tools/project_python.sh support_3mf.py model.3mf [-o out.3mf]
     tools/project_python.sh support_3mf.py model.3mf --layout grid --max-height 30
+    tools/project_python.sh support_3mf.py model.3mf --layout keel --max-height 30 --pitch 5
 """
 
 from __future__ import annotations
@@ -59,6 +66,17 @@ from libs.printsettings import (instance_problems, object_number,  # noqa: E402
 EXIT_WRITTEN, EXIT_ERROR, EXIT_PARTIAL, EXIT_NOTHING = 0, 2, 3, 4
 PART_NAME = 'generated support ribs'
 GRID_PART_NAME = 'generated support grid'
+KEEL_PART_NAME = 'generated support keel'
+#: Keel feet are this many project line widths wide.
+FOOT_LINES = 3
+#: Keel walls are this much wider than the project line width by default, mm.
+#: Bambu Studio 02.08.02.61 drops stretches of slanted walls exactly one line
+#: wide: on girl_130 Arm_Left (keel at 20°) 0.42 mm walls printed 64 % of
+#: their length (layers down to 30 %), 0.45 mm walls 100 %.  Axis-aligned
+#: grid walls print in full at 0.42.
+KEEL_WIDTH_MARGIN = 0.03
+#: Layouts built by libs/gridsupport (gap, --max-height required, one piece).
+GRID_LAYOUTS = ('grid', 'keel')
 RIBS_MAX_HEIGHT = 3.0
 GRID_GAP = 0.2
 XY_DISTANCE_KEY = 'support_object_xy_distance'
@@ -72,22 +90,24 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument('path', help='Bambu Studio 3MF file')
     parser.add_argument('-o', '--output',
                         help='new 3MF to write (default: <name>.supported.3mf, or '
-                             '<name>.grid.3mf for the grid, beside the input); must not exist')
-    parser.add_argument('--layout', choices=('ribs', 'grid'), default='ribs',
-                        help='ribs (default) or a one-piece grid')
+                             '<name>.grid.3mf / <name>.keel.3mf, beside the input); must not '
+                             'exist')
+    parser.add_argument('--layout', choices=('ribs',) + GRID_LAYOUTS, default='ribs',
+                        help='ribs (default), a one-piece grid, or keels oriented to the part')
     parser.add_argument('--pitch', type=float, default=2.0,
-                        help='distance between ribs / grid walls, mm')
+                        help='distance between ribs / grid walls / ribs along a keel, mm')
     parser.add_argument('--width', type=float,
-                        help='wall thickness, mm (default: the project line width, else 0.42)')
+                        help='wall thickness, mm (default: the project line width, else 0.42; '
+                             f'keel: {KEEL_WIDTH_MARGIN:g} mm more)')
     parser.add_argument('--overlap', type=float,
                         help='ribs only: how far rib tops rise into the model, mm (default 0.05)')
     parser.add_argument('--gap', type=float,
-                        help=f'grid only: clearance between wall tops and the model, mm '
+                        help=f'grid and keel: clearance between wall tops and the model, mm '
                              f'(default {GRID_GAP})')
     parser.add_argument('--max-height', type=float,
                         help='ribs: highest underside ribbed when automatic supports are off, '
-                             f'mm (default {RIBS_MAX_HEIGHT}); grid (required): highest '
-                             'underside the grid supports, mm')
+                             f'mm (default {RIBS_MAX_HEIGHT}); grid and keel (required): '
+                             'highest underside supported, mm')
     parser.add_argument('--cell', type=float, help='analysis resolution, mm (default 0.05)')
     group = parser.add_argument_group('settings (default: read from the 3MF)')
     group.add_argument('--first-layer', type=float, help='initial layer height, mm')
@@ -101,14 +121,15 @@ def _check_layout_args(args) -> None:
     """Fill layout defaults; reject options that belong to the other layout."""
     if args.layout == 'ribs':
         if args.gap is not None:
-            raise ValueError('--gap applies to --layout grid only')
+            raise ValueError('--gap applies to --layout grid and keel only')
         args.overlap = 0.05 if args.overlap is None else args.overlap
         args.max_height = RIBS_MAX_HEIGHT if args.max_height is None else args.max_height
     else:
         if args.overlap is not None:
             raise ValueError('--overlap applies to --layout ribs only')
         if args.max_height is None:
-            raise ValueError('--layout grid needs --max-height: the highest underside to support')
+            raise ValueError(f'--layout {args.layout} needs --max-height: the highest underside '
+                             'to support')
         args.gap = GRID_GAP if args.gap is None else args.gap
     if not (args.max_height > 0):
         raise ValueError(f'max-height must be positive, got {args.max_height}')
@@ -117,6 +138,11 @@ def _check_layout_args(args) -> None:
 def _width(project, args) -> float:
     if args.width is not None:
         return args.width
+    return _line_width(project)
+
+
+def _line_width(project) -> float:
+    """The project's printed line width (outer wall, else default), else 0.42."""
     for key in ('outer_wall_line_width', 'line_width'):
         try:
             value = float(project.settings[key])
@@ -129,7 +155,7 @@ def _width(project, args) -> float:
 
 def _default_output(path: str, layout: str) -> str:
     base, _ = os.path.splitext(path)
-    return base + ('.grid.3mf' if layout == 'grid' else '.supported.3mf')
+    return base + {'grid': '.grid.3mf', 'keel': '.keel.3mf'}.get(layout, '.supported.3mf')
 
 
 def _areas(result: basecheck.Result) -> tuple[float, float]:
@@ -163,7 +189,7 @@ def main(argv=None, out=sys.stdout) -> int:
         print(f'error: {error}', file=sys.stderr)
         return EXIT_ERROR
     gridsupport = None
-    if args.layout == 'grid':
+    if args.layout in GRID_LAYOUTS:
         if not dependencies.check_one('manifold3d', _log_errors):
             return EXIT_ERROR
         from libs import gridsupport
@@ -181,13 +207,19 @@ def main(argv=None, out=sys.stdout) -> int:
                                                   overlap=args.overlap)
             min_area = rib_settings.min_area
         else:
-            grid_settings = gridsupport.GridSettings(pitch=args.pitch, width=_width(project, args),
-                                                     gap=args.gap)
+            width = _width(project, args)
+            if args.layout == 'keel' and args.width is None:
+                width += KEEL_WIDTH_MARGIN
+            grid_settings = gridsupport.GridSettings(pitch=args.pitch, width=width, gap=args.gap)
             min_area = grid_settings.min_area
+            foot = FOOT_LINES * _line_width(project)
+            if args.layout == 'keel' and grid_settings.width > foot:
+                raise ValueError(f'--width {grid_settings.width:g} is wider than the keel feet '
+                                 f'({FOOT_LINES} line widths = {foot:g} mm)')
     except ValueError as error:
         print(f'error: {error}', file=sys.stderr)
         return EXIT_ERROR
-    variable = _variable_layers(args.path) if args.layout == 'grid' else []
+    variable = _variable_layers(args.path) if args.layout in GRID_LAYOUTS else []
 
     counts = {}
     for instance in project.instances:
@@ -213,7 +245,7 @@ def main(argv=None, out=sys.stdout) -> int:
         if counts[instance.object_id] > 1:
             reasons.append(f'object has {counts[instance.object_id]} instances; one added part '
                            'cannot fit them all')
-        if args.layout == 'grid':
+        if args.layout in GRID_LAYOUTS:
             reasons += _grid_reasons(project, instance, variable)
         parts = [(p.vertices, p.faces) for p in instance.normal_parts]
         result = None
@@ -226,7 +258,7 @@ def main(argv=None, out=sys.stdout) -> int:
             continue
         grid = result.grid
 
-        if args.layout == 'grid':
+        if args.layout in GRID_LAYOUTS:
             candidates = None if grid is None else grid.overhang & (grid.height < args.max_height)
             if candidates is None or not candidates.any():
                 print(f'  [NOT NEEDED] {label}', file=out)
@@ -238,15 +270,23 @@ def main(argv=None, out=sys.stdout) -> int:
                 min_wall=settings['layer_height'].value)
             tris = np.concatenate([v[f] for v, f in parts])
             try:
-                support = gridsupport.build(tris, candidates, grid.x0, grid.y0, grid.cell,
-                                            args.max_height, own)
+                if args.layout == 'keel':
+                    support = gridsupport.build_keel(tris, candidates, grid.height, grid.x0,
+                                                     grid.y0, grid.cell, args.max_height, own,
+                                                     foot)
+                else:
+                    support = gridsupport.build(tris, candidates, grid.x0, grid.y0, grid.cell,
+                                                args.max_height, own)
             except gridsupport.GridError as error:
                 skipped += 1
                 print(f'  [SKIPPED] {label}: {error}', file=out)
                 continue
-            additions.append(bambu3mf.Addition(instance, GRID_PART_NAME,
-                                               support.vertices, support.faces))
-            _report_grid(label, support, own, xy, result, out)
+            name = KEEL_PART_NAME if args.layout == 'keel' else GRID_PART_NAME
+            additions.append(bambu3mf.Addition(instance, name, support.vertices, support.faces))
+            if args.layout == 'keel':
+                _report_keel(label, support, own, xy, result, out)
+            else:
+                _report_grid(label, support, own, xy, result, out)
             continue
 
         mask = None
@@ -278,6 +318,13 @@ def main(argv=None, out=sys.stdout) -> int:
         return EXIT_ERROR
 
     print(f'\nWrote {output}', file=out)
+    if args.layout == 'keel':
+        print('Check in Bambu Studio before printing: slice and confirm in the preview that the '
+              'keel and rib walls print as single lines on their feet and the joining strips '
+              'survive; that the keels sit under the lowest lines of the undersides; and that '
+              'the layer view shows a gap between wall tops and the model.  Supports you paint '
+              'can reach the plate between the walls.  Then test removal.', file=out)
+        return EXIT_PARTIAL if skipped else EXIT_WRITTEN
     if args.layout == 'grid':
         print('Check in Bambu Studio before printing: slice and confirm in the preview that the '
               'grid walls print as single lines and the base and joining strips survive; that '
@@ -302,7 +349,7 @@ def main(argv=None, out=sys.stdout) -> int:
 
 
 def _grid_reasons(project, instance, variable) -> list[str]:
-    """Why the grid cannot trust its clearance settings for this instance."""
+    """Why the grid or keels cannot trust their clearance settings for this instance."""
     reasons = []
     if variable:
         reasons.append('variable layer heights (' + ', '.join(variable) + '): the grid assumes '
@@ -336,6 +383,42 @@ def _report_grid(label, support, settings, xy, result, out) -> None:
           f'{settings.pitch / 2:g} mm of a wall, {s.missed_area:.0f} mm² farther'
           + (f' ({s.fallback_crosses} small patch(es) given their own cross)'
              if s.fallback_crosses else '')
+          + f', {s.no_room_area:.0f} mm² no room for base + wall + gap', file=out)
+    low = sum(r.area for r in result.unsupportable)
+    if low:
+        print(f'    not covered: {low:.1f} mm² too low for any support (check B; see the ribs '
+              'layout)', file=out)
+
+
+def _report_keel(label, support, settings, xy, result, out) -> None:
+    s = support
+    keels = [p for p in s.patches if p.keel]
+    lattice = [p for p in s.patches if not p.keel]
+    print(f'  [KEEL] {label}: {len(keels)} keel(s), {s.walls} wall run(s), '
+          f'{s.wall_length:.0f} mm of wall, {settings.width:g} mm thick on {s.foot:g} mm feet; '
+          f'ribs {settings.pitch:g} mm apart; tops {s.top_range[0]:.2f}-{s.top_range[1]:.2f} mm',
+          file=out)
+    for p in keels:
+        print(f'    keel at ({p.centre[0]:.1f}, {p.centre[1]:.1f}): {p.direction:.0f}°, '
+              f'{p.ribs} rib(s), {p.area:.0f} mm²', file=out)
+    for p in lattice:
+        print(f'    lattice at ({p.centre[0]:.1f}, {p.centre[1]:.1f}), {p.area:.1f} mm²: '
+              f'{p.reason}', file=out)
+    if s.unbraced_runs:
+        print(f'    unbraced: {s.unbraced_runs} wall run(s), {s.unbraced_length:.0f} mm, meet no '
+              'crossing wall and may need support themselves', file=out)
+    print(f'    base: one piece, {s.base_area:.0f} mm² of feet and strips, '
+          f'{settings.base_height:g} mm thick (was {s.base_pieces} piece(s); '
+          f'{s.connectors} joining strip(s), {s.connector_area:.0f} mm²)', file=out)
+    measured = ('no model directly above any wall top' if math.isnan(s.gap_median) else
+                f'wall tops sit {s.gap_median:.2f} mm below the model at the median, '
+                f'{s.gap_p95:.2f} mm at the 95th percentile')
+    print(f'    clearance: gap {settings.gap:g} mm (CAD; {measured}), '
+          f'sideways {xy.value:g} mm [{xy.source}]', file=out)
+    print(f'    coverage: {s.candidate_area:.0f} mm² need support; {s.near_area:.0f} mm² within '
+          f'{settings.pitch / 2:g} mm of a wall, {s.missed_area:.0f} mm² farther'
+          + (f' ({s.left_out_area:.1f} mm² of it specks under {settings.min_area:g} mm² given '
+             'no wall)' if s.left_out_area >= 0.05 else '')
           + f', {s.no_room_area:.0f} mm² no room for base + wall + gap', file=out)
     low = sum(r.area for r in result.unsupportable)
     if low:
