@@ -151,7 +151,7 @@ removal are all unverified.
   nozzle line — check the preview kept them; pitch 5 leaves 5 mm spans for
   the model to bridge between walls.
 - [ ] Keel grid (owner idea, 2026-10-27; first version as `--layout keel`,
-  see [modules](modules.md); next: owner's sliced preview and a test print
+  see [modules](modules.md) and the summary [keel](keel.md); next: owner's sliced preview and a test print
   of girl_130 Arm_Left, then decide on curved keels and the 80 % band rule): support oriented to
   the part instead of the world X/Y lattice. Under an elongated underside
   (forearm, hand) one "keel" wall follows the line where the underside is
