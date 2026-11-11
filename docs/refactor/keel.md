@@ -75,13 +75,19 @@ Found by slicing with the Bambu Studio 02.08.02.61 CLI:
 
 ## Open
 
-- Owner: slice `girl_130.keel.3mf` in Bambu Studio, check the preview, then
-  test-print Arm_Left — underside quality over the keel, how the feet hold,
-  removal.
-- Provisional rules to revisit after the print: the 80 % "keel stays in one
-  band" share, the 1 mm grouping, 3-line feet.
+- Test print (owner, 2026-11-11): Arm_Left with keels printed well. Details
+  (feet, removal, underside quality) were not reported. The owner plans
+  further keel changes in a later session.
+- Provisional rules still to revisit: the 80 % "keel stays in one band"
+  share, the 1 mm grouping, 3-line feet.
 - Not done: curved keels, keels for branched shapes (fingers), a G-code check
   of the gap at keel tops (only CAD statistics so far).
 - The Arm_Left break itself remains unexplained.
+
+Regenerate the test file: `tools/project_python.sh support_3mf.py
+/mnt/sda2/assembly/print/girl_130.3mf --layout keel --max-height 30 --pitch 5`.
+Slice it headless with the Bambu CLI (check sliced paths only after its 2.19 mm
+y shift): `/mnt/sda1/BambuStudio_ubuntu22.04-v02.08.02.61-20260820225108.AppImage
+--appimage-extract-and-run --slice N --outputdir DIR --export-3mf X.3mf in.3mf`.
 
 Commits: `4833f9f` (idea note), `23150fc` (layout, tests, docs).

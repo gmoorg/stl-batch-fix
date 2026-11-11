@@ -1,22 +1,3 @@
-> **TEMPORARY HANDOFF (2026-10-27) — keel support layout; delete once the
-> owner's keel test print is reported.**
-> Read [docs/refactor/keel.md](docs/refactor/keel.md) first (what, why,
-> numbers, open items). State: `--layout keel` committed (`23150fc`),
-> Codex-reviewed PASS; grid layout output unchanged. Waiting for the owner
-> to slice `girl_130.keel.3mf` (made in the old session's scratchpad —
-> regenerate with `tools/project_python.sh support_3mf.py
-> /mnt/sda2/assembly/print/girl_130.3mf --layout keel --max-height 30
-> --pitch 5`) and test-print Arm_Left. When the report comes: did keel and
-> ribs print as single lines on their feet, did the underside print well
-> over the keel, did the feet hold, did it come off in one piece? Then
-> decide: curved keels, the provisional 80 % band rule / 1 mm grouping /
-> 3-line feet. Check sliced paths only after the CLI's 2.19 mm y shift.
-> The Arm_Left break (two failures with the grid, one success without) is
-> unexplained; do not claim the keel fixes it. Bambu CLI:
-> `/mnt/sda1/BambuStudio_ubuntu22.04-v02.08.02.61-20260820225108.AppImage
-> --appimage-extract-and-run --slice N --outputdir DIR --export-3mf X.3mf in.3mf`.
-> Start the next task with `tools/reset_codex.sh`.
->
 > **TEMPORARY HANDOFF (2026-10-16) — delete once the print result is in.**
 > Waiting for the owner's torso test-print report. Printed with
 > `support_3mf.py /mnt/sda2/torso.3mf --layout grid --width 0.2 --max-height 30 --pitch 5`
