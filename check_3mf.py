@@ -10,8 +10,11 @@ reports (see libs/basecheck.py for the method):
 
 Separate from the repair pipeline (batch_repair.py), so unlike it this takes
 command-line arguments.  Exit status: 0 no risk detected within the checks'
-scope, 1 a risk was found, 2 the file could not be read, 3 no risk found but
-some analysis was incomplete.
+scope, 1 a risk was found, 2 the file could not be read (or `--png` was asked
+for without Matplotlib installed), 3 no risk found but some analysis was
+incomplete.  A map that `--png` cannot write is reported on its instance and
+counted in the summary but does not change the exit status: the status is
+the analysis result, and a write error must not hide a found risk.
 
     tools/project_python.sh check_3mf.py model.3mf [--plate N] [--png DIR]
 """
@@ -25,9 +28,9 @@ import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
-from libs import bambu3mf, basecheck  # noqa: E402
-from libs.printsettings import (instance_problems, resolve_settings,  # noqa: E402
-                                thresholds_for)
+from libs import bambu3mf, basecheck, dependencies  # noqa: E402
+from libs.printsettings import (add_settings_arguments, instance_problems,  # noqa: E402
+                                resolve_settings, thresholds_for)
 
 EXIT_OK, EXIT_RISK, EXIT_ERROR, EXIT_INCOMPLETE = 0, 1, 2, 3
 
@@ -84,6 +87,9 @@ def report(instance, settings, notes, problems, result, thresholds, out) -> str:
 
 
 def save_png(directory, plate, instance, result) -> str | None:
+    """Write one instance's underside map; return its path, or None when the
+    analysis kept no map. Raises `PngError` naming the path when the folder
+    or file cannot be written."""
     if result.grid is None:
         return None
     import matplotlib
@@ -92,26 +98,44 @@ def save_png(directory, plate, instance, result) -> str | None:
     import numpy as np
 
     grid = result.grid
-    os.makedirs(directory, exist_ok=True)
     name = ''.join(c if c.isalnum() or c in '-_.' else '_' for c in instance.name)
     path = os.path.join(directory, f'plate{plate}_{name}_{instance.object_id}_{instance.instance_id}.png')
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError as error:
+        raise PngError(f'cannot create {directory}: {error}') from error
     ny, nx = grid.height.shape
     extent = (grid.x0, grid.x0 + nx * grid.cell, grid.y0, grid.y0 + ny * grid.cell)
     # Long thin parts would make an unreadable strip; stretch them instead.
     ratio = ny / max(nx, 1)
     aspect = 'equal' if 0.25 <= ratio <= 4 else 'auto'
     fig, ax = plt.subplots(figsize=(8, min(max(8 * ratio, 4), 10) + 1))
-    image = ax.imshow(grid.height, origin='lower', extent=extent, cmap='viridis', aspect=aspect)
-    fig.colorbar(image, ax=ax, label='underside height above plate (mm)')
-    overlay = np.zeros((ny, nx, 4))
-    overlay[grid.flagged] = (1, 0, 0, 0.8)
-    ax.imshow(overlay, origin='lower', extent=extent, aspect=aspect)
-    ax.set_title(f'{instance.name}: red = too low for support, above layer 1')
-    ax.set_xlabel('X (mm)')
-    ax.set_ylabel('Y (mm)')
-    fig.savefig(path, dpi=120, bbox_inches='tight')
-    plt.close(fig)
+    try:
+        image = ax.imshow(grid.height, origin='lower', extent=extent, cmap='viridis',
+                          aspect=aspect)
+        fig.colorbar(image, ax=ax, label='underside height above plate (mm)')
+        overlay = np.zeros((ny, nx, 4))
+        overlay[grid.flagged] = (1, 0, 0, 0.8)
+        ax.imshow(overlay, origin='lower', extent=extent, aspect=aspect)
+        ax.set_title(f'{instance.name}: red = too low for support, above layer 1')
+        ax.set_xlabel('X (mm)')
+        ax.set_ylabel('Y (mm)')
+        try:
+            fig.savefig(path, dpi=120, bbox_inches='tight')
+        except OSError as error:
+            raise PngError(f'cannot write {path}: {error}') from error
+    finally:
+        plt.close(fig)       # also on failure: pyplot keeps every open figure
     return path
+
+
+class PngError(Exception):
+    """A map could not be written; the message names the path."""
+
+
+def _log_errors(line: str) -> None:
+    if line.startswith('[error]'):
+        print(line, file=sys.stderr)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -119,11 +143,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument('path', help='Bambu Studio (or plain) 3MF file')
     parser.add_argument('--plate', type=int, help='only this plate number')
     parser.add_argument('--png', metavar='DIR', help='write an underside map per instance')
-    group = parser.add_argument_group('settings (default: read from the 3MF)')
-    group.add_argument('--first-layer', type=float, help='initial layer height, mm')
-    group.add_argument('--layer-height', type=float, help='layer height, mm')
-    group.add_argument('--support-gap', type=float, help='support top Z distance, mm')
-    group.add_argument('--support-angle', type=float, help='support threshold angle, degrees')
+    add_settings_arguments(parser)
     group = parser.add_argument_group('analysis thresholds (provisional defaults)')
     defaults = basecheck.Thresholds()
     group.add_argument('--cell', type=float, help=f'map resolution, mm (default {defaults.cell})')
@@ -145,6 +165,10 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None, out=sys.stdout) -> int:
     args = parse_args(argv)
+    # Before reading: the analysis can take minutes, and only then would
+    # the first map find the plotting library missing.
+    if args.png and not dependencies.check_one('Matplotlib', _log_errors):
+        return EXIT_ERROR
     try:
         project = bambu3mf.read(args.path)
     except bambu3mf.ReadError as error:
@@ -163,6 +187,7 @@ def main(argv=None, out=sys.stdout) -> int:
         return EXIT_ERROR
 
     statuses = []
+    maps_failed = 0
     for plate in sorted({i.plate for i in instances}):
         print(f'\nPlate {plate}' + (' (not on any plate)' if plate == 0 else ''), file=out)
         for instance in (i for i in instances if i.plate == plate):
@@ -186,14 +211,20 @@ def main(argv=None, out=sys.stdout) -> int:
                 result = basecheck.Result(None, (), (), (), (), (), (), thresholds.cell, math.nan)
             statuses.append(report(instance, settings, notes, problems, result, thresholds, out))
             if args.png:
-                path = save_png(args.png, plate, instance, result)
-                if path:
-                    print(f'    map: {path}', file=out)
+                try:
+                    path = save_png(args.png, plate, instance, result)
+                except PngError as error:
+                    maps_failed += 1
+                    print(f'    map: not written ({error})', file=out)
+                else:
+                    if path:
+                        print(f'    map: {path}', file=out)
 
     risky = statuses.count('risk')
     incomplete = statuses.count('incomplete')
     print(f'\nSummary: {len(statuses)} instance(s), {risky} at risk, {incomplete} incomplete, '
-          f'{statuses.count("ok")} with no risk detected', file=out)
+          f'{statuses.count("ok")} with no risk detected'
+          + (f', {maps_failed} map(s) not written' if maps_failed else ''), file=out)
     if risky:
         return EXIT_RISK
     if incomplete:

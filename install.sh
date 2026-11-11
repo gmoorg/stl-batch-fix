@@ -16,7 +16,36 @@ fi
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}  [OK]${NC} $*"; }
 warn() { echo -e "${YELLOW}  [WARN]${NC} $*"; }
-fail() { echo -e "${RED}  [FAIL]${NC} $*"; }
+fail() { echo -e "${RED}  [FAIL]${NC} $*"; }   # prints only: the caller exits
+
+# A REQUIRED package: report it when CHECK imports, else pip-install PIP_NAME
+# and run CHECK again. Either failure stops the script — every required
+# package goes through here, so none can fall through to "Done" (REVIEW.md
+# #3: numpy's `|| fail` once did). VERSION, when not empty, is a Python
+# expression printed after CHECK has run.
+#   require_package NAME PIP_NAME CHECK VERSION WHY
+require_package() {
+    local name=$1 pip_name=$2 check=$3 version=$4 why=$5 ver
+    if "$PYTHON" -c "$check" 2>/dev/null; then
+        if [ -n "$version" ]; then
+            ver=$("$PYTHON" -c "$check; print($version)" 2>/dev/null || echo "unknown")
+            ok "$name $ver already installed"
+        else
+            ok "$name already installed"
+        fi
+        return 0
+    fi
+    warn "$name not found — installing..."
+    if ! "$PYTHON" -m pip install "$pip_name"; then
+        fail "$name install failed — it is REQUIRED ($why)"
+        exit 1
+    fi
+    if ! "$PYTHON" -c "$check" 2>/dev/null; then
+        fail "$name import failed after install — it is REQUIRED ($why)"
+        exit 1
+    fi
+    ok "$name installed"
+}
 
 echo "=== STL Batch Fix — dependency check ==="
 echo
@@ -42,47 +71,21 @@ fi
 
 # ── pymeshlab ─────────────────────────────────────────────────────────────────
 echo "→ pymeshlab"
-if "$PYTHON" -c "import pymeshlab" 2>/dev/null; then
-    ver=$("$PYTHON" -c "import pymeshlab; print(pymeshlab.__version__)" 2>/dev/null || echo "unknown")
-    ok "pymeshlab $ver already installed"
-else
-    warn "pymeshlab not found — installing..."
-    "$PYTHON" -m pip install pymeshlab && ok "pymeshlab installed" || {
-        fail "pymeshlab install failed — it is REQUIRED (it is the decimator)"
-        exit 1
-    }
-fi
+require_package pymeshlab pymeshlab "import pymeshlab" "pymeshlab.__version__" \
+    "it is the decimator"
 
 # ── pymeshfix ─────────────────────────────────────────────────────────────────
 echo "→ pymeshfix"
-if "$PYTHON" -c "import pymeshfix" 2>/dev/null; then
-    ok "pymeshfix already installed"
-else
-    warn "pymeshfix not found — installing..."
-    "$PYTHON" -m pip install pymeshfix && ok "pymeshfix installed" || {
-        fail "pymeshfix install failed — it is REQUIRED (hole filling has no fallback)"
-        exit 1
-    }
-fi
+require_package pymeshfix pymeshfix "import pymeshfix" "" "hole filling has no fallback"
 
 # ── libigl ────────────────────────────────────────────────────────────────────
 # Default part reconstruction (libs/winding.py): exact distance (AABB), fast
 # winding number, marching cubes, patch orientation.
+# The check names the symbols used, so an old libigl without them fails too.
 echo "→ libigl (reconstruction)"
-if "$PYTHON" -c "import igl; igl.FastWindingNumberBVH; igl.marching_cubes; igl.AABB" 2>/dev/null; then
-    ok "libigl already installed"
-else
-    warn "libigl not found — installing..."
-    "$PYTHON" -m pip install libigl || {
-        fail "libigl install failed — it is REQUIRED for default repair"
-        exit 1
-    }
-    "$PYTHON" -c "import igl; igl.FastWindingNumberBVH; igl.marching_cubes; igl.AABB" 2>/dev/null || {
-        fail "libigl import failed — it is REQUIRED for default repair"
-        exit 1
-    }
-    ok "libigl installed"
-fi
+require_package libigl libigl \
+    "import igl; igl.FastWindingNumberBVH; igl.marching_cubes; igl.AABB" "" \
+    "default repair"
 
 # ── CGAL Alpha Wrapping (optional) ────────────────────────────────────────────
 # Alpha-wrap is no longer the default reconstruction (libs/winding.py replaced
@@ -107,16 +110,8 @@ fi
 # can be asked on every file. A pure-numpy replacement was tried and was SLOWER on
 # real geometry -- see D20 in ../stl-batch-fix.old/archive/docs-before-compact-2026-09-19/refactor/splitting-and-repair/d20.md before attempting one.
 echo "→ scipy"
-if "$PYTHON" -c "import scipy" 2>/dev/null; then
-    ver=$("$PYTHON" -c "import scipy; print(scipy.__version__)" 2>/dev/null || echo "unknown")
-    ok "scipy $ver already installed"
-else
-    warn "scipy not found — installing..."
-    "$PYTHON" -m pip install scipy && ok "scipy installed" || {
-        fail "scipy install failed — it is REQUIRED (shell detection has no fallback)"
-        exit 1
-    }
-fi
+require_package scipy scipy "import scipy" "scipy.__version__" \
+    "shell detection has no fallback"
 
 # ── manifold3d (optional) ─────────────────────────────────────────────────────
 # Only `support_3mf.py --layout grid` uses it (union of the support grid); the
@@ -133,14 +128,23 @@ else
     fi
 fi
 
+# ── matplotlib (optional) ─────────────────────────────────────────────────────
+# Only `check_3mf.py --png` uses it (underside maps); it checks it at start.
+echo "→ matplotlib (check_3mf.py --png, optional)"
+if "$PYTHON" -c "import matplotlib" 2>/dev/null; then
+    ok "matplotlib already installed"
+else
+    warn "matplotlib not found — installing (optional)..."
+    if "$PYTHON" -m pip install matplotlib && "$PYTHON" -c "import matplotlib" 2>/dev/null; then
+        ok "matplotlib installed"
+    else
+        warn "matplotlib not available — only check_3mf.py --png is affected"
+    fi
+fi
+
 # ── numpy (required by pymeshfix) ─────────────────────────────────────────────
 echo "→ numpy"
-if "$PYTHON" -c "import numpy" 2>/dev/null; then
-    ok "numpy already installed"
-else
-    warn "numpy not found — installing..."
-    "$PYTHON" -m pip install numpy && ok "numpy installed" || fail "numpy install failed"
-fi
+require_package numpy numpy "import numpy" "" "every mesh step uses it"
 
 echo
 echo "=== Done. First run: cp batch_repair.example.toml batch_repair.toml, edit it,"

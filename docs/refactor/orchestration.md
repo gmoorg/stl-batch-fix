@@ -324,7 +324,9 @@ Findings:
 - Startup checks every library once (`libs.dependencies.check_all`, from
   `_check_environment`): NumPy, SciPy, libigl, PyMeshLab and PyMeshFix
   required (Blender is retired since 2026-10-06, see modules.md), CGAL
-  optional, and required for a `--alpha` run (`also_required`). Every run
+  optional, and required for a `--alpha` run (`also_required`); manifold3d
+  and Matplotlib optional (only `support_3mf.py` grid/keel and
+  `check_3mf.py --png` need them, and each checks its own at start). Every run
   probes CGAL here (a default run reports it as optional, as before);
   only a `--alpha` run loads `libs.alphawrap`. One line each: `[debug]` when
   available or an optional one is missing, `[error]` when a required one is,

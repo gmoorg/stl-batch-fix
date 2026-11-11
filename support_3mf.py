@@ -60,8 +60,9 @@ import numpy as np
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 from libs import bambu3mf, basecheck, dependencies, ribsupport  # noqa: E402
-from libs.printsettings import (instance_problems, object_number,  # noqa: E402
-                                resolve_settings, settings_uncertainty, thresholds_for)
+from libs.printsettings import (add_settings_arguments, instance_problems,  # noqa: E402
+                                object_number, resolve_settings, settings_uncertainty,
+                                thresholds_for)
 
 EXIT_WRITTEN, EXIT_ERROR, EXIT_PARTIAL, EXIT_NOTHING = 0, 2, 3, 4
 PART_NAME = 'generated support ribs'
@@ -109,11 +110,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                              f'mm (default {RIBS_MAX_HEIGHT}); grid and keel (required): '
                              'highest underside supported, mm')
     parser.add_argument('--cell', type=float, help='analysis resolution, mm (default 0.05)')
-    group = parser.add_argument_group('settings (default: read from the 3MF)')
-    group.add_argument('--first-layer', type=float, help='initial layer height, mm')
-    group.add_argument('--layer-height', type=float, help='layer height, mm')
-    group.add_argument('--support-gap', type=float, help='support top Z distance, mm')
-    group.add_argument('--support-angle', type=float, help='support threshold angle, degrees')
+    add_settings_arguments(parser)
     return parser.parse_args(argv)
 
 
@@ -131,8 +128,19 @@ def _check_layout_args(args) -> None:
             raise ValueError(f'--layout {args.layout} needs --max-height: the highest underside '
                              'to support')
         args.gap = GRID_GAP if args.gap is None else args.gap
-    if not (args.max_height > 0):
-        raise ValueError(f'max-height must be positive, got {args.max_height}')
+    _require_positive_finite('max-height', args.max_height)
+
+
+def _is_positive_finite(value: float) -> bool:
+    """True for a real, finite, positive number. `value > 0` alone accepts
+    infinity, which is no physical dimension: `--max-height inf` would
+    remove the support-height cutoff (REVIEW.md #2, 2026-11-11)."""
+    return math.isfinite(value) and value > 0
+
+
+def _require_positive_finite(name: str, value: float) -> None:
+    if not _is_positive_finite(value):
+        raise ValueError(f'{name} must be a positive finite number, got {value}')
 
 
 def _width(project, args) -> float:
@@ -142,13 +150,18 @@ def _width(project, args) -> float:
 
 
 def _line_width(project) -> float:
-    """The project's printed line width (outer wall, else default), else 0.42."""
+    """The project's printed line width (outer wall, else default), else 0.42.
+
+    A value that is not a positive finite number is skipped like an
+    unreadable one, so a broken project falls through to the next key and
+    then to 0.42 instead of making infinitely wide walls or feet.
+    """
     for key in ('outer_wall_line_width', 'line_width'):
         try:
             value = float(project.settings[key])
         except (KeyError, ValueError):
             continue
-        if value > 0:
+        if _is_positive_finite(value):
             return value
     return 0.42
 
@@ -172,6 +185,61 @@ def _variable_layers(path: str) -> list[str]:
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
     return [name for name in VARIABLE_LAYER_MEMBERS if name in names]
+
+
+@dataclasses.dataclass(frozen=True)
+class _RibLayout:
+    """`--layout ribs`: walls from the plate up into the unsupportable band."""
+    settings: ribsupport.RibSettings
+
+    @property
+    def min_area(self) -> float:
+        return self.settings.min_area
+
+
+@dataclasses.dataclass(frozen=True)
+class _GridLayout:
+    """`--layout grid` or `keel`, both built by libs/gridsupport. `foot` is
+    the keel feet's width; the grid has a base sheet instead and no feet.
+    `gridsupport` is the module, imported only once manifold3d is checked."""
+    name: str
+    settings: object
+    foot: float | None
+    gridsupport: object
+
+    @property
+    def min_area(self) -> float:
+        return self.settings.min_area
+
+
+@dataclasses.dataclass(frozen=True)
+class _InstanceOutcome:
+    """What one instance contributed: `skipped` counts toward the partial
+    exit status; `addition` is the part to write; `before` is the ribs
+    layout's pre-rib (areas, thresholds) for the post-write diagnostic."""
+    skipped: bool = False
+    addition: bambu3mf.Addition | None = None
+    before: tuple | None = None
+
+
+def _resolve_layout(project, args, gridsupport) -> _RibLayout | _GridLayout:
+    """The layout's settings, built once for the whole project. The only
+    constructor of either layout, so a keel always has its feet and a grid
+    never does. Raises ValueError for settings that cannot be built."""
+    if args.layout == 'ribs':
+        return _RibLayout(ribsupport.RibSettings(pitch=args.pitch, width=_width(project, args),
+                                                 overlap=args.overlap))
+    width = _width(project, args)
+    if args.layout == 'keel' and args.width is None:
+        width += KEEL_WIDTH_MARGIN
+    settings = gridsupport.GridSettings(pitch=args.pitch, width=width, gap=args.gap)
+    foot = None
+    if args.layout == 'keel':
+        foot = FOOT_LINES * _line_width(project)
+        if settings.width > foot:
+            raise ValueError(f'--width {settings.width:g} is wider than the keel feet '
+                             f'({FOOT_LINES} line widths = {foot:g} mm)')
+    return _GridLayout(args.layout, settings, foot, gridsupport)
 
 
 def main(argv=None, out=sys.stdout) -> int:
@@ -202,20 +270,7 @@ def main(argv=None, out=sys.stdout) -> int:
         print('error: not a Bambu Studio project', file=sys.stderr)
         return EXIT_ERROR
     try:
-        if args.layout == 'ribs':
-            rib_settings = ribsupport.RibSettings(pitch=args.pitch, width=_width(project, args),
-                                                  overlap=args.overlap)
-            min_area = rib_settings.min_area
-        else:
-            width = _width(project, args)
-            if args.layout == 'keel' and args.width is None:
-                width += KEEL_WIDTH_MARGIN
-            grid_settings = gridsupport.GridSettings(pitch=args.pitch, width=width, gap=args.gap)
-            min_area = grid_settings.min_area
-            foot = FOOT_LINES * _line_width(project)
-            if args.layout == 'keel' and grid_settings.width > foot:
-                raise ValueError(f'--width {grid_settings.width:g} is wider than the keel feet '
-                                 f'({FOOT_LINES} line widths = {foot:g} mm)')
+        layout = _resolve_layout(project, args, gridsupport)
     except ValueError as error:
         print(f'error: {error}', file=sys.stderr)
         return EXIT_ERROR
@@ -236,76 +291,17 @@ def main(argv=None, out=sys.stdout) -> int:
             settings, _ = resolve_settings(project, instance, args)
             thresholds = thresholds_for(settings, args,
                                         foot_height=max(args.max_height, 3.0),
-                                        min_region_area=min_area)
+                                        min_region_area=layout.min_area)
         except ValueError as error:
             print(f'error: {error}', file=sys.stderr)
             return EXIT_ERROR
-        reasons = (instance_problems(instance)
-                   + settings_uncertainty(project, instance, settings))
-        if counts[instance.object_id] > 1:
-            reasons.append(f'object has {counts[instance.object_id]} instances; one added part '
-                           'cannot fit them all')
-        if args.layout in GRID_LAYOUTS:
-            reasons += _grid_reasons(project, instance, variable)
-        parts = [(p.vertices, p.faces) for p in instance.normal_parts]
-        result = None
-        if not reasons:
-            result = basecheck.check(parts, thresholds, keep_grid=True)
-            reasons += list(result.incomplete)
-        if reasons:
-            skipped += 1
-            print(f'  [SKIPPED] {label}: ' + '; '.join(reasons), file=out)
-            continue
-        grid = result.grid
-
-        if args.layout in GRID_LAYOUTS:
-            candidates = None if grid is None else grid.overhang & (grid.height < args.max_height)
-            if candidates is None or not candidates.any():
-                print(f'  [NOT NEEDED] {label}', file=out)
-                continue
-            xy = object_number(project, instance, XY_DISTANCE_KEY, XY_DISTANCE_DEFAULT)
-            own = dataclasses.replace(
-                grid_settings, xy_distance=xy.value,
-                base_height=settings['first_layer'].value + settings['layer_height'].value,
-                min_wall=settings['layer_height'].value)
-            tris = np.concatenate([v[f] for v, f in parts])
-            try:
-                if args.layout == 'keel':
-                    support = gridsupport.build_keel(tris, candidates, grid.height, grid.x0,
-                                                     grid.y0, grid.cell, args.max_height, own,
-                                                     foot)
-                else:
-                    support = gridsupport.build(tris, candidates, grid.x0, grid.y0, grid.cell,
-                                                args.max_height, own)
-            except gridsupport.GridError as error:
-                skipped += 1
-                print(f'  [SKIPPED] {label}: {error}', file=out)
-                continue
-            name = KEEL_PART_NAME if args.layout == 'keel' else GRID_PART_NAME
-            additions.append(bambu3mf.Addition(instance, name, support.vertices, support.faces))
-            if args.layout == 'keel':
-                _report_keel(label, support, own, xy, result, out)
-            else:
-                _report_grid(label, support, own, xy, result, out)
-            continue
-
-        mask = None
-        if grid is not None:
-            mask = grid.flagged.copy()
-            if not settings['supports_enabled'].value:
-                mask |= grid.overhang & (grid.height < args.max_height)
-        if mask is None or not mask.any():
-            print(f'  [NOT NEEDED] {label}', file=out)
-            continue
-        ribs = ribsupport.ribs(grid.height, mask, grid.x0, grid.y0, grid.cell, rib_settings)
-        if ribs.empty:
-            print(f'  [NOT NEEDED] {label}: flagged areas too small or too stepped for ribs',
-                  file=out)
-            continue
-        additions.append(bambu3mf.Addition(instance, PART_NAME, ribs.vertices, ribs.faces))
-        before[instance.object_id] = (_areas(result), thresholds)
-        print(f'  [RIBS] {label}: {ribs.walls} wall(s) in {ribs.regions} region(s), '
-              f'{rib_settings.width:g} mm thick, {rib_settings.pitch:g} mm apart', file=out)
+        outcome = _plan_instance(project, instance, label, settings, thresholds, args, layout,
+                                 counts[instance.object_id], variable, out)
+        skipped += outcome.skipped
+        if outcome.addition is not None:
+            additions.append(outcome.addition)
+        if outcome.before is not None:
+            before[instance.object_id] = outcome.before
 
     if not additions:
         print('\nNo file written: ' + ('every candidate was skipped.' if skipped
@@ -324,28 +320,134 @@ def main(argv=None, out=sys.stdout) -> int:
               'survive; that the keels sit under the lowest lines of the undersides; and that '
               'the layer view shows a gap between wall tops and the model.  Supports you paint '
               'can reach the plate between the walls.  Then test removal.', file=out)
-        return EXIT_PARTIAL if skipped else EXIT_WRITTEN
-    if args.layout == 'grid':
+    elif args.layout == 'grid':
         print('Check in Bambu Studio before printing: slice and confirm in the preview that the '
               'grid walls print as single lines and the base and joining strips survive; that '
               'Bambu adds no supports under or through the grid; and that the layer view shows '
               'a gap between wall tops and the model.  Then test removal.', file=out)
-        return EXIT_PARTIAL if skipped else EXIT_WRITTEN
-
-    # Diagnostic only: the ribs now count as plate contact in this analysis,
-    # which does not show that the overhang between them prints well.
-    written = bambu3mf.read(output)
-    for instance in written.instances:
-        if instance.object_id not in before:
-            continue
-        (contact, gap), thresholds = before[instance.object_id]
-        after = basecheck.check([(p.vertices, p.faces) for p in instance.normal_parts], thresholds)
-        new_contact, new_gap = _areas(after)
-        print(f'  {instance.name}: plate contact {contact:.1f} -> {new_contact:.1f} mm², '
-              f'too low for support {gap:.1f} -> {new_gap:.1f} mm²', file=out)
-    print('Check before printing: open it in Bambu Studio, confirm the ribs show in the sliced '
-          'preview, and test how they break off.', file=out)
+    else:
+        _report_written_ribs(output, before, out)
+        print('Check before printing: open it in Bambu Studio, confirm the ribs show in the '
+              'sliced preview, and test how they break off.', file=out)
     return EXIT_PARTIAL if skipped else EXIT_WRITTEN
+
+
+def _plan_instance(project, instance, label, settings, thresholds, args, layout, count,
+                   variable, out) -> _InstanceOutcome:
+    """Decide and build one printable instance's support, printing its line.
+
+    An instance whose analysis cannot be trusted, or whose analysis itself
+    fails with an expected error (ValueError, or MemoryError on a huge map),
+    is SKIPPED with the reason, as check_3mf.py reports it incomplete
+    (REVIEW.md #1): a traceback would lose every other instance's result.
+    """
+    reasons = (instance_problems(instance)
+               + settings_uncertainty(project, instance, settings))
+    if count > 1:
+        reasons.append(f'object has {count} instances; one added part cannot fit them all')
+    if isinstance(layout, _GridLayout):
+        reasons += _grid_reasons(project, instance, variable)
+    parts = [(p.vertices, p.faces) for p in instance.normal_parts]
+    result = None
+    if not reasons:
+        try:
+            result = basecheck.check(parts, thresholds, keep_grid=True)
+        except (ValueError, MemoryError) as error:
+            reasons.append(f'analysis failed: {error}')
+        else:
+            reasons += list(result.incomplete)
+    if reasons:
+        print(f'  [SKIPPED] {label}: ' + '; '.join(reasons), file=out)
+        return _InstanceOutcome(skipped=True)
+    if isinstance(layout, _GridLayout):
+        return _plan_grid(project, instance, label, settings, parts, result, args, layout, out)
+    return _plan_ribs(instance, label, settings, thresholds, result, args, layout, out)
+
+
+def _plan_grid(project, instance, label, settings, parts, result, args, layout,
+               out) -> _InstanceOutcome:
+    grid = result.grid
+    candidates = None if grid is None else grid.overhang & (grid.height < args.max_height)
+    if candidates is None or not candidates.any():
+        print(f'  [NOT NEEDED] {label}', file=out)
+        return _InstanceOutcome()
+    xy = object_number(project, instance, XY_DISTANCE_KEY, XY_DISTANCE_DEFAULT)
+    own = dataclasses.replace(
+        layout.settings, xy_distance=xy.value,
+        base_height=settings['first_layer'].value + settings['layer_height'].value,
+        min_wall=settings['layer_height'].value)
+    tris = np.concatenate([v[f] for v, f in parts])
+    gridsupport = layout.gridsupport
+    try:
+        if layout.name == 'keel':
+            support = gridsupport.build_keel(tris, candidates, grid.height, grid.x0, grid.y0,
+                                             grid.cell, args.max_height, own, layout.foot)
+        else:
+            support = gridsupport.build(tris, candidates, grid.x0, grid.y0, grid.cell,
+                                        args.max_height, own)
+    except gridsupport.GridError as error:
+        print(f'  [SKIPPED] {label}: {error}', file=out)
+        return _InstanceOutcome(skipped=True)
+    name = KEEL_PART_NAME if layout.name == 'keel' else GRID_PART_NAME
+    if layout.name == 'keel':
+        _report_keel(label, support, own, xy, result, out)
+    else:
+        _report_grid(label, support, own, xy, result, out)
+    return _InstanceOutcome(addition=bambu3mf.Addition(instance, name, support.vertices,
+                                                       support.faces))
+
+
+def _plan_ribs(instance, label, settings, thresholds, result, args, layout,
+               out) -> _InstanceOutcome:
+    grid = result.grid
+    mask = None
+    if grid is not None:
+        mask = grid.flagged.copy()
+        if not settings['supports_enabled'].value:
+            mask |= grid.overhang & (grid.height < args.max_height)
+    if mask is None or not mask.any():
+        print(f'  [NOT NEEDED] {label}', file=out)
+        return _InstanceOutcome()
+    ribs = ribsupport.ribs(grid.height, mask, grid.x0, grid.y0, grid.cell, layout.settings)
+    if ribs.empty:
+        print(f'  [NOT NEEDED] {label}: flagged areas too small or too stepped for ribs',
+              file=out)
+        return _InstanceOutcome()
+    print(f'  [RIBS] {label}: {ribs.walls} wall(s) in {ribs.regions} region(s), '
+          f'{layout.settings.width:g} mm thick, {layout.settings.pitch:g} mm apart', file=out)
+    return _InstanceOutcome(addition=bambu3mf.Addition(instance, PART_NAME, ribs.vertices,
+                                                       ribs.faces),
+                            before=(_areas(result), thresholds))
+
+
+def _report_written_ribs(output, before, out) -> None:
+    """Diagnostic only: re-analyse the written file with the ribs in place.
+
+    The ribs now count as plate contact in this analysis, which does not
+    show that the overhang between them prints well. The file is already
+    written when this runs, so an expected failure here (unreadable output,
+    analysis error, memory) is reported with the output's path and does not
+    change the exit status (REVIEW.md #1).
+    """
+    try:
+        written = bambu3mf.read(output)
+        lines = []
+        for instance in written.instances:
+            if instance.object_id not in before:
+                continue
+            (contact, gap), thresholds = before[instance.object_id]
+            after = basecheck.check([(p.vertices, p.faces) for p in instance.normal_parts],
+                                    thresholds)
+            new_contact, new_gap = _areas(after)
+            lines.append(f'  {instance.name}: plate contact {contact:.1f} -> '
+                         f'{new_contact:.1f} mm², too low for support {gap:.1f} -> '
+                         f'{new_gap:.1f} mm²')
+    except (bambu3mf.ReadError, OSError, ValueError, MemoryError) as error:
+        print(f'  diagnostic not available ({type(error).__name__}: {error}); {output} was '
+              'written', file=out)
+        return
+    for line in lines:
+        print(line, file=out)
 
 
 def _grid_reasons(project, instance, variable) -> list[str]:

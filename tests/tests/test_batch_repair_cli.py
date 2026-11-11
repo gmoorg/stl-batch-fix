@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from libs import converter, textmesh
+from libs import converter, perfile, textmesh
 import batch_repair
 import batch_repair_child
 from libs.runconfig import RunConfig
@@ -552,20 +552,20 @@ class TestReconstructBudgetPlumbing(unittest.TestCase):
         def fake(key):
             def record(*args, **kwargs):
                 seen[key] = kwargs['reconstruct_ceiling_bytes']
-                return batch_repair.ChildResult(path='a.stl', category='intake_failure',
+                return perfile.ChildResult(path='a.stl', category='intake_failure',
                                                 indicator=None, stage='intake', reason='x',
                                                 written_path=None)
             return record
 
         common = ['--one-file', 'a.stl', '--destination', 'b.stl', '--max-faces', '0',
                   '--result-file', str(self.root / 'r.json')]
-        with mock.patch.object(batch_repair, '_prepare_one_file', fake('prepare')), \
-             mock.patch.object(batch_repair, '_process_one_file', fake('repair')):
+        with mock.patch.object(perfile, 'prepare_one_file', fake('prepare')), \
+             mock.patch.object(perfile, 'process_one_file', fake('repair')):
             batch_repair_child.main(common + ['--reconstruct-ceiling-bytes', '9000',
                                               '--mode', 'prepare', '--cache-path', 'c.ply'])
             batch_repair_child.main(common + ['--reconstruct-ceiling-bytes', '9000'])
         self.assertEqual(seen, {'prepare': 9000, 'repair': 9000})
-        with mock.patch.object(batch_repair, '_process_one_file', fake('default')):
+        with mock.patch.object(perfile, 'process_one_file', fake('default')):
             batch_repair_child.main(common)
         self.assertIsNone(seen['default'])
 
@@ -611,21 +611,21 @@ class TestReconstructBudgetPlumbing(unittest.TestCase):
 
         def fake_prepare(*args, **kwargs):
             seen['prepare'] = kwargs['reconstruction']
-            return batch_repair.ChildResult(path='a.stl', category='intake_failure',
+            return perfile.ChildResult(path='a.stl', category='intake_failure',
                                             indicator=None, stage='intake', reason='x',
                                             written_path=None)
 
         def fake_process(*args, **kwargs):
             seen['repair'] = kwargs['reconstruction']
-            return batch_repair.ChildResult(path='a.stl', category='intake_failure',
+            return perfile.ChildResult(path='a.stl', category='intake_failure',
                                             indicator=None, stage='intake', reason='x',
                                             written_path=None)
 
         common = ['--one-file', 'a.stl', '--destination', 'b.stl', '--max-faces', '0',
                   '--result-file', str(self.root / 'r.json'),
                   '--reconstruction', 'alpha-wrap']
-        with mock.patch.object(batch_repair, '_prepare_one_file', fake_prepare), \
-             mock.patch.object(batch_repair, '_process_one_file', fake_process):
+        with mock.patch.object(perfile, 'prepare_one_file', fake_prepare), \
+             mock.patch.object(perfile, 'process_one_file', fake_process):
             batch_repair_child.main(common + ['--mode', 'prepare', '--cache-path', 'c.ply'])
             batch_repair_child.main(common)
         self.assertEqual(seen, {'prepare': 'alpha-wrap', 'repair': 'alpha-wrap'})
@@ -690,7 +690,7 @@ class TestReconstructBudgetPlumbing(unittest.TestCase):
 
 
 class TestMinShellFacesPlumbing(unittest.TestCase):
-    """`min_shell_faces` -> child argv -> child parse -> `_process_one_file`
+    """`min_shell_faces` -> child argv -> child parse -> `perfile.process_one_file`
     -> `processor.process`. What the floor does to a mesh is tested in
     test_processor.TestShellFloor."""
 
@@ -894,11 +894,12 @@ class TestModelLog(unittest.TestCase):
         script.write_text(
             'import os, sys\n'
             f'sys.path.insert(0, {str(Path(batch_repair_child.__file__).resolve().parent)!r})\n'
-            'import batch_repair_child, batch_repair\n'
+            'import batch_repair_child\n'
+            'from libs import perfile\n'
             'def die(*a, **k):\n'
             '    os.write(2, b"about to crash\\n")\n'
             '    os.abort()\n'
-            'batch_repair._process_one_file = die\n'
+            'perfile.process_one_file = die\n'
             'batch_repair_child.main(sys.argv[1:])\n')
         mesh = self.mesh()
         with open(log, 'ab') as handle:

@@ -5,11 +5,12 @@ import io
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
 import support_3mf
-from libs import bambu3mf
+from libs import basecheck, bambu3mf
 from tests.tests.print_fixtures import slab, translate, write_3mf
 
 SETTINGS = {'initial_layer_print_height': '0.2', 'layer_height': '0.2',
@@ -167,6 +168,79 @@ class Cli(unittest.TestCase):
                 self.assertEqual(code, support_3mf.EXIT_ERROR)
                 self.assertFalse(os.path.exists(self.out))
 
+
+    def test_non_finite_max_height_is_an_error(self):
+        # `--max-height=-inf`: argparse would read a bare `-inf` as an option.
+        for value in ('nan', 'inf', '-inf', '0'):
+            with self.subTest(value=value):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code, _ = self.run_cli({'2': dict(parts=[dict(id='1', mesh=SHALLOW)])},
+                                           f'--max-height={value}')
+                self.assertEqual(code, support_3mf.EXIT_ERROR)
+                self.assertIn('positive finite', err.getvalue())
+                self.assertFalse(os.path.exists(self.out))
+        code, text = self.run_cli({'2': dict(parts=[dict(id='1', mesh=SHALLOW)])},
+                                  '--max-height', '2.5')
+        self.assertEqual(code, support_3mf.EXIT_WRITTEN, text)
+
+    def test_non_finite_project_line_width_falls_back(self):
+        objects = {'2': dict(parts=[dict(id='1', mesh=SHALLOW)])}
+        for widths, expected in ((dict(outer_wall_line_width='inf', line_width='0.4'), '0.4'),
+                                 (dict(outer_wall_line_width='nan', line_width='inf'), '0.42')):
+            with self.subTest(widths=widths):
+                if os.path.exists(self.out):
+                    os.remove(self.out)
+                code, text = self.run_cli(objects, settings=dict(SETTINGS, **widths))
+                self.assertEqual(code, support_3mf.EXIT_WRITTEN, text)
+                self.assertIn(f'{expected} mm thick', text)
+
+    def test_failed_analysis_skips_the_instance(self):
+        # Fault injection only: a real MemoryError needs a model too big to test.
+        with mock.patch.object(support_3mf.basecheck, 'check',
+                               side_effect=MemoryError('probe')):
+            code, text = self.run_cli({'2': dict(parts=[dict(id='1', mesh=SHALLOW)])})
+        self.assertEqual(code, support_3mf.EXIT_PARTIAL, text)
+        self.assertIn('[SKIPPED]', text)
+        self.assertIn('analysis failed: probe', text)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_failed_diagnostic_still_reports_the_written_file(self):
+        # Fault injection: the post-write diagnostic's reread of the output,
+        # or its second analysis, fails after the file is written.
+        real_read, real_check = bambu3mf.read, basecheck.check
+
+        def read_fails_on_output(path, *args, **kwargs):
+            if os.path.abspath(path) == os.path.abspath(self.out):
+                raise bambu3mf.ReadError('probe')
+            return real_read(path, *args, **kwargs)
+
+        calls = []
+
+        def second_check_fails(*args, **kwargs):
+            calls.append(1)
+            if len(calls) > 1:
+                raise MemoryError('probe')
+            return real_check(*args, **kwargs)
+
+        for label, target, name, fake in (
+                ('reread', support_3mf.bambu3mf, 'read', read_fails_on_output),
+                ('analysis', support_3mf.basecheck, 'check', second_check_fails)):
+            with self.subTest(label):
+                if os.path.exists(self.out):
+                    os.remove(self.out)
+                with mock.patch.object(target, name, fake):
+                    code, text = self.run_cli({'2': dict(parts=[dict(id='1', mesh=SHALLOW)])})
+                self.assertEqual(code, support_3mf.EXIT_WRITTEN, text)
+                self.assertTrue(os.path.exists(self.out))
+                self.assertIn('diagnostic not available', text)
+                self.assertIn(f'{self.out} was written', text)
+
+    def test_settings_overrides_are_accepted(self):
+        args = support_3mf.parse_args(['m.3mf', '--first-layer', '0.3', '--layer-height', '0.1',
+                                       '--support-gap', '0.15', '--support-angle', '45'])
+        self.assertEqual((args.first_layer, args.layer_height, args.support_gap,
+                          args.support_angle), (0.3, 0.1, 0.15, 45.0))
 
 if __name__ == '__main__':
     unittest.main()

@@ -21,7 +21,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from libs import childresult, mesh_io
+from libs import childresult, mesh_io, perfile
 from libs.indicators import Indicator
 from libs.mesh_io import Kind, Mesh
 from dataclasses import replace
@@ -202,7 +202,7 @@ class TestBasicDispatch(_PoolTestCase):
         self.assertTrue(any('[warning]' in line and 'disk full' in line for line in logged))
 
     def test_failed_marker_write_still_names_the_signal(self):
-        with mock.patch.object(batch_repair.mesh_io, 'staged_write',
+        with mock.patch.object(perfile.mesh_io, 'staged_write',
                                side_effect=OSError('read-only')):
             result = self.run_one('segv_a.stl')
         self.assertEqual(result['category'], 'write_failure')

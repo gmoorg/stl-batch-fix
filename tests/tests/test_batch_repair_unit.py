@@ -1,6 +1,6 @@
 """Fast, in-process unit tests for the --one-file child's own per-file logic.
 
-`_process_one_file` is the exact per-category logic the child runs — testing
+`process_one_file` is the exact per-category logic the child runs — testing
 it directly (mocking `processor.process`/`processor.write` in-process, same
 as the pipeline's other unit tests do) covers every terminal-category branch
 without spawning a real subprocess or running real CGAL/alpha-wrap.
@@ -17,7 +17,7 @@ import numpy as np
 from libs import mesh_io, processor
 from libs.indicators import Indicator
 from libs.mesh_io import Geometry, Kind, Mesh
-from batch_repair import _process_one_file
+from libs.perfile import process_one_file
 
 
 class TestProcessOneFile(unittest.TestCase):
@@ -37,7 +37,7 @@ class TestProcessOneFile(unittest.TestCase):
     def test_invalid_intake_is_intake_failure(self):
         path = self.root / 'bad.stl'
         path.write_bytes(b'\0' * 80 + struct.pack('<I', 4))
-        result = _process_one_file(str(path), str(self.root / 'out.stl'), 0)
+        result = process_one_file(str(path), str(self.root / 'out.stl'), 0)
         self.assertEqual(result.category, 'intake_failure')
         self.assertEqual(result.stage, 'intake')
         self.assertIsNone(result.indicator)
@@ -52,7 +52,7 @@ class TestProcessOneFile(unittest.TestCase):
         path.write_bytes(data)
         with mock.patch.object(processor, 'process', return_value=processor.Outcome(
                 Indicator.FAILED, None, 'source', 'forced')):
-            result = _process_one_file(str(path), str(self.root / 'out.stl'), 0)
+            result = process_one_file(str(path), str(self.root / 'out.stl'), 0)
         self.assertEqual(result.category, 'published', result.reason)
         self.assertIn('load: dropped 1 triangles with NaN/inf coordinates', result.steps)
 
@@ -63,7 +63,7 @@ class TestProcessOneFile(unittest.TestCase):
         for i in range(count):
             struct.pack_into('<f', data, 84 + 50 * i + 12, float('nan'))
         path.write_bytes(data)
-        result = _process_one_file(str(path), str(self.root / 'out.stl'), 0)
+        result = process_one_file(str(path), str(self.root / 'out.stl'), 0)
         self.assertEqual(result.category, 'load_failure')
         self.assertEqual(result.stage, 'load')
         self.assertIn('no finite triangles', result.reason)
@@ -74,7 +74,7 @@ class TestProcessOneFile(unittest.TestCase):
         with mock.patch.object(processor, 'process', return_value=processor.Outcome(
                 Indicator.PROCESS, mesh_io.load(mesh_io.probe(str(path), str(dest))),
                 None, 'clean')):
-            result = _process_one_file(str(path), str(dest), 0)
+            result = process_one_file(str(path), str(dest), 0)
         self.assertEqual(result.category, 'published')
         self.assertEqual(result.indicator, 'PROCESS')
         self.assertTrue(result.clean)
@@ -86,7 +86,7 @@ class TestProcessOneFile(unittest.TestCase):
         dest = self.root / 'out.stl'
         with mock.patch.object(processor, 'process', return_value=processor.Outcome(
                 Indicator.DESTROYED, None, 'source', 'lost geometry')):
-            result = _process_one_file(str(path), str(dest), 0)
+            result = process_one_file(str(path), str(dest), 0)
         self.assertEqual(result.category, 'published')
         self.assertEqual(result.indicator, 'DESTROYED')
         self.assertFalse(result.clean)
@@ -97,7 +97,7 @@ class TestProcessOneFile(unittest.TestCase):
         path = self.fixture()
         dest = self.root / 'out.stl'
         with mock.patch.object(processor, 'process', side_effect=RuntimeError('repair threw')):
-            result = _process_one_file(str(path), str(dest), 0)
+            result = process_one_file(str(path), str(dest), 0)
         self.assertEqual(result.category, 'process_failure')
         self.assertEqual(result.stage, 'process')
         self.assertIn('repair threw', result.reason)
@@ -109,7 +109,7 @@ class TestProcessOneFile(unittest.TestCase):
                 Indicator.PROCESS, mesh_io.load(mesh_io.probe(str(path), str(dest))),
                 None, 'clean')), \
              mock.patch.object(processor, 'write', return_value=None):
-            result = _process_one_file(str(path), str(dest), 0)
+            result = process_one_file(str(path), str(dest), 0)
         self.assertEqual(result.category, 'write_failure')
         self.assertIn('returned None', result.reason)
 
@@ -120,7 +120,7 @@ class TestProcessOneFile(unittest.TestCase):
                 Indicator.PROCESS, mesh_io.load(mesh_io.probe(str(path), str(dest))),
                 None, 'clean')), \
              mock.patch.object(processor, 'write', side_effect=OSError('disk failure')):
-            result = _process_one_file(str(path), str(dest), 0)
+            result = process_one_file(str(path), str(dest), 0)
         self.assertEqual(result.category, 'write_failure')
         self.assertIn('disk failure', result.reason)
 

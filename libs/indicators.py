@@ -49,7 +49,7 @@ _MARKER_SUFFIX: dict[Indicator, str] = {
 }
 
 EXPORT_DIRNAME = 'stl-exported'
-#: The batch prepare pass's decimated copies (`batch_repair.decimated_path`):
+#: The batch prepare pass's decimated copies (`perfile.decimated_path`):
 #: intermediate input, never output, and never itself a source to repair.
 DECIMATED_DIRNAME = 'stl-decimated'
 

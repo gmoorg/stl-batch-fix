@@ -26,7 +26,8 @@ def importable(*modules: str) -> Callable[[], None]:
 #: run uses alpha-wrap only when started with `--alpha`; that run passes
 #: 'CGAL' in `check_all`'s `also_required`. manifold3d is optional for the
 #: batch: only `support_3mf.py --layout grid` uses it, and checks it itself
-#: at start (`check_one`).
+#: at start (`check_one`). Matplotlib is optional too: only
+#: `check_3mf.py --png` uses it, and checks it the same way.
 LIBRARIES: tuple[tuple[str, bool, Callable[[], None]], ...] = (
     ('NumPy', True, importable('numpy')),
     ('SciPy', True, importable('scipy')),
@@ -36,6 +37,7 @@ LIBRARIES: tuple[tuple[str, bool, Callable[[], None]], ...] = (
     ('CGAL', False, importable('CGAL.CGAL_Alpha_wrap_3', 'CGAL.CGAL_Kernel',
                                'CGAL.CGAL_Polyhedron_3')),
     ('manifold3d', False, importable('manifold3d')),
+    ('Matplotlib', False, importable('matplotlib')),
 )
 
 

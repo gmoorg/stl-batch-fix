@@ -34,10 +34,9 @@ from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
-from libs import childresult, converter, decimator, dependencies, pipeconfig, textmesh, winding  # noqa: E402
-from libs import meshfix, meshlab, mesh_io, modellog, processor, publication, runconfig, runstate, steplog  # noqa: E402
-from libs import indicators, jobmemory, repairer, splitter                # noqa: E402
-from libs.childresult import ChildResult                                  # noqa: E402
+from libs import childresult, converter, dependencies, pipeconfig, textmesh, winding  # noqa: E402
+from libs import meshfix, meshlab, mesh_io, modellog, publication, runconfig, runstate, steplog  # noqa: E402
+from libs import indicators, jobmemory, perfile, repairer, splitter       # noqa: E402
 from libs.indicators import Indicator                                     # noqa: E402
 from libs.mesh_io import Mesh                                             # noqa: E402
 from libs.pool import Pool                                                # noqa: E402
@@ -258,261 +257,6 @@ def _log_line(message: str) -> None:
     """
     stamp = datetime.datetime.now().strftime('%H:%M:%S')
     print(f'{stamp} {message}', file=sys.stderr, flush=True)
-
-
-# ============================================================================
-# Per-file body, run inside batch_repair_child.py
-# ============================================================================
-
-def _process_one_file(source_path: str, destination: str, max_faces: int,
-                       step_logger: steplog.StepLogger = steplog.null_logger,
-                       *,
-                       skip_clean: bool = False,
-                       reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
-                       reconstruct_ceiling_bytes: int | None = None,
-                       min_shell_faces: int = splitter.MIN_SHELL_FACES,
-                       load_path: str | None = None,
-                       reconstruction: str = repairer.RECONSTRUCTIONS[0]
-                       ) -> ChildResult:
-    """The exact per-file body the old serial loop ran, now for one file only.
-
-    `load_path` is the mesh to repair when it is not `source_path` itself:
-    the repair pass loads what the prepare pass saved. Markers still copy
-    `source_path`, the job's own source.
-
-    `skip_clean` comes from the opt-in `--skip-clean` flag; see
-    `repairer.repair`.
-    """
-    stage = 'intake'
-    category = 'intake_failure'
-    reason = 'invalid intake mesh'
-    indicator = None
-    written_path = None
-    steps: tuple[str, ...] = ()
-    # Absolute, not basename: `converter._walk`/`os.walk(root)` does not
-    # normalize `root`, and a direct child invocation may pass a relative
-    # path — a basename alone would make two same-named files in different
-    # subfolders indistinguishable in a shared step log.
-    source_name = os.path.abspath(source_path)
-    from_cache = load_path is not None and load_path.lower().endswith('.ply')
-    mesh = mesh_io.probe(source_path if from_cache else (load_path or source_path),
-                         destination)
-    if not mesh.is_valid:
-        reason = mesh.problem or reason
-    else:
-        try:
-            stage = 'load'
-            category = 'load_failure'
-            if from_cache:
-                # The prepare pass's PLY cache, attached to the source's own
-                # identity (path, kind); markers still copy the source. A
-                # malformed cache raises ValueError: a load_failure below.
-                loaded = mesh_io.read_ply(load_path, mesh)
-            else:
-                loaded = mesh_io.load(mesh)
-                # A job with a prepare handoff (`load_path` set) had its note
-                # from the prepare pass, which loaded this same STL; a direct
-                # repair of an STL reports its own.
-                if loaded.is_valid and load_path is None:
-                    steps = tuple(_dropped_note(loaded))
-            reason = loaded.problem or 'invalid loaded mesh'
-            if loaded.is_valid:
-                stage = 'process'
-                category = 'process_failure'
-                outcome = processor.process(loaded, max_faces,
-                                           step_logger=step_logger, source_name=source_name,
-                                           skip_clean=skip_clean,
-                                           reconstruct_budget_bytes=reconstruct_budget_bytes,
-                                           reconstruct_ceiling_bytes=reconstruct_ceiling_bytes,
-                                           min_shell_faces=min_shell_faces,
-                                           reconstruction=reconstruction)
-                if outcome.repair is not None:
-                    steps += tuple(f'{s.step.name}: {s.detail}' for s in outcome.repair.steps)
-                stage = 'write'
-                category = 'write_failure'
-                path = processor.write(outcome, source_path, destination)
-                if path is None:
-                    reason = ('processor.write returned None: no publication '
-                              f'for {outcome.indicator.name}')
-                else:
-                    category = 'published'
-                    indicator = outcome.indicator.name
-                    written_path = path
-                    stage = 'process'
-                    reason = outcome.reason
-        except Exception as exc:                      # noqa: BLE001 — reported, not raised
-            reason = f'{type(exc).__name__}: {exc}'
-    return ChildResult(path=source_path, category=category, indicator=indicator,
-                       stage=stage, reason=reason, written_path=written_path, steps=steps)
-
-
-#: The input tree's old cache folder (decimated STL, before 2026-10-05). No
-#: longer read or written; the converter still skips it, so leftovers there
-#: are never taken for input.
-DECIMATED_DIRNAME = indicators.DECIMATED_DIRNAME
-
-
-def decimated_root(input_root: str) -> str:
-    """The cache folder for decimated sources: a sibling of the input folder,
-    `<input>.decimated` (owner, 2026-10-05), so the cache is never inside the
-    tree the batch scans."""
-    return str(Path(input_root).resolve()) + '.decimated'
-
-
-def decimated_path(input_root: str, source: str, max_faces: int) -> str:
-    """Where the prepare pass keeps the decimated mesh of job `source`: a PLY
-    written by `mesh_io.write_ply`, so the decimator's vertex table is handed
-    to the repair pass as is, never re-welded from STL triangles, and with
-    the decimator's float64 coordinates unrounded.
-
-    Keyed by the job's own source path relative to the input tree — the
-    file the job loads, so a converted model is keyed by its
-    `stl-exported/` copy and never shares a cache with a native STL bound
-    for the same output (`<input>.decimated/stl-exported/a.stl.N.T.ply` vs
-    `<input>.decimated/a.stl.N.T.ply`). A new `max_faces` gets its own file,
-    and so do new decimator settings: `T` is `decimator.settings_tag()`.
-    Sources are assumed unmodified: a changed source or PyMeshLab version is
-    not detected. Caches from before (`<input>/stl-decimated/*.stl`) are not read.
-
-    The one clash left needs a directory named like a cache file
-    (`a.stl.900000.T.ply/`); writing that cache then fails, and the job
-    fails with the reason rather than reading the wrong geometry.
-
-    The relative path is lexical, as in `converter.output_for`: a source
-    that is a symlink keeps its own name in the input tree. Resolving it
-    would key `/in/link.stl -> /outside/m.stl` as `../outside/m.stl` and
-    put the cache beside the target, outside the cache root and its
-    overlap checks (Codex review, 2026-10-05). A source outside the input
-    tree raises ValueError rather than escaping.
-    """
-    rel = os.path.relpath(os.path.abspath(source), os.path.abspath(input_root))
-    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
-        raise ValueError(f'{source} is not inside the input folder {input_root}')
-    return os.path.join(decimated_root(input_root),
-                        f'{rel}.{int(max_faces)}.{decimator.settings_tag()}.ply')
-
-
-def expected_prepared_path(mesh: Mesh, cache_path: str, max_faces: int) -> str:
-    """The mesh the repair pass will load: the cache when the initial
-    decimation has work to do (the decimator's own guard), else the source."""
-    needs = max_faces > 0 and (mesh.triangles or 0) > max_faces
-    return cache_path if needs else mesh.path
-
-
-def _load_cache(cache_path: str, source: Mesh) -> Mesh | None:
-    """A usable cached decimation attached to the probed `source` (path,
-    destination and kind stay the source's), or None to rebuild it."""
-    if not os.path.isfile(cache_path):
-        return None
-    try:
-        loaded = mesh_io.read_ply(cache_path, source)
-    except (OSError, ValueError):                     # rebuild instead
-        return None
-    return loaded if loaded.triangles > 0 else None
-
-
-def _dropped_note(loaded: Mesh) -> list[str]:
-    """A step line naming what `mesh_io.load` dropped, per reason, else
-    nothing. Informational: the scanner finds the holes on its own."""
-    drops = loaded.load_drops
-    if drops is None:
-        return []
-    reasons = [text for n, text in (
-        (drops.nonfinite, f'{drops.nonfinite} triangles with NaN/inf coordinates'),
-        (drops.degenerate, f'{drops.degenerate} triangles with coincident corners')) if n]
-    return [f'load: dropped {", ".join(reasons)}'] if reasons else []
-
-
-def _prepare_one_file(source_path: str, destination: str, max_faces: int,
-                      cache_path: str,
-                      step_logger: steplog.StepLogger = steplog.null_logger,
-                      *,
-                      reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
-                      reconstruct_ceiling_bytes: int | None = None,
-                      min_shell_faces: int = splitter.MIN_SHELL_FACES,
-                      reconstruction: str = repairer.RECONSTRUCTIONS[0]) -> ChildResult:
-    """The prepare pass for one file: initial decimation, cache, estimate.
-
-    Either hands the job to the repair pass (`childresult.PREPARED`, with the
-    mesh to load and its `jobmemory.repair_bytes` estimate) or ends it with
-    an ordinary terminal result: an unreadable file, or UNDECIMATED published
-    exactly as `processor.process` would publish it.
-
-    A source over `max_faces` is loaded with `mesh_io.load` (which drops
-    triangles with NaN/inf coordinates), decimated from arrays and saved as
-    a PLY cache. Our loader, not PyMeshLab's STL reader: that reader holds
-    ~4.5x the mesh's own memory (docs/archive/errors/decimation-memory-path.md). The
-    cache is read back before estimating, through the same path a cache hit
-    takes, so the estimate is computed on exactly the mesh the repair pass
-    will load.
-    """
-    stage, category, reason = 'intake', 'intake_failure', 'invalid intake mesh'
-    source_name = os.path.abspath(source_path)
-    steps: list[str] = []
-
-    def terminal(**fields) -> ChildResult:
-        return ChildResult(path=source_path, mode='prepare', steps=tuple(steps),
-                           **{'category': category, 'indicator': None, 'stage': stage,
-                              'reason': reason, 'written_path': None, **fields})
-
-    probed = mesh_io.probe(source_path, destination)
-    if not probed.is_valid:
-        reason = probed.problem or reason
-        return terminal()
-    try:
-        prepared_path = expected_prepared_path(probed, cache_path, max_faces)
-        mesh = None
-        if prepared_path == cache_path:
-            mesh = _load_cache(cache_path, probed)
-            if mesh is not None:
-                steps.append(f'decimate: cached, {mesh.triangles} faces ({cache_path})')
-                step_logger(source_name, 'info', 'decimate', '-', 0.0,
-                            f'cached, {mesh.triangles} faces out ({cache_path})')
-        if mesh is None:
-            stage, category = 'load', 'load_failure'
-            loaded = mesh_io.load(probed)
-            if not loaded.is_valid:
-                reason = loaded.problem or 'invalid loaded mesh'
-                return terminal()
-            steps.extend(_dropped_note(loaded))
-            if prepared_path == source_path:
-                mesh = loaded
-            else:
-                stage, category = 'process', 'process_failure'
-                failed, decimated = processor.decimate_initial(
-                    loaded, max_faces, step_logger, source_name)
-                del loaded
-                steps.append(f'decimate: {decimated.rung.value}, {decimated.faces_out} faces out')
-                if failed is not None:
-                    stage, category = 'write', 'write_failure'
-                    written = processor.write(failed, source_path, destination)
-                    if written is None:
-                        reason = 'processor.write returned None: no publication for UNDECIMATED'
-                        return terminal()
-                    category, stage, reason = 'published', 'process', failed.reason
-                    return terminal(indicator=failed.indicator.name, written_path=written)
-                stage, category = 'write', 'write_failure'
-                if os.path.isdir(cache_path):
-                    reason = (f'decimated cache {cache_path} is a directory; '
-                              f'rename that directory to repair this file')
-                    return terminal()
-                with mesh_io.staged_write(cache_path) as staged:
-                    mesh_io.write_ply(decimated.mesh, staged)
-                mesh = _load_cache(cache_path, probed)
-                if mesh is None:
-                    reason = f'decimated cache {cache_path} could not be read back'
-                    return terminal()
-        stage, category = 'process', 'process_failure'
-        estimate = jobmemory.repair_bytes(mesh, min_shell_faces, reconstruct_budget_bytes,
-                                          reconstruction, reconstruct_ceiling_bytes)
-    except Exception as exc:                          # noqa: BLE001 — reported, not raised
-        reason = f'{type(exc).__name__}: {exc}'
-        return terminal()
-    return ChildResult(path=source_path, category=childresult.PREPARED, indicator=None,
-                       stage='prepare', mode='prepare', written_path=None,
-                       reason=f'{mesh.triangles} faces, repair estimate {estimate / 1e9:.2f} GB',
-                       steps=tuple(steps), prepared_path=prepared_path,
-                       estimate_bytes=int(estimate))
 
 
 # ============================================================================
@@ -767,7 +511,7 @@ class _Runner:
         self.prepared: dict[str, dict] = {}
 
     def _cache_path(self, mesh: Mesh) -> str:
-        return decimated_path(self.config.input, mesh.path, self.config.max_faces)
+        return perfile.decimated_path(self.config.input, mesh.path, self.config.max_faces)
 
     def _estimate(self, mesh: Mesh) -> int:
         """This pass's reservation for `mesh` (libs/jobmemory.py)."""
@@ -1011,7 +755,7 @@ class _Runner:
             # should act on either way.
             result = childresult.read_and_validate(
                 result_file, mesh.path, mode=mode,
-                expected_prepared=(expected_prepared_path(mesh, cache_path, self.config.max_faces)
+                expected_prepared=(perfile.expected_prepared_path(mesh, cache_path, self.config.max_faces)
                                    if mode == 'prepare' else None))
             if result is not None and result.is_handoff:
                 self.run_state.complete_once(token, self._handoff, {
@@ -1186,15 +930,12 @@ def _run_detailed(config: RunConfig,
         except OSError as exc:
             _log_line(f'[warning] cannot write {config.log_file}: {exc}')
 
-    def collect(mesh: Mesh) -> None:
-        emitted.append(mesh)
-
     scanning_message = f'Scanning {config.input} ...'
     _log_line(scanning_message)
     reporter.write({'kind': 'progress', 'message': scanning_message})
     try:
         summary = converter.prepare(
-            config.input, config.output, collect,
+            config.input, config.output, emitted.append,
             copy_extensions={'.png', '.jpg', '.jpeg', '.gif', '.txt', ".pdf", ".tif", ".tiff", ".url", ".webp"},
             convert=functools.partial(_convert_logged, run_id=run_id,
                                       reserved=reserved_logs(config)),
@@ -1257,7 +998,49 @@ def _run_detailed(config: RunConfig,
         _log_line(barrier)
         reporter.write({'kind': 'progress', 'message': barrier})
         interrupted = _dispatch(runner, config)
-    finished = {result['mesh'].path for result in runner.results}
+    run = _summarize_run(rejected, runner, interrupted)
+    _print_run_summary(summary, run, len(emitted))
+    # `finalize()`, not `write()` + `close()`: those two calls have a real
+    # gap between them where a still-running worker's own `write()` can
+    # land after `final` is on disk but before `_closed` is set — see
+    # `finalize()`'s own docstring for how it closes that gap atomically.
+    reporter.finalize(_final_record(summary, run, len(emitted)))
+    return RunOutcome(int(run.incomplete or bool(run.diagnostics) or summary.copy_failed > 0),
+                      interrupted=interrupted, unresolved=len(run.unresolved))
+
+
+@dataclass(frozen=True)
+class _RunSummary:
+    """Every count the end-of-run printout and the final progress record
+    show, computed once (REVIEW.md #6, 2026-11-11). Both renderers read this
+    one value, so the console and the JSON record cannot disagree."""
+    terminal: Counter
+    published: Counter
+    diagnostics: list
+    cancelled_count: int
+    total: int
+    incomplete: bool
+    incomplete_reason: object
+    unresolved: dict
+    left_in_queue: int
+    prepared_only: int
+
+
+def _summarize_run(rejected: list[tuple[Mesh, str]], runner: "_Runner",
+                   interrupted: bool) -> _RunSummary:
+    """Count the run's outcomes from one snapshot of the runner's state.
+
+    Called after both passes, so no worker is dispatching; the run state's
+    values are still read once each here and nothing below reads it again.
+    """
+    has_incomplete_reason = runner.run_state.has_incomplete_reason()
+    has_unresolved = runner.run_state.has_unresolved()
+    unresolved = runner.run_state.snapshot_unresolved()
+    incomplete_reason = runner.run_state.incomplete_reason()
+    results = list(runner.results)
+    queue = list(runner.queue)
+
+    finished = {result['mesh'].path for result in results}
     left_prepared = [path for path in runner.prepared if path not in finished]
 
     terminal = Counter()
@@ -1267,7 +1050,7 @@ def _run_detailed(config: RunConfig,
     for mesh, reason in rejected:
         terminal['intake_failure'] += 1
         diagnostics.append((mesh.path, 'intake', reason))
-    for result in runner.results:
+    for result in results:
         mesh = result['mesh']
         category = result['category']
         indicator = _emit_indicator(result['indicator'])
@@ -1288,60 +1071,60 @@ def _run_detailed(config: RunConfig,
         if not clean or recovered:
             diagnostics.append((mesh.path, category, reason))
 
-    total = sum(terminal.values())
-    incomplete = (interrupted or runner.run_state.has_incomplete_reason()
-                  or runner.run_state.has_unresolved() or bool(runner.queue)
-                  or bool(left_prepared))
-    print('Intake: ' + ', '.join(
-        f'{field.name}={getattr(summary, field.name)}' for field in fields(summary)))
-    print('Terminal: ' + ', '.join(
-        f'{name}={terminal[name]}' for name in (
-            'intake_failure', 'load_failure', 'process_failure', 'write_failure',
-            'published')) + f', total={total}, jobs={len(emitted)}')
-    print('Published: ' + (', '.join(
-        f'{indicator.name}={published[indicator]}'
-        for indicator in Indicator if published[indicator]) or 'none'))
-    for path, stage, reason in diagnostics:
-        print(f'Diagnostic: path={path!r}, stage={stage}, reason={reason}')
-    unresolved = runner.run_state.snapshot_unresolved()
-    left_in_queue = len(runner.queue)
+    incomplete = (interrupted or has_incomplete_reason or has_unresolved
+                  or bool(queue) or bool(left_prepared))
     # A prepared job still queued for repair is already in `left_in_queue`.
-    queued = {mesh.path for mesh in runner.queue}
+    queued = {mesh.path for mesh in queue}
     prepared_only = len([path for path in left_prepared if path not in queued])
-    incomplete_reason = runner.run_state.incomplete_reason()
-    if incomplete:
-        print(f'Run INCOMPLETE: {cancelled_count} job(s) interrupted and cleanly '
-              f'reaped, {len(unresolved)} unresolved job(s), '
-              f'{left_in_queue} still queued and undispatched, '
-              f'{prepared_only} prepared but never queued for repair — all are eligible '
-              f'for a plain rerun. Reason: {incomplete_reason}')
-        for token, state in unresolved.items():
+    return _RunSummary(terminal=terminal, published=published, diagnostics=diagnostics,
+                       cancelled_count=cancelled_count, total=sum(terminal.values()),
+                       incomplete=incomplete, incomplete_reason=incomplete_reason,
+                       unresolved=unresolved, left_in_queue=len(queue),
+                       prepared_only=prepared_only)
+
+
+def _print_run_summary(intake, run: _RunSummary, jobs: int) -> None:
+    """The end-of-run printout on stdout."""
+    print('Intake: ' + ', '.join(
+        f'{field.name}={getattr(intake, field.name)}' for field in fields(intake)))
+    print('Terminal: ' + ', '.join(
+        f'{name}={run.terminal[name]}' for name in (
+            'intake_failure', 'load_failure', 'process_failure', 'write_failure',
+            'published')) + f', total={run.total}, jobs={jobs}')
+    print('Published: ' + (', '.join(
+        f'{indicator.name}={run.published[indicator]}'
+        for indicator in Indicator if run.published[indicator]) or 'none'))
+    for path, stage, reason in run.diagnostics:
+        print(f'Diagnostic: path={path!r}, stage={stage}, reason={reason}')
+    if run.incomplete:
+        print(f'Run INCOMPLETE: {run.cancelled_count} job(s) interrupted and cleanly '
+              f'reaped, {len(run.unresolved)} unresolved job(s), '
+              f'{run.left_in_queue} still queued and undispatched, '
+              f'{run.prepared_only} prepared but never queued for repair — all are eligible '
+              f'for a plain rerun. Reason: {run.incomplete_reason}')
+        for token, state in run.unresolved.items():
             print(f'Unresolved: job {token} in state {state!r}')
     else:
         print('Run complete.')
 
-    # A strict superset of every value the printout above shows — built from
-    # the EXACT SAME already-computed values, not reconstructed.
-    # `finalize()`, not `write()` + `close()`: those two calls have a real
-    # gap between them where a still-running worker's own `write()` can
-    # land after `final` is on disk but before `_closed` is set — see
-    # `finalize()`'s own docstring for how it closes that gap atomically.
-    reporter.finalize({
+
+def _final_record(intake, run: _RunSummary, jobs: int) -> dict:
+    """The progress log's `final` record: a strict superset of every value
+    the printout shows, from the same `_RunSummary`."""
+    return {
         'kind': 'final',
-        'intake': {field.name: getattr(summary, field.name) for field in fields(summary)},
-        'terminal': {**{name: terminal[name] for name in terminal}, 'total': total},
-        'jobs': len(emitted),
-        'published': {indicator.name: count for indicator, count in published.items()},
-        'diagnostics': [[path, stage, reason] for path, stage, reason in diagnostics],
-        'incomplete': incomplete,
-        'incomplete_reason': incomplete_reason,
-        'cancelled_count': cancelled_count,
-        'unresolved': unresolved,
-        'left_in_queue': left_in_queue,
-        'prepared_not_repaired': prepared_only,
-    })
-    return RunOutcome(int(incomplete or bool(diagnostics) or summary.copy_failed > 0),
-                      interrupted=interrupted, unresolved=len(unresolved))
+        'intake': {field.name: getattr(intake, field.name) for field in fields(intake)},
+        'terminal': {**{name: run.terminal[name] for name in run.terminal}, 'total': run.total},
+        'jobs': jobs,
+        'published': {indicator.name: count for indicator, count in run.published.items()},
+        'diagnostics': [[path, stage, reason] for path, stage, reason in run.diagnostics],
+        'incomplete': run.incomplete,
+        'incomplete_reason': run.incomplete_reason,
+        'cancelled_count': run.cancelled_count,
+        'unresolved': run.unresolved,
+        'left_in_queue': run.left_in_queue,
+        'prepared_not_repaired': run.prepared_only,
+    }
 
 
 def _fail(message: str) -> int:
@@ -1363,7 +1146,7 @@ def _check_environment(config: RunConfig,
     try:
         source = Path(config.input).resolve()
         destination = Path(config.output).resolve()
-        cache = Path(decimated_root(config.input)).resolve()
+        cache = Path(perfile.decimated_root(config.input)).resolve()
     except (OSError, RuntimeError) as error:
         return f'cannot resolve input/output/cache paths: {error}'
     if (source == destination or source in destination.parents

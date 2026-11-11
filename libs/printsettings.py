@@ -6,6 +6,7 @@ Only the handful of settings the base-layer checks use are resolved.
 
 from __future__ import annotations
 
+import argparse
 import math
 
 from . import bambu3mf, basecheck
@@ -35,6 +36,17 @@ def _number(text):
     if not math.isfinite(value):
         raise ValueError(text)
     return value
+
+
+def add_settings_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the four command-line overrides `resolve_settings` reads, as one
+    group, so check_3mf.py and support_3mf.py cannot drift apart (REVIEW.md
+    #9). Each defaults to None: not given, so the 3MF's value is used."""
+    group = parser.add_argument_group('settings (default: read from the 3MF)')
+    group.add_argument('--first-layer', type=float, help='initial layer height, mm')
+    group.add_argument('--layer-height', type=float, help='layer height, mm')
+    group.add_argument('--support-gap', type=float, help='support top Z distance, mm')
+    group.add_argument('--support-angle', type=float, help='support threshold angle, degrees')
 
 
 def resolve_settings(project: bambu3mf.Project, instance: bambu3mf.Instance,
