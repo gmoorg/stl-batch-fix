@@ -1,5 +1,5 @@
 """The batch prepare pass: initial decimation, the decimation cache, and the
-handoff to the repair pass (batch_repair._prepare_one_file)."""
+handoff to the repair pass (libs.perfile.prepare_one_file)."""
 
 import os
 import shutil
@@ -11,7 +11,7 @@ from unittest import mock
 import numpy as np
 
 import batch_repair
-from libs import childresult, decimator, mesh_io, processor
+from libs import childresult, decimator, mesh_io, perfile, processor
 from libs.indicators import Indicator
 from libs.mesh_io import Geometry, Kind, Mesh
 from tests.tests import defect_spheres as ds
@@ -31,10 +31,10 @@ class _Case(unittest.TestCase):
         self.destination = str(self.out / 'sub' / 'ball.stl')
 
     def cache(self, max_faces):
-        return batch_repair.decimated_path(str(self.inp), str(self.source), max_faces)
+        return perfile.decimated_path(str(self.inp), str(self.source), max_faces)
 
     def prepare(self, max_faces):
-        return batch_repair._prepare_one_file(str(self.source), self.destination, max_faces,
+        return perfile.prepare_one_file(str(self.source), self.destination, max_faces,
                                               self.cache(max_faces))
 
 
@@ -57,11 +57,11 @@ class TestCachePath(_Case):
         """Both bound for out/a.stl, possibly in different runs: the
         converted job loads stl-exported/a.stl, the native one a.stl."""
         inp = str(self.inp)
-        native = batch_repair.decimated_path(inp, os.path.join(inp, 'a.stl'), 9)
-        converted = batch_repair.decimated_path(inp, os.path.join(inp, 'stl-exported', 'a.stl'), 9)
+        native = perfile.decimated_path(inp, os.path.join(inp, 'a.stl'), 9)
+        converted = perfile.decimated_path(inp, os.path.join(inp, 'stl-exported', 'a.stl'), 9)
         self.assertNotEqual(native, converted)
         self.assertEqual(converted, os.path.join(
-            batch_repair.decimated_root(inp), 'stl-exported', f'a.stl.9.{decimator.settings_tag()}.ply'))
+            perfile.decimated_root(inp), 'stl-exported', f'a.stl.9.{decimator.settings_tag()}.ply'))
 
     def test_a_source_symlinked_outside_the_input_stays_inside_the_cache(self):
         outside = self.root / 'elsewhere' / 'model.stl'
@@ -69,13 +69,13 @@ class TestCachePath(_Case):
         shutil.copy(self.source, outside)
         link = self.inp / 'link.stl'
         link.symlink_to(outside)
-        cache = batch_repair.decimated_path(str(self.inp), str(link), 9)
+        cache = perfile.decimated_path(str(self.inp), str(link), 9)
         self.assertEqual(cache, os.path.join(
-            batch_repair.decimated_root(str(self.inp)), f'link.stl.9.{decimator.settings_tag()}.ply'))
+            perfile.decimated_root(str(self.inp)), f'link.stl.9.{decimator.settings_tag()}.ply'))
 
     def test_a_source_outside_the_input_is_refused(self):
         with self.assertRaises(ValueError):
-            batch_repair.decimated_path(str(self.inp), str(self.root / 'other.stl'), 9)
+            perfile.decimated_path(str(self.inp), str(self.root / 'other.stl'), 9)
 
 
 def _nan_source(path, faces, coincident=False):
@@ -212,7 +212,7 @@ class TestPrepare(_Case):
         path = str(self.root / 'r.json')
         childresult.write(path, result)
         probed = mesh_io.probe(str(self.source), self.destination)
-        expected = batch_repair.expected_prepared_path(probed, self.cache(1000), 1000)
+        expected = perfile.expected_prepared_path(probed, self.cache(1000), 1000)
         got = childresult.read_and_validate(path, str(self.source), mode='prepare',
                                             expected_prepared=expected)
         self.assertEqual(got, result)
@@ -228,7 +228,7 @@ class TestRepairFromPrepared(_Case):
             return processor.Outcome(Indicator.FAILED, None, 'source', 'forced')
 
         with mock.patch.object(processor, 'process', failing):
-            result = batch_repair._process_one_file(str(self.source), self.destination, 0,
+            result = perfile.process_one_file(str(self.source), self.destination, 0,
                                                     load_path=prepared.prepared_path)
         self.assertLessEqual(seen['faces'], 1000, 'repair loaded the decimated cache')
         self.assertEqual(seen['max_faces'], 0)
@@ -241,7 +241,7 @@ class TestRepairFromPrepared(_Case):
         with mock.patch.object(processor, 'process',
                                lambda mesh, max_faces, **kw: processor.Outcome(
                                    Indicator.FAILED, None, 'source', 'forced')):
-            result = batch_repair._process_one_file(str(self.source), self.destination, 0)
+            result = perfile.process_one_file(str(self.source), self.destination, 0)
         self.assertIn('load: dropped 1 triangles with NaN/inf coordinates', result.steps)
 
     def test_a_no_decimation_handoff_reports_the_drop_once(self):
@@ -256,7 +256,7 @@ class TestRepairFromPrepared(_Case):
         with mock.patch.object(processor, 'process',
                                lambda mesh, max_faces, **kw: processor.Outcome(
                                    Indicator.FAILED, None, 'source', 'forced')):
-            result = batch_repair._process_one_file(str(self.source), self.destination, 0,
+            result = perfile.process_one_file(str(self.source), self.destination, 0,
                                                     load_path=prepared.prepared_path)
         self.assertFalse([s for s in result.steps if s.startswith('load: dropped')])
 

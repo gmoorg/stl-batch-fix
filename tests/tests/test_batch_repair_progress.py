@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from libs import converter, steplog
+from libs import converter, perfile, steplog
 from libs.mesh_io import Kind, Mesh
 from libs.proctree import live_group_members
 import batch_repair
@@ -103,6 +103,7 @@ class TestSourceIdentity(unittest.TestCase):
     def _fake_process(self, mesh, max_faces, part_steps=None, step_logger=None,
                       source_name='', *,
                       skip_clean=False, reconstruct_budget_bytes=None,
+                      reconstruct_ceiling_bytes=None,
                       min_shell_faces=None, reconstruction=None):
         # A trivial stand-in for `processor.process` that still drives the
         # step_logger once, so these tests exercise the real
@@ -121,9 +122,9 @@ class TestSourceIdentity(unittest.TestCase):
         cwd = os.getcwd()
         os.chdir(self.root)
         try:
-            with mock.patch.object(batch_repair.processor, 'process', self._fake_process), \
-                 mock.patch.object(batch_repair.processor, 'write', return_value=None):
-                batch_repair._process_one_file('a.stl', str(self.root / 'out.stl'), 0,
+            with mock.patch.object(perfile.processor, 'process', self._fake_process), \
+                 mock.patch.object(perfile.processor, 'write', return_value=None):
+                perfile.process_one_file('a.stl', str(self.root / 'out.stl'), 0,
                                                step_logger=logger)
         finally:
             os.chdir(cwd)
@@ -141,11 +142,11 @@ class TestSourceIdentity(unittest.TestCase):
         _binary_stl(str(self.root / 'sub2' / 'a.stl'))
         log_path = self.root / 'batch.log'
         logger = steplog.open_step_log(str(log_path))
-        with mock.patch.object(batch_repair.processor, 'process', self._fake_process), \
-             mock.patch.object(batch_repair.processor, 'write', return_value=None):
-            batch_repair._process_one_file(str(self.root / 'sub1' / 'a.stl'),
+        with mock.patch.object(perfile.processor, 'process', self._fake_process), \
+             mock.patch.object(perfile.processor, 'write', return_value=None):
+            perfile.process_one_file(str(self.root / 'sub1' / 'a.stl'),
                                            str(self.root / 'out1.stl'), 0, step_logger=logger)
-            batch_repair._process_one_file(str(self.root / 'sub2' / 'a.stl'),
+            perfile.process_one_file(str(self.root / 'sub2' / 'a.stl'),
                                            str(self.root / 'out2.stl'), 0, step_logger=logger)
         with open(log_path) as f:
             sources = {line.split('\t')[1] for line in f if line.strip()}

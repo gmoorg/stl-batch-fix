@@ -79,8 +79,7 @@ outside the repository, startup check and `install.sh` section removed
   (sphere, Laura; malloc_child records), so reworking the reindex in
   place/in chunks was dropped (owner, 2026-10-07); streaming each block's
   output likewise only lowers that phase;
-  avoid the per-block winding-number octree
-  rebuild (`igl.FastWindingNumberBVH`, cached); bucket the band's surface
+  bucket the band's surface
   samples by block once instead of scanning all of them per block; for speed
   on large inputs, compute the band against a decimated copy of the input;
   whether a 0.06 mm grid is visible after decimation (untested; 65× more
@@ -141,6 +140,40 @@ removal are all unverified.
   the plate in one piece, and do the shin undersides still loop between
   walls? Then: a dense "skin" over the wall tops (owner chose mesh first),
   a support blocker if trees interfere, pitch/gap tuning.
+- [ ] Test-print the whole-square mesh (2026-10-16) on torso.3mf
+  (`/mnt/sda2/torso.mesh.3mf`, `--max-height 30`): do the closed cells
+  print without needing support themselves, and do walls that now reach up
+  to one pitch past the needed area mark surfaces that did not need support?
+  hair_bangs keeps one 1 mm unbraced run.
+  Test print started 2026-10-16 with owner-chosen settings
+  `support_3mf.py /mnt/sda2/torso.3mf --layout grid --width 0.2 --max-height 30
+  --pitch 5` (gap default 0.2). Untried: 0.2 mm walls are half a 0.4 mm
+  nozzle line — check the preview kept them; pitch 5 leaves 5 mm spans for
+  the model to bridge between walls.
+- [ ] Keel grid (owner idea, 2026-10-27; first version as `--layout keel`,
+  see [modules](modules.md) and the summary [keel](keel.md); next: owner's sliced preview and a test print
+  of girl_130 Arm_Left, then decide on curved keels and the 80 % band rule): support oriented to
+  the part instead of the world X/Y lattice. Under an elongated underside
+  (forearm, hand) one "keel" wall follows the line where the underside is
+  lowest — where its first layers start — and short ribs cross it every
+  `--pitch` (measured along the keel), spanning only the shallow undersides
+  that need support. Why: on girl_130 the fixed lattice put walls where the
+  arm did not need them and none under pieces falling between walls; the
+  owner had to cut the grid by hand to paint support, and a small pitch costs
+  filament. Each wall stands on an inverted-T foot (about three printed
+  lines wide, base_height tall) instead of a solid sheet, leaving the plate
+  inside the cells bare for supports the owner paints; joining strips stay
+  so it comes off in one piece. Reasoning to check, not proven: on a
+  near-horizontal round underside of radius r only the band of half-width
+  about r·sin(support angle) around the lowest line is shallower than the
+  support angle (r 5 mm, 30° → 2.5 mm). First version: one straight keel
+  direction per patch (principal axis refined by the lowest-point trace);
+  shapes too broad or branched (fingers, flat areas) keep the regular
+  lattice. Judge on girl_130 Arm_Left with the Bambu CLI against today's
+  grid: filament, wall-top gaps, support under the first underside lines;
+  then a test print for finish and removal. Not a fix for the Arm_Left
+  break (2026-10-26/27: two failures with the grid, one success without;
+  the measured grid never touched the arm — cause unexplained).
 - [ ] Grid base necks: a base piece that reaches another only through a
   narrow slot (≥ one 0.1 mm cell after clearance) counts as joined, so no
   full-width strip is added there; decide whether to require a minimum neck.

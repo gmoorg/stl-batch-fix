@@ -21,7 +21,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from libs import childresult, mesh_io
+from libs import childresult, mesh_io, perfile
 from libs.indicators import Indicator
 from libs.mesh_io import Kind, Mesh
 from dataclasses import replace
@@ -202,7 +202,7 @@ class TestBasicDispatch(_PoolTestCase):
         self.assertTrue(any('[warning]' in line and 'disk full' in line for line in logged))
 
     def test_failed_marker_write_still_names_the_signal(self):
-        with mock.patch.object(batch_repair.mesh_io, 'staged_write',
+        with mock.patch.object(perfile.mesh_io, 'staged_write',
                                side_effect=OSError('read-only')):
             result = self.run_one('segv_a.stl')
         self.assertEqual(result['category'], 'write_failure')
@@ -638,6 +638,36 @@ class TestCancellation(_PoolTestCase):
         for path in [str(self.root / 'out' / f'hang_{i}.stl') for i in range(3)]:
             self.assertFalse(os.path.exists(path))
             self.assertFalse(os.path.exists(path.replace('.stl', '.failed.stl')))
+
+
+    def test_no_deadline_waits_without_timeout_and_cancellation_still_stops(self):
+        """`per_file_timeout=None` (large-file mode): the wait has no
+        timeout, and a run-wide cancel still ends a hanging child."""
+        mesh = self.mesh('hang_a.stl')
+        (self.root / 'in').mkdir(parents=True, exist_ok=True)
+        Path(mesh.path).write_bytes(b'source')
+        runner = self.make_runner([mesh], workers=1, per_file_timeout=None)
+        timeouts = []
+        real = subprocess.Popen.communicate
+
+        def spy(proc, *args, **kwargs):
+            timeouts.append(kwargs.get('timeout', 'missing'))
+            return real(proc, *args, **kwargs)
+
+        def cancel_soon():
+            time.sleep(0.5)
+            runner.run_state.cancel('test-triggered cancellation')
+
+        from libs.pool import Pool
+        threading.Thread(target=cancel_soon, daemon=True).start()
+        started = time.monotonic()
+        with mock.patch.object(subprocess.Popen, 'communicate', spy):
+            Pool(1, runner.selector, runner.handler).start()
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual(timeouts[0], None)
+        self.assertEqual(len(runner.results), 1)
+        self.assertNotEqual(runner.results[0].get('indicator'), 'TIMED_OUT')
+        self.assertFalse((self.root / 'out' / 'hang_a.timeout.stl').exists())
 
 
 class TestLaunchFailure(_PoolTestCase):

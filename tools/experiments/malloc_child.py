@@ -62,7 +62,7 @@ PROJECT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, PROJECT)
 
 import batch_repair                                             # noqa: E402
-from libs import childresult, mesh_io, runconfig                # noqa: E402
+from libs import childresult, mesh_io, perfile, runconfig       # noqa: E402
 
 MAX_FACES = 900_000                       # batch_repair.toml, 2026-10-07
 BUDGET_GB = 10.0
@@ -154,7 +154,7 @@ def run_child(mesh, mode, *, skip_clean, run_dir, input_root, load_from=None):
     log_file = os.path.join(run_dir, 'steps.log')
     offset = os.path.getsize(log_file) if os.path.exists(log_file) else 0
     result_file = os.path.join(run_dir, f'{mode}.result.json')
-    cache_path = (batch_repair.decimated_path(input_root, mesh.path, MAX_FACES)
+    cache_path = (perfile.decimated_path(input_root, mesh.path, MAX_FACES)
                   if mode == 'prepare' else None)
     before = swap()
     with open(os.path.join(run_dir, 'child.log'), 'ab') as output_log:
@@ -173,7 +173,7 @@ def run_child(mesh, mode, *, skip_clean, run_dir, input_root, load_from=None):
     sampler.join()
     proc.returncode = os.waitstatus_to_exitcode(status)
     after = swap()
-    expected = (batch_repair.expected_prepared_path(mesh, cache_path, MAX_FACES)
+    expected = (perfile.expected_prepared_path(mesh, cache_path, MAX_FACES)
                 if mode == 'prepare' else None)
     result = childresult.read_and_validate(result_file, mesh.path, mode=mode,
                                            expected_prepared=expected)

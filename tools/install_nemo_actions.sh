@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# install_nemo_actions.sh — add "STL fix" and "STL alpha fix" to Nemo's
-# right-click menu for .stl/.obj files (Cinnamon's file manager).
+# install_nemo_actions.sh — add an "STL fix" submenu to Nemo's right-click
+# menu for .stl/.obj files (Cinnamon's file manager), holding "STL fix",
+# "STL alpha fix" and "STL fix large (RAM+swap)".
 #
 # Copies tools/nemo/*.nemo_action to ~/.local/share/nemo/actions/ with this
-# checkout's path filled in. Safe to rerun; rerun after moving the checkout.
-# Remove the two files there to uninstall.
+# checkout's path filled in, then puts them in the submenu through Nemo's
+# layout file (tools/nemo_layout.py; other entries there are kept). Safe to
+# rerun; rerun after moving the checkout. To uninstall, remove the three
+# files there and the "STL fix" submenu in nemo-action-layout-editor.
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -23,3 +26,9 @@ for template in "$ROOT"/tools/nemo/*.nemo_action; do
     mv "$target.tmp" "$target"
     echo "installed $target"
 done
+
+# Menu order: the everyday entry first. The system Python, as Nemo's own
+# layout editor uses: its GTK bindings check accelerators the same way.
+/usr/bin/python3 -I "$ROOT/tools/nemo_layout.py" \
+    stl-fix.nemo_action stl-alpha-fix.nemo_action stl-fix-large.nemo_action
+echo "Close every Nemo window (or run: nemo -q) for the menu to change."

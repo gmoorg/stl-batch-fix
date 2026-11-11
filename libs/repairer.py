@@ -5,7 +5,6 @@ from __future__ import annotations
 import itertools
 import math
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import igl as _igl
@@ -13,7 +12,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from . import decimator, execstep, meshfix, pipeconfig, scanner, splitter, steplog, winding
-from .execstep import Entry, Step, StepResult, collection_entry, mesh_entry
+from .execstep import Entry, MeshStep, Step, StepResult, collection_entry, mesh_entry
 from .mesh_io import Mesh, require_geometry
 from .steplog import StepLogger
 
@@ -266,21 +265,23 @@ def _nm_only(scan: scanner.Scan, seams: int | None) -> bool:
 
 def repair(mesh: Mesh,
            min_shell_faces: int = splitter.MIN_SHELL_FACES,
-           part_steps: tuple[tuple[str, Callable[..., tuple[bool, Mesh, str]]], ...] | None = None,
+           part_steps: tuple[Entry | tuple[str, MeshStep], ...] | None = None,
            step_logger: StepLogger = steplog.null_logger,
            source_name: str = '',
            *,
            skip_clean: bool = False,
            reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
+           reconstruct_ceiling_bytes: int | None = None,
            ) -> Result:
     """Split, wrap each part, and merge; no file is written.
 
     `part_steps`, when supplied, REPLACES `DEFAULT_PART_STEPS` for this call
     entirely — taken exactly as given, in order, with nothing appended or
     removed. An empty `part_steps=()` runs no per-part steps at all. Each
-    entry is `(name, step_fn)` with `step_fn` accepting `(mesh, config)`,
-    the same shape `DEFAULT_PART_STEPS` itself uses — not an opaque
-    callable, so a multi-step sequence still logs against a real name
+    entry is an `execstep.Entry` (what `DEFAULT_PART_STEPS` and
+    `part_steps_for` hold) or a plain `(name, step_fn)` tuple with `step_fn`
+    accepting `(mesh, config)`, normalized by `execstep.as_entry` — not an
+    opaque callable, so a multi-step sequence still logs against a real name
     instead of a generic fallback.
 
     Decimation and conditional MeshFix are NOT auto-appended after a custom
@@ -391,27 +392,12 @@ def repair(mesh: Mesh,
             target_faces = len(part.geometry.faces)
             part_config = pipeconfig.StepConfig(
                 faceCount=target_faces, whole_model_diag=whole_model_diag,
-                reconstruct_memory_budget_bytes=reconstruct_budget_bytes)
+                reconstruct_memory_budget_bytes=reconstruct_budget_bytes,
+                reconstruct_memory_ceiling_bytes=reconstruct_ceiling_bytes)
             part_id = f'{index + 1}/{len(parts)}'
-
-            # Part gate (same `skip_clean` switch): a part that is already clean is merged
-            # as split, bypassing the part sequence — default or custom. A part whose
-            # only scanned defect is NM edges first tries MeshFix alone (NM fast path);
-            # if that result is not accepted, the sequence runs on the original part.
-            if skip_clean:
-                gated = _part_gate(part, part_id, steps, step_logger, source_name)
-                if gated is not None:
-                    repaired.append(gated)
-                    continue
-
-            outcome = execstep.run_sequence(
-                resolved_part_entries, part, part_config, steps,
-                step_logger=step_logger, source_name=source_name,
-                step=Step.PART, part=part_id)
-
+            outcome = _repair_part(part, part_id, resolved_part_entries, part_config, steps,
+                                   skip_clean, step_logger, source_name)
             repaired.append(outcome.mesh)
-            if outcome.record_error is not None:
-                raise outcome.record_error
             if not outcome.ok:
                 # Stop at the first failed part rather than merging it back
                 # in. A part that could not be repaired is still defective
@@ -439,6 +425,42 @@ def repair(mesh: Mesh,
                        faces_in, volume_in, time.monotonic() - started)
 
     return result
+
+
+@dataclass(frozen=True)
+class _PartOutcome:
+    """One split part after `_repair_part`: the mesh to merge, or, when
+    `ok` is False, the failed result and why (`detail`)."""
+    mesh: Mesh
+    ok: bool
+    detail: str
+
+
+def _repair_part(part: Mesh, part_id: str, entries: tuple[Entry, ...],
+                 config: pipeconfig.StepConfig, steps: list[StepResult], skip_clean: bool,
+                 step_logger: StepLogger, source_name: str) -> _PartOutcome:
+    """Repair one split part: the clean/NM gates, then the part sequence.
+
+    `config` carries the part's own face target, taken by the caller right
+    after the split (REVIEW.md #8, 2026-11-11: extracted from `repair`,
+    which keeps the stop-at-first-failed-part decision). A failure to record
+    a step (`record_error`) is raised, as before, for `repair` to report.
+    """
+    # Part gate (same `skip_clean` switch): a part that is already clean is merged
+    # as split, bypassing the part sequence — default or custom. A part whose
+    # only scanned defect is NM edges first tries MeshFix alone (NM fast path);
+    # if that result is not accepted, the sequence runs on the original part.
+    if skip_clean:
+        gated = _part_gate(part, part_id, steps, step_logger, source_name)
+        if gated is not None:
+            return _PartOutcome(gated, True, '')
+    outcome = execstep.run_sequence(
+        entries, part, config, steps,
+        step_logger=step_logger, source_name=source_name,
+        step=Step.PART, part=part_id)
+    if outcome.record_error is not None:
+        raise outcome.record_error
+    return _PartOutcome(outcome.mesh, outcome.ok, outcome.detail)
 
 
 def _gate_says_clean(mesh: Mesh, step_logger: StepLogger, source_name: str,

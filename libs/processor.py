@@ -244,6 +244,7 @@ def process(mesh: Mesh, max_faces: int,
             *,
             skip_clean: bool = False,
             reconstruct_budget_bytes: int = pipeconfig.StepConfig.reconstruct_memory_budget_bytes,
+            reconstruct_ceiling_bytes: int | None = None,
             min_shell_faces: int = splitter.MIN_SHELL_FACES,
             reconstruction: str = repairer.RECONSTRUCTIONS[0]
             ) -> Outcome:
@@ -305,6 +306,7 @@ def process(mesh: Mesh, max_faces: int,
                                step_logger=step_logger, source_name=source_name,
                                skip_clean=skip_clean,
                                reconstruct_budget_bytes=reconstruct_budget_bytes,
+                               reconstruct_ceiling_bytes=reconstruct_ceiling_bytes,
                                min_shell_faces=min_shell_faces)
     return _decide(mesh, decimated, repaired,
                    step_logger=step_logger, source_name=source_name)

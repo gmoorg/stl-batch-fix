@@ -464,6 +464,19 @@ class Addition:
     faces: np.ndarray
 
 
+def check_destination(source: str, destination: str) -> None:
+    """Raise ReadError when `add_parts` would refuse `destination`.
+
+    Callers run it before any slow work so a refusal comes at once; `add_parts`
+    runs it again and its exclusive publication still guards a file that
+    appears in between.
+    """
+    import os
+
+    if os.path.realpath(source) == os.path.realpath(destination) or os.path.exists(destination):
+        raise ReadError(f'refusing to write {destination}: it exists or is the source')
+
+
 def add_parts(project: Project, destination: str, additions: list[Addition]) -> None:
     """Write a copy of `project` with each addition as a new normal part.
 
@@ -486,10 +499,8 @@ def add_parts(project: Project, destination: str, additions: list[Addition]) -> 
         raise ReadError('only Bambu Studio projects can be extended')
     if not project.root_in_mm:
         raise ReadError('the root model is not in millimetres')
-    source = os.path.realpath(project.path)
+    check_destination(project.path, destination)
     target = os.path.realpath(destination)
-    if source == target or os.path.exists(destination):
-        raise ReadError(f'refusing to write {destination}: it exists or is the source')
     counts: dict[str, int] = {}
     for instance in project.instances:
         counts[instance.object_id] = counts.get(instance.object_id, 0) + 1

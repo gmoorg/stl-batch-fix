@@ -130,5 +130,22 @@ class Cli(unittest.TestCase):
         self.assertIn('map:', text)
 
 
+    def test_unwritable_map_keeps_the_analysis_status(self):
+        blocker = os.path.join(self.dir.name, 'maps')
+        with open(blocker, 'w') as handle:        # a file where the folder should be
+            handle.write('x')
+        code, text = self.run_cli({'2': dict(parts=[dict(id='1', mesh=RECESSED)])},
+                                  '--png', blocker)
+        self.assertEqual(code, check_3mf.EXIT_RISK, text)
+        self.assertIn(f'map: not written (cannot create {blocker}', text)
+        self.assertIn('1 map(s) not written', text)
+        self.assertIn('B too low for support', text)
+
+    def test_settings_overrides_are_accepted(self):
+        args = check_3mf.parse_args(['m.3mf', '--first-layer', '0.3', '--layer-height', '0.1',
+                                     '--support-gap', '0.15', '--support-angle', '45'])
+        self.assertEqual((args.first_layer, args.layer_height, args.support_gap,
+                          args.support_angle), (0.3, 0.1, 0.15, 45.0))
+
 if __name__ == '__main__':
     unittest.main()

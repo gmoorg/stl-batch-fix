@@ -89,8 +89,16 @@ produce; they protect behaviour, not composition.
   rejected selection, publish replace/stale-marker/failed-move rules, log
   append never through a symlink, staging removed on success and on an
   exception, sweep keeps locked/init/foreign/symlinked folders, and the
-  front-end loop with `run` injected: `--alpha` choice, leading-hyphen
-  names, interruption stops later folders); `test_fix_files_smoke` (slow,
+  front-end loop with `run` injected: `--alpha` choice, `--large` config,
+  `--large` with `--alpha` or two files rejected, leading-hyphen
+  names, interruption stops later folders); large mode (2026-10-21):
+  `test_runconfig.TestLargeFile` (RAM+swap from a fake meminfo, no swap,
+  unreadable), `test_winding.TestPlan` ceiling cases (unchanged when the
+  target fits, fallback, too small, cap), `test_jobmemory` (admission
+  reserves the fallback plan), `test_batch_repair_cli` (ceiling through argv,
+  child, every part), `test_batch_repair_pool` (no deadline: `timeout=None`,
+  cancel still stops), `test_nemo_layout` (create, merge, idempotent,
+  rejected layout untouched); `test_fix_files_smoke` (slow,
   real pipeline: STL with a space, uppercase OBJ, malformed OBJ →
   `_fixed.failed.stl` source copy, logs beside, sources unchanged, no
   staging left, a rerun appends to the logs).

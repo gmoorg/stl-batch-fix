@@ -45,6 +45,13 @@ class RunConfig:
                            for the winding-number reconstruction's block count
     min_shell_faces        shells with fewer faces are dropped as debris at the
                            shell split; 0 keeps every shell
+
+    Set only by `large_file`, never from TOML (`RUNTIME_ONLY`):
+    reconstruct_memory_ceiling_bytes  RAM+swap allowance `winding.plan` may
+                           fall back to when no block count fits the
+                           reconstruct budget; None everywhere else
+    `per_file_timeout` is None (no deadline) only after `large_file`; the
+                           TOML value must be a finite positive number.
     """
 
     input: str
@@ -53,21 +60,33 @@ class RunConfig:
     log_file: str = ''
     skip_clean: bool = False
     workers: int = 0
-    per_file_timeout: float = 3600.0
+    per_file_timeout: float | None = 3600.0
     reap_deadline: float = 10.0
     memory_budget_fraction: float = 0.7
     memory_budget_bytes: int = 0
     reconstruct_memory_budget_gb: float = 10.0
     min_shell_faces: int = MIN_SHELL_FACES
+    reconstruct_memory_ceiling_bytes: int | None = None
 
 
 #: Keys that hold paths, resolved against the config file's folder.
 _PATH_KEYS = ('input', 'output', 'log_file')
 
+#: Fields a config file may not set (an unknown key there).
+RUNTIME_ONLY = ('reconstruct_memory_ceiling_bytes',)
+
+#: The TOML type of a field whose annotation also allows a runtime-only None.
+_TOML_TYPES = {'per_file_timeout': 'float'}
+
+
+def toml_fields():
+    """The `RunConfig` fields a config file can set."""
+    return tuple(f for f in fields(RunConfig) if f.name not in RUNTIME_ONLY)
+
 
 def required_keys() -> tuple[str, ...]:
     """Field names with no default — the keys a config file must set."""
-    return tuple(f.name for f in fields(RunConfig)
+    return tuple(f.name for f in toml_fields()
                  if f.default is MISSING and f.default_factory is MISSING)
 
 
@@ -95,7 +114,7 @@ def load(path: str) -> RunConfig:
 
 def from_mapping(data: dict, base_dir: str) -> RunConfig:
     """Validate parsed TOML `data`; relative paths resolve against `base_dir`."""
-    known = {f.name: f for f in fields(RunConfig)}
+    known = {f.name: f for f in toml_fields()}
     unknown = sorted(set(data) - set(known))
     if unknown:
         raise ConfigError(f'unknown key(s): {", ".join(unknown)}; '
@@ -106,7 +125,7 @@ def from_mapping(data: dict, base_dir: str) -> RunConfig:
 
     values = {}
     for key, value in data.items():
-        values[key] = _check(key, value, known[key].type)
+        values[key] = _check(key, value, _TOML_TYPES.get(key, known[key].type))
     for key in _PATH_KEYS:
         if values.get(key):
             values[key] = os.path.normpath(os.path.join(base_dir, values[key]))
@@ -178,6 +197,22 @@ def _meminfo_available() -> int | None:
     return None
 
 
+def _meminfo_swap_free() -> int | None:
+    """`SwapFree` in bytes (0 without swap), or None if absent or malformed."""
+    try:
+        with open(MEMINFO_PATH) as f:
+            for line in f:
+                if line.startswith('SwapFree:'):
+                    fields = line.split()
+                    if len(fields) != 3 or fields[2] != 'kB':
+                        return None
+                    value = int(fields[1]) * 1024
+                    return value if value >= 0 else None
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def available_memory_bytes() -> int | None:
     """Memory new work can use: `MemAvailable` (free pages plus reclaimable
     cache), else free pages alone, else None. Free pages alone undercount
@@ -214,6 +249,29 @@ def resolve(config: RunConfig) -> RunConfig:
                               'set memory_budget_bytes explicitly')
     return replace(config, workers=workers, log_file=log_file,
                    memory_budget_bytes=budget)
+
+
+def large_file(config: RunConfig) -> RunConfig:
+    """The right-click large-file mode (`fix_files.py --large`): one worker,
+    no per-file deadline, and a RAM+swap allowance read now.
+
+    allowance = `memory_budget_fraction` × (`MemAvailable` + `SwapFree`). It
+    becomes the admission budget and the reconstruction ceiling;
+    `reconstruct_memory_budget_gb` stays the preferred per-part target
+    (`winding.plan`), so a part that fits it is planned exactly as in a
+    normal run and only a part that does not may plan into swap. Raises
+    `ConfigError` when the allowance cannot be read or is zero.
+    """
+    available = _meminfo_available()
+    swap = _meminfo_swap_free()
+    if available is None or swap is None:
+        raise ConfigError(f'large mode: cannot read MemAvailable and SwapFree from {MEMINFO_PATH}')
+    allowance = int((available + swap) * config.memory_budget_fraction)
+    if allowance <= 0:
+        raise ConfigError('large mode: derived RAM+swap allowance is zero')
+    return replace(config, workers=1, per_file_timeout=None,
+                   memory_budget_bytes=allowance,
+                   reconstruct_memory_ceiling_bytes=allowance)
 
 
 def budget_bytes(gb: float) -> int:

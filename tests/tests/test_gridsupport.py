@@ -12,6 +12,7 @@ import unittest
 import zipfile
 
 import numpy as np
+from scipy import ndimage
 
 try:
     import manifold3d
@@ -62,6 +63,18 @@ def shin_bottom(x, y):
 SHIN = slab(shin_bottom, size=(20.0, 10.0), n=(80, 80), top=18.0)
 
 
+def thin_bottom(x, y):
+    """A tight curve: shallower than 40° only within ~0.21 mm of y = 5, so the
+    supported strip is thinner than a wall pitch (torso.3mf's undersides)."""
+    return 10.0 + 2.0 * (y - 5.0) ** 2
+
+
+THIN = slab(thin_bottom, size=(20.0, 4.0), n=(80, 160), top=20.0, origin=(0.0, 3.0))
+#: Independent bound on THIN's supported strip: the 40° band half-width
+#: (tan 40° / 4 = 0.21 mm) plus one basecheck cell and one grid cell.
+THIN_BAND = np.tan(np.radians(40.0)) / 4.0 + 0.1 + 0.1
+
+
 def closed_and_positive(vertices, faces):
     edges = np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1)
     _, counts = np.unique(edges, axis=0, return_counts=True)
@@ -88,6 +101,47 @@ def has_cells(vertices, faces, z):
     return any(area(p) < 0 for p in polygons)
 
 
+def wall_components(vertices, faces, base_height, cell=0.05):
+    """Footprints of the walls above the base, rasterised from the mesh's
+    upward faces: (rows of (x extent, y extent) per 8-connected component)."""
+    t = vertices[faces]
+    n = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    t = t[(n[:, 2] > 0) & (t[:, :, 2].min(axis=1) > base_height + 1e-6)]
+    x0, y0 = vertices[:, 0].min(), vertices[:, 1].min()
+    shape = (int(np.ceil((vertices[:, 1].max() - y0) / cell)) + 1,
+             int(np.ceil((vertices[:, 0].max() - x0) / cell)) + 1)
+    top = np.zeros(shape, dtype=bool)
+    for tri in t:
+        i0, i1 = (int(np.floor((tri[:, 0].min() - x0) / cell)),
+                  int(np.ceil((tri[:, 0].max() - x0) / cell)))
+        j0, j1 = (int(np.floor((tri[:, 1].min() - y0) / cell)),
+                  int(np.ceil((tri[:, 1].max() - y0) / cell)))
+        jj, ii = np.mgrid[j0:j1, i0:i1]
+        px, py = x0 + (ii + 0.5) * cell, y0 + (jj + 0.5) * cell
+        a, b, c = tri[:, :2]
+        d = [(q[0] - p[0]) * (py - p[1]) - (q[1] - p[1]) * (px - p[0])
+             for p, q in ((a, b), (b, c), (c, a))]
+        inside = np.all([e >= 0 for e in d], axis=0) | np.all([e <= 0 for e in d], axis=0)
+        top[jj[inside], ii[inside]] = True
+    labels, count = ndimage.label(top, structure=np.ones((3, 3), dtype=bool))
+    return np.array([((s[1].stop - s[1].start) * cell, (s[0].stop - s[0].start) * cell)
+                     for s in ndimage.find_objects(labels)]).reshape(-1, 2)
+
+
+def straight(components, width):
+    """Components no wider than one wall in some direction: a lone straight run."""
+    return int((components.min(axis=1) <= width + 0.1 + 1e-9).sum())
+
+
+def every_piece_has_a_cell(vertices, faces, z):
+    """Each connected piece of a horizontal slice encloses at least one hole."""
+    mesh = manifold3d.Mesh(vert_properties=vertices.astype(np.float32),
+                           tri_verts=faces.astype(np.uint32))
+    section = manifold3d.Manifold(mesh).slice(z)
+    pieces_ = section.decompose()
+    return bool(pieces_) and all(len(p.to_polygons()) > 1 for p in pieces_)
+
+
 def sample_points(vertices, faces):
     """Every vertex plus every face centroid of the grid."""
     return np.concatenate([vertices, vertices[faces].mean(axis=1)])
@@ -108,6 +162,70 @@ def build(parts, max_height=30.0, **overrides):
 def shifted(mesh, dx=0.0, dy=0.0, dz=0.0):
     v, f = mesh
     return v + np.array([dx, dy, dz]), f
+
+
+def build_keel(parts, max_height=30.0, foot=1.26, **overrides):
+    """gridsupport.build_keel on world-space parts, candidates from basecheck."""
+    th = basecheck.Thresholds(first_layer=0.2, layer_height=0.2, support_gap=0.24,
+                              support_angle=40.0, foot_height=max_height)
+    grid = basecheck.check(parts, th, keep_grid=True).grid
+    candidates = grid.overhang & (grid.height < max_height)
+    settings = gridsupport.GridSettings(**dict(dict(gap=GAP, xy_distance=XY, width=0.45),
+                                               **overrides))
+    tris = np.concatenate([v[f] for v, f in parts])
+    return gridsupport.build_keel(tris, candidates, grid.height, grid.x0, grid.y0, grid.cell,
+                                  max_height, settings, foot)
+
+
+class Rod:
+    """A closed round rod: axis through `centre` heading `heading` degrees in
+    plan and rising `rise` degrees; its exact surface distance is known."""
+
+    SECTIONS = 96
+
+    def __init__(self, centre, heading, radius=4.0, length=30.0, rise=0.0):
+        self.c = np.asarray(centre, dtype=float)
+        h, r = np.radians(heading), np.radians(rise)
+        self.u = np.array([np.cos(h) * np.cos(r), np.sin(h) * np.cos(r), np.sin(r)])
+        self.radius, self.length = radius, length
+        e1 = np.array([-np.sin(h), np.cos(h), 0.0])
+        e2 = np.cross(self.u, e1)
+        a = np.linspace(0, 2 * np.pi, self.SECTIONS, endpoint=False)
+        ring = radius * (np.outer(np.cos(a), e1) + np.outer(np.sin(a), e2))
+        ends = [self.c - self.u * length / 2, self.c + self.u * length / 2]
+        v = np.vstack([ends[0] + ring, ends[1] + ring, ends])
+        n = self.SECTIONS
+        f = []
+        for k in range(n):
+            m = (k + 1) % n
+            f += [[k, m, n + m], [k, n + m, n + k], [2 * n, m, k], [2 * n + 1, n + k, n + m]]
+        f = np.array(f)
+        t = v[f]
+        if np.einsum('ij,ij->i', t[:, 0], np.cross(t[:, 1], t[:, 2])).sum() < 0:
+            f = f[:, ::-1]
+        self.mesh = (v, f)
+        #: The facets lie inside the true circle by at most this (chord sagitta).
+        self.sagitta = radius * (1 - np.cos(np.pi / n))
+
+    def distance(self, p):
+        d = p - self.c
+        s = d @ self.u
+        radial = np.linalg.norm(d - np.outer(s, self.u), axis=1)
+        past = np.abs(s) - self.length / 2
+        return np.where(past <= 0, radial - self.radius,
+                        np.where(radial <= self.radius, past,
+                                 np.hypot(radial - self.radius, past)))
+
+
+def covered_at(vertices, faces, z, points):
+    """Which plan points the solid's horizontal slice at z covers."""
+    mesh = manifold3d.Manifold(manifold3d.Mesh(vert_properties=vertices.astype(np.float32),
+                                               tri_verts=faces.astype(np.uint32)))
+    section = mesh.slice(z)
+    h = 0.01
+    return np.array([(section ^ manifold3d.CrossSection(
+        [[(x - h, y - h), (x + h, y - h), (x + h, y + h), (x - h, y + h)]])).area() > 0
+        for x, y in points])
 
 
 class Geometry(unittest.TestCase):
@@ -134,6 +252,64 @@ class Geometry(unittest.TestCase):
         self.assertTrue(np.all(np.hypot(dx, dy) >= XY - TOL))
         self.assertGreater(support.near_area, 0.9 * support.eligible_area)
         self.assertGreaterEqual(support.gap_median, GAP)
+
+    def test_strip_thinner_than_the_pitch_gets_closed_cells_not_pins(self):
+        support = build([THIN])
+        v, f = support.vertices, support.faces
+        closed, volume = closed_and_positive(v, f)
+        self.assertTrue(closed)
+        self.assertGreater(volume, 0)
+        self.assertEqual(pieces(v, f), 1)
+        components = wall_components(v, f, 0.4)
+        self.assertGreater(len(components), 0)
+        self.assertEqual(straight(components, 0.42), 0, 'no lone pin or straight stub')
+        self.assertEqual(support.unbraced_runs, 0)
+        # Every wall reaches z = 9 here (lowest cap ≈ 9.8), so the slice there
+        # shows the whole mesh: each piece of it encloses a cell.
+        self.assertTrue(every_piece_has_a_cell(v, f, 9.0))
+        p = sample_points(v, f)
+        over = (p[:, 1] >= 3.0) & (p[:, 1] <= 7.0) & (p[:, 0] >= 0.0) & (p[:, 0] <= 20.0)
+        self.assertTrue(np.all(p[over, 2] <= thin_bottom(p[over, 0], p[over, 1]) - GAP + 1e-3))
+        # Walls beyond the strip stop at the highest supported point, not at
+        # the model above them (or at nothing: past the slab's ends).
+        self.assertTrue(np.all(p[:, 2] <= thin_bottom(0.0, 5.0 + THIN_BAND) - GAP + TOL))
+
+    def test_walls_cut_by_the_model_are_kept_and_counted(self):
+        # Plate-reaching plates along y = 4 and y = 6 leave no room for the
+        # x-walls there, so each y-wall between them is a lone straight stub.
+        plates = [box((-0.5, 3.8, 0.0), (20.5, 4.2, 20.0)),
+                  box((-0.5, 5.8, 0.0), (20.5, 6.2, 20.0))]
+        support = build([THIN, *plates])
+        components = wall_components(support.vertices, support.faces, 0.4)
+        stubs = straight(components, 0.42)
+        self.assertGreater(stubs, 0)
+        self.assertEqual(len(components), stubs, 'every wall here is a stub')
+        self.assertEqual(support.unbraced_runs, stubs)
+        self.assertGreater(support.unbraced_length, 0)
+
+    def test_base_lies_under_every_wall_with_no_margin(self):
+        support = build([THIN], margin=0.0, cell=0.42)
+        v, f = support.vertices, support.faces
+        self.assertEqual(pieces(v, f), 1)
+        self.assertEqual(support.unbraced_runs, 0)
+        mesh = manifold3d.Manifold(manifold3d.Mesh(vert_properties=v.astype(np.float32),
+                                                   tri_verts=f.astype(np.uint32)))
+        base = mesh.slice(0.2)
+        above = mesh.slice(0.6)
+        self.assertGreater(above.area(), 0)
+        self.assertAlmostEqual((above - base).area(), 0.0, places=6,
+                               msg='wall footprint outside the base')
+
+    def test_pitch_wider_than_the_padding_keeps_all_four_walls(self):
+        for dx, dy in ((0.0, 0.0), (3.3, 7.1)):
+            with self.subTest(offset=(dx, dy)):
+                patch = shifted(box((5.0, 5.0, 5.0), (6.0, 6.0, 8.0)), dx, dy)
+                support = build([patch], pitch=20.0)
+                v = support.vertices
+                lo = np.floor((np.array([5.0 + dx, 5.0 + dy])) / 20.0) * 20.0
+                self.assertTrue(np.all(v[:, :2].min(axis=0) <= lo + 0.42 / 2 + TOL))
+                self.assertTrue(np.all(v[:, :2].max(axis=0) >= lo + 20.0 - 0.42 / 2 - TOL))
+                self.assertTrue(has_cells(v, support.faces, 2.0))
 
     def test_flared_post_and_obstacle_beside_a_wall_end_keep_clearance(self):
         # Square frustum: 1 mm wide on the plate, 5 mm wide at z = 12, so its
@@ -237,6 +413,99 @@ class Geometry(unittest.TestCase):
                     gridsupport.GridSettings(**bad)
 
 
+class Keel(unittest.TestCase):
+
+    def assert_clear_of(self, support, rod):
+        p = sample_points(support.vertices, support.faces)
+        self.assertGreaterEqual(rod.distance(p).min(), GAP - rod.sagitta - 1e-3)
+
+    def test_rod_gets_a_keel_under_its_lowest_line_and_ribs_across(self):
+        rod = Rod((20.0, 20.0, 8.0), heading=30.0)
+        support = build_keel([rod.mesh], pitch=5.0)
+        v, f = support.vertices, support.faces
+        closed, volume = closed_and_positive(v, f)
+        self.assertTrue(closed)
+        self.assertEqual(pieces(v, f), 1)
+        (patch,) = support.patches
+        self.assertTrue(patch.keel)
+        self.assertAlmostEqual(patch.direction, 30.0, delta=1.0)
+        self.assertGreaterEqual(patch.ribs, 6)
+        self.assertEqual(support.unbraced_runs, 0)
+        self.assertEqual(support.missed_area, 0.0)
+        self.assert_clear_of(support, rod)
+        # The keel stands under the rod's lowest line along its length.
+        u, w = rod.u[:2], np.array([-rod.u[1], rod.u[0]])
+        along = np.linspace(-12.0, 12.0, 25)
+        self.assertTrue(covered_at(v, f, 2.0, rod.c[:2] + np.outer(along, u)).all())
+        # Ribs reach across the shallow band (half-width r·sin 40° = 2.57 mm)
+        # but the plate between them, beside the keel, stays bare.
+        self.assertGreater(np.ptp(v[v[:, 2] > 1.0][:, :2] @ w), 2 * 2.0)
+        between = rod.c[:2] + np.outer([-10.0, 0.0, 10.0], u) + 1.5 * w
+        gaps = []
+        for point in between:
+            offsets = (point - rod.c[:2]) @ u + np.linspace(-2.5, 2.5, 51)
+            bare = ~covered_at(v, f, 0.2, rod.c[:2] + np.outer(offsets, u) + 1.5 * w)
+            gaps.append(bare.any())
+        self.assertTrue(all(gaps), 'feet only: bare plate between ribs')
+        self.assertLess(volume, closed_and_positive(*self._grid(rod))[1] / 2)
+
+    def _grid(self, rod):
+        g = build([rod.mesh], pitch=5.0)
+        return g.vertices, g.faces
+
+    def test_two_rods_get_their_own_directions_in_one_piece(self):
+        rods = [Rod((20.0, 20.0, 8.0), heading=30.0), Rod((20.0, -5.0, 8.0), heading=-45.0)]
+        support = build_keel([r.mesh for r in rods], pitch=5.0)
+        directions = sorted(p.direction for p in support.patches if p.keel)
+        self.assertEqual(len(directions), 2)
+        self.assertAlmostEqual(directions[0], 30.0, delta=1.0)
+        self.assertAlmostEqual(directions[1], 135.0, delta=1.0)
+        self.assertEqual(pieces(support.vertices, support.faces), 1)
+        self.assertEqual(support.unbraced_runs, 0)
+        for rod in rods:
+            self.assert_clear_of(support, rod)
+
+    def test_rising_rod_and_post_beside_the_keel_end_keep_clearance(self):
+        rod = Rod((20.0, 20.0, 9.0), heading=20.0, rise=10.0)
+        end = rod.c - rod.u * (rod.length / 2 + 1.0)
+        post = box((end[0] - 0.5, end[1] - 0.5, 0.0), (end[0] + 0.5, end[1] + 0.5, 15.0))
+        support = build_keel([rod.mesh, post], pitch=5.0)
+        self.assertTrue(any(p.keel for p in support.patches))
+        self.assert_clear_of(support, rod)
+        p = sample_points(support.vertices, support.faces)
+        dx = np.maximum(np.abs(p[:, 0] - end[0]) - 0.5, 0)
+        dy = np.maximum(np.abs(p[:, 1] - end[1]) - 0.5, 0)
+        self.assertTrue(np.all(np.hypot(dx, dy) >= XY - TOL))
+        self.assertEqual(pieces(support.vertices, support.faces), 1)
+
+    def test_short_rod_gets_one_braced_rib(self):
+        rod = Rod((10.0, 10.0, 5.0), heading=60.0, radius=1.5, length=6.0)
+        support = build_keel([rod.mesh], pitch=8.0)
+        (patch,) = support.patches
+        self.assertTrue(patch.keel)
+        self.assertEqual(patch.ribs, 1)
+        self.assertEqual(support.unbraced_runs, 0)
+        self.assert_clear_of(support, rod)
+
+    def test_broad_underside_falls_back_to_the_lattice_beside_a_keel(self):
+        flat = slab(lambda x, y: np.full_like(x, 10.0), size=(10.0, 10.0), n=(10, 10), top=14.0)
+        rod = Rod((40.0, 5.0, 8.0), heading=90.0)
+        support = build_keel([flat, rod.mesh], pitch=5.0)
+        kinds = {p.keel: p for p in support.patches}
+        self.assertIn('not elongated', kinds[False].reason)
+        self.assertTrue(kinds[True].keel)
+        self.assertEqual(pieces(support.vertices, support.faces), 1)
+        lattice = support.vertices[support.vertices[:, 0] < 20.0]
+        self.assertGreater(len(lattice), 0)
+        self.assertTrue(has_cells(support.vertices, support.faces, 5.0), 'lattice cells')
+        self.assert_clear_of(support, rod)
+
+    def test_foot_narrower_than_the_wall_is_refused(self):
+        rod = Rod((20.0, 20.0, 8.0), heading=30.0)
+        with self.assertRaises(ValueError):
+            build_keel([rod.mesh], foot=0.3)
+
+
 class Cli(unittest.TestCase):
 
     def setUp(self):
@@ -247,7 +516,8 @@ class Cli(unittest.TestCase):
     def tearDown(self):
         self.dir.cleanup()
 
-    def run_cli(self, parts, *args, settings=SETTINGS, overrides=None, extra_member=None):
+    def run_cli(self, parts, *args, settings=SETTINGS, overrides=None, extra_member=None,
+                layout='grid'):
         objects = {'2': dict(parts=[dict(id=str(i + 1), mesh=m, **(dict(overrides=o) if o else {}))
                                     for i, (m, o) in enumerate(parts)],
                              overrides=overrides or {})}
@@ -257,8 +527,35 @@ class Cli(unittest.TestCase):
             with zipfile.ZipFile(self.path, 'a') as archive:
                 archive.writestr(extra_member, 'object_id=2|0|0.2\n')
         out = io.StringIO()
-        code = support_3mf.main([self.path, '--layout', 'grid', *args], out=out)
+        code = support_3mf.main([self.path, '--layout', layout, *args], out=out)
         return code, out.getvalue()
+
+    def test_keel_layout_writes_one_keel_part(self):
+        rod = Rod((10.0, 0.0, 8.0), heading=30.0)
+        code, text = self.run_cli([(rod.mesh, None)], '--max-height', '30', '--pitch', '5',
+                                  layout='keel')
+        self.assertEqual(code, support_3mf.EXIT_WRITTEN, text)
+        self.assertIn('[KEEL]', text)
+        self.assertIn('keel at', text)
+        self.assertIn('0.45 mm thick on 1.26 mm feet', text)
+        self.assertIn('Supports you paint', text)
+        out = os.path.join(self.dir.name, 'plate.keel.3mf')
+        after = bambu3mf.read(out).instances[0]
+        keels = [p for p in after.parts if p.name == support_3mf.KEEL_PART_NAME]
+        self.assertEqual(len(keels), 1)
+        self.assertEqual(pieces(keels[0].vertices, keels[0].faces), 1)
+        self.assertFalse(os.path.exists(self.out), 'no .grid.3mf for the keel layout')
+
+    def test_keel_layout_is_skipped_like_the_grid(self):
+        code, text = self.run_cli(self.shin_parts(), '--max-height', '30', layout='keel',
+                                  extra_member='Metadata/layer_heights_profile.txt')
+        self.assertEqual(code, support_3mf.EXIT_PARTIAL, text)
+        self.assertIn('variable layer heights', text)
+
+    def test_keel_wall_wider_than_its_feet_is_an_error(self):
+        code, _ = self.run_cli(self.shin_parts(), '--max-height', '30', '--width', '1.5',
+                               layout='keel')
+        self.assertEqual(code, support_3mf.EXIT_ERROR)
 
     def shin_parts(self, **post_overrides):
         return [(SHIN, None), (box((9.0, 4.0, 0.0), (11.0, 6.0, 10.5)), post_overrides or None)]

@@ -46,7 +46,7 @@ def _add_parent_pid(parser: argparse.ArgumentParser) -> None:
 def _arm_parent_death(argv) -> None:
     """Arm `proctree.exit_with_parent` from `--parent-pid`, when present.
 
-    Runs before `import batch_repair` when this file is the script, so a
+    Runs before `libs.perfile` is imported when this file is the script, so a
     child whose runner is already gone exits before loading the libraries;
     `main` repeats it for a direct `main(argv)` call (arming twice is
     harmless). Reads only `--parent-pid` and leaves every other argument,
@@ -62,8 +62,8 @@ def _arm_parent_death(argv) -> None:
 if __name__ == '__main__':
     _arm_parent_death(sys.argv[1:])
 
-import batch_repair                                                       # noqa: E402
-from libs import childresult, modellog, repairer, splitter, steplog       # noqa: E402
+from libs import childresult, modellog, perfile, pipeconfig, repairer     # noqa: E402
+from libs import splitter, steplog                                        # noqa: E402
 
 
 def run_one_file(args) -> int:
@@ -80,16 +80,18 @@ def run_one_file(args) -> int:
     step_logger = _with_separators(steplog.open_step_log(args.log_file) if args.log_file
                                    else steplog.null_logger)
     if args.mode == 'prepare':
-        result = batch_repair._prepare_one_file(
+        result = perfile.prepare_one_file(
             args.one_file, args.destination, args.max_faces, args.cache_path, step_logger,
             reconstruct_budget_bytes=args.reconstruct_budget_bytes,
+            reconstruct_ceiling_bytes=args.reconstruct_ceiling_bytes,
             min_shell_faces=args.min_shell_faces,
             reconstruction=args.reconstruction)
     else:
-        result = batch_repair._process_one_file(
+        result = perfile.process_one_file(
             args.one_file, args.destination, args.max_faces, step_logger,
             skip_clean=args.skip_clean,
             reconstruct_budget_bytes=args.reconstruct_budget_bytes,
+            reconstruct_ceiling_bytes=args.reconstruct_ceiling_bytes,
             min_shell_faces=args.min_shell_faces,
             load_path=args.load_from,
             reconstruction=args.reconstruction)
@@ -139,7 +141,9 @@ def main(argv=None) -> int:
     parser.add_argument('--log-file', metavar='PATH')
     parser.add_argument('--skip-clean', action='store_true')
     parser.add_argument('--reconstruct-budget-bytes', type=_positive_int, metavar='BYTES',
-                        default=batch_repair.pipeconfig.StepConfig.reconstruct_memory_budget_bytes)
+                        default=pipeconfig.StepConfig.reconstruct_memory_budget_bytes)
+    parser.add_argument('--reconstruct-ceiling-bytes', type=_positive_int, metavar='BYTES',
+                        default=None)
     parser.add_argument('--min-shell-faces', type=_non_negative_int, metavar='N',
                         default=splitter.MIN_SHELL_FACES)
     parser.add_argument('--reconstruction', choices=repairer.RECONSTRUCTIONS,

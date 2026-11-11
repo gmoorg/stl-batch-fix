@@ -284,6 +284,42 @@ class TestPlan(unittest.TestCase):
         self.assertGreaterEqual(e.minimum, e.floor)
         self.assertIn('budget', str(e))
 
+    def test_a_ceiling_keeps_the_choice_when_the_budget_fits(self):
+        p = winding.plan(self.m, 0.1, 10 ** 12)
+        need_two = winding.estimate_bytes(len(self.m.geometry.faces), 1256.6, 0.1, p.samples_bound,
+                                          winding._largest_block(p.shape, 2))
+        capped = winding.plan(self.m, 0.1, need_two + 1, 10 ** 13)
+        plain = winding.plan(self.m, 0.1, need_two + 1)
+        self.assertEqual((capped.blocks_per_axis, capped.estimate_bytes),
+                         (plain.blocks_per_axis, plain.estimate_bytes))
+
+    def test_no_fit_falls_back_to_the_lowest_estimate_within_the_ceiling(self):
+        with self.assertRaises(winding.BudgetError) as ctx:
+            winding.plan(self.m, 0.1, 1000)
+        lowest = ctx.exception.minimum
+        p = winding.plan(self.m, 0.1, 1000, lowest)
+        self.assertEqual(p.estimate_bytes, lowest)
+        # The fewest blocks reaching it: one block fewer estimates more.
+        if p.blocks_per_axis > 1:
+            fewer = winding.estimate_bytes(len(self.m.geometry.faces), 1256.6, 0.1, p.samples_bound,
+                                           winding._largest_block(p.shape, p.blocks_per_axis - 1))
+            self.assertGreater(fewer, lowest)
+
+    def test_a_ceiling_below_the_lowest_estimate_still_fails(self):
+        with self.assertRaises(winding.BudgetError) as ctx:
+            winding.plan(self.m, 0.1, 1000, 2000)
+        self.assertEqual(ctx.exception.ceiling, 2000)
+        self.assertIn('RAM+swap ceiling', str(ctx.exception))
+
+    def test_the_ceiling_caps_a_larger_budget(self):
+        one_block = winding.plan(self.m, 0.1, 10 ** 12)
+        capped = winding.plan(self.m, 0.1, 10 ** 12, one_block.estimate_bytes - 1)
+        self.assertLess(capped.estimate_bytes, one_block.estimate_bytes)
+        self.assertGreater(capped.blocks_per_axis, 1)
+        for ceiling in (0, -5, 1.5, True):
+            with self.subTest(ceiling=ceiling), self.assertRaises(ValueError):
+                winding.plan(self.m, 0.5, 10 ** 9, ceiling)
+
     def test_block_limit_keeps_blocks_wide_and_allows_one_for_tiny_grids(self):
         self.assertEqual(winding.max_blocks_per_axis((5, 5, 5)), 1)
         self.assertEqual(winding.max_blocks_per_axis((111, 200, 300)), 10)
@@ -299,22 +335,22 @@ class TestPlan(unittest.TestCase):
 
 class TestContract(unittest.TestCase):
 
-    def test_distance_tree_is_built_once_and_winding_queried_per_block(self):
+    def test_distance_and_winding_trees_are_built_once_for_all_blocks(self):
         m = mesh(*sphere())
-        real_aabb = winding._igl.AABB
         inits = []
 
-        class Counting(real_aabb):
-            def init(self, *a):
-                inits.append(1)
-                return super().init(*a)
+        def counting(real):
+            class Counting(real):
+                def init(self, *a):
+                    inits.append(real.__name__)
+                    return super().init(*a)
+            return Counting
 
-        with mock.patch.object(winding._igl, 'AABB', Counting), \
-             mock.patch.object(winding._igl, 'fast_winding_number',
-                               wraps=winding._igl.fast_winding_number) as fwn:
+        with mock.patch.object(winding._igl, 'AABB', counting(winding._igl.AABB)), \
+             mock.patch.object(winding._igl, 'FastWindingNumberBVH',
+                               counting(winding._igl.FastWindingNumberBVH)):
             winding.reconstruct(m, 0.5, 3)
-        self.assertEqual(len(inits), 1)
-        self.assertGreaterEqual(fwn.call_count, 27)
+        self.assertEqual(sorted(inits), ['AABB', 'FastWindingNumberBVH'])
 
     def welded_to(self, verts, faces):
         """Patch `_weld` so a reconstruction comes out as the given arrays."""
@@ -583,9 +619,9 @@ class TestStep(unittest.TestCase):
         seen = []
         real = winding.plan
 
-        def spy(mesh_, h, budget):
+        def spy(mesh_, h, budget, ceiling=None):
             seen.append(budget)
-            return real(mesh_, h, budget)
+            return real(mesh_, h, budget, ceiling)
 
         with mock.patch.object(winding, 'plan', spy):
             winding.step_winding_reconstruct(

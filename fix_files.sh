@@ -2,6 +2,7 @@
 # fix_files.sh — repair selected STL/OBJ files beside their sources.
 #
 #   ./fix_files.sh [--alpha] [--] FILE...    foo.stl -> foo_fixed.stl
+#   ./fix_files.sh --large [--] FILE         one big file, RAM+swap, no time limit
 #
 # Options come from batch_repair.toml, as for ./fix.sh. The right-click
 # entries (tools/nemo/) set STL_FIX_HOLD=1 so the terminal window waits for

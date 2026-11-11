@@ -4,6 +4,26 @@ Repair STL batches for FDM printing while preserving meaningful geometry.
 Implementation: `libs/` and `batch_repair.py`. The pre-refactor script
 (`stl_batch_fix.py` and its TUI) lives only on the `old-script` branch.
 
+## Scripts
+
+| Script | What it does |
+| --- | --- |
+| `fix.sh` | Batch-repair the source folder using `batch_repair.toml` (`--alpha` for alpha-wrap). |
+| `batch_repair.py` | The batch runner `fix.sh` calls: runs a pool of isolated per-file children. |
+| `batch_repair_child.py` | Internal: repairs one file for `batch_repair.py`. Not for direct use. |
+| `fix_files.sh` / `fix_files.py` | Repair selected files beside their sources (`foo.stl` → `foo_fixed.stl`); `--large` for one huge model using RAM+swap. |
+| `check_3mf.py` | Read-only check of a Bambu Studio 3MF for base-layer print risks. |
+| `support_3mf.py` | Write a new 3MF with generated support (ribs, grid or keels) under undersides. |
+| `install.sh` | Check and install dependencies into the project venv. |
+| `tools/project_python.sh` | Run Python with the project venv (`/mnt/sda2/python/.venv`). |
+| `tools/install_nemo_actions.sh` | Add the "STL fix" right-click submenu to Nemo for .stl/.obj files. |
+| `tools/nemo_layout.py` | Helper for the above: puts the actions in Nemo's submenu layout. |
+| `tools/make_probe_meshes.py` | Regenerate disposable single-defect probe meshes for manual surveys. |
+| `tools/ask_codex.sh`, `run_codex.sh`, `reset_codex.sh`, `find_codex.sh`, `codex_session.py` | Agent collaboration: ask/run Codex, reset its sessions, locate its binary. |
+| `tools/experiments/*.py` | One-off measurement probes behind past decisions (decimation, welding, winding, memory). |
+
+Libraries live in `libs/`; tests and fixture builders in `tests/tests/`.
+
 ## Read only what the task needs
 
 - Module behavior: the relevant entry in [modules](docs/refactor/modules.md),
@@ -61,13 +81,24 @@ a part whose only defect is non-manifold edges tries MeshFix alone first.
 self-intersections, which are what alpha-wrap is used to remove.
 
 To fix individual files where they are, select them in Nemo (Cinnamon's
-file manager), right-click and choose **STL fix** or **STL alpha fix**
-(`--alpha`). Install the two entries once with
-`tools/install_nemo_actions.sh`; the same works from a shell:
+file manager), right-click and choose **STL fix → STL fix**, **STL alpha
+fix** (`--alpha`) or **STL fix large (RAM+swap)** (`--large`, one file).
+Install the submenu once with `tools/install_nemo_actions.sh` (it merges
+into Nemo's `~/.config/nemo/actions-tree.json`, keeping your other entries;
+close Nemo windows for it to show); the same works from a shell:
 
 ```bash
 ./fix_files.sh [--alpha] -- "my models/foot.stl" "my models/leg.obj"
+./fix_files.sh --large -- "my models/bust.stl"
 ```
+
+`--large` is for one model that fails with `BudgetError` (its part does not
+fit `reconstruct_memory_budget_gb`). It runs with one worker, no per-file
+time limit, and an allowance of `memory_budget_fraction` × (available RAM +
+free swap) read at start. Parts that fit the configured target are planned
+as usual. A part that does not is rebuilt in the split with the lowest
+memory estimate, provided it fits the allowance, so it uses swap only for
+what RAM cannot hold. Swapping is slow: expect hours. Ctrl+C stops it.
 
 Each `foo.stl`/`foo.obj` gets `foo_fixed.stl` beside it, or a marker such as
 `foo_fixed.failed.stl`, replacing earlier results of that file; the model
